@@ -12,6 +12,13 @@ Using this repo requires **PyTorch 2.3.0** and **CUDA 12.1** (other CUDA version
 
 ### Installing vAttention and Sarathi-Serve
 
+Create and activate a conda environment first:
+
+```sh
+conda create -n vattention python=3.10
+conda activate vattention
+```
+
 Please download and extract libtorch first (this is required to build the vattention memory allocator), and then build sarathi-serve and vattention as follows:
 
 ```sh
