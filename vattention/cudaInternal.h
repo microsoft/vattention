@@ -75,16 +75,14 @@ int reserve_cuda_pages(size_t num_layers, size_t free_memory)
 {
     Log log;
     unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory);
-    log.log("Reserving " + std::to_string(num_phys_blocks) + " physical memory handles of size " + std::to_string(page_size_bytes) + " ...");
-    int blocks_reserved = 0;
-    for (int i = 0; i < num_phys_blocks; i++)
+    log.log("Reserving " + std::to_string(num_phys_blocks) + " pages of size " + std::to_string(page_size_bytes) + " ...");
+    while (page_handles.size() < num_phys_blocks)
     {
         CUmemGenericAllocationHandle handle;
         CHECK_CUDA(cuMemCreate(&handle, page_size_bytes, &prop, 0));
         page_handles.push_back(handle);
-        blocks_reserved++;
     }
-    return blocks_reserved;
+    return page_handles.size();
 }
 
 int reserve_uvm_pages(size_t num_layers, size_t free_memory)
@@ -92,16 +90,14 @@ int reserve_uvm_pages(size_t num_layers, size_t free_memory)
     /* This method must be called only after do_cuda_init */
     Log log;
     unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory);
-    log.log("Reserving " + std::to_string(num_phys_blocks) + " physical memory handles " + std::to_string(page_size_bytes) + " ...");
-    int blocks_reserved = 0;
-    for (int i = 0; i < num_phys_blocks; i++)
+    log.log("Reserving " + std::to_string(num_phys_blocks) + " pages " + std::to_string(page_size_bytes) + " ...");
+    while (page_handles.size() < num_phys_blocks)
     {
         NvU64 handle;
         CHECK_VATTN(vattn_get_mem_handle(&handle));
         uvm_page_handles.push_back(handle);
-        blocks_reserved++;
     }
-    return blocks_reserved;
+    return uvm_page_handles.size();
 }
 
 int reserve_gpu_pages(size_t num_layers, size_t free_memory, bool use_uvm_backend = false)

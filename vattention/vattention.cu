@@ -805,9 +805,12 @@ public:
             do_uvm_kvcache_cleanup();
             return;
         }
-        /* TODO (ashish): Fix error in cuMemAddressFree. */
-        return;
         do_cuda_kvcache_cleanup();
+        k_tensors.clear();
+        v_tensors.clear();
+        page_handles.clear();
+        uvm_page_handles.clear();
+        log.log("released memory and cleaned up vattention ...");
     }
 };
 
