@@ -38,9 +38,9 @@ For experiments related to vAttention, the following are the most important knob
 
 This repository includes **two** template benchmark scripts:
 
-1. [benchmark_e2e_dynamic_tracey.py](scripts/benchmark_dynamic_trace_latency.py): This script is to run expriments on a dynamic trace. It runs **256** requests from the **_sharegpt dataset_** for qps of 0.4, 0.8, 1, 2, 4 and 6 where requests arrive in an interval of **_poisson_** distribution.
+1. [benchmark_e2e_dynamic_trace.py](scripts/benchmark_e2e_dynamic_trace.py): This script is to run expriments on a dynamic trace. It runs **256** requests from the **_arxive dataset_** for qps of 0.4, 0.8, 1, 2, 4 and 6 where requests arrive in an interval of **_poisson_** distribution.
 
-1. [benchmark_e2e_static_trace.py](scripts/benchmark_e2e_static.py): This script is for static end-to-end benchmarking experiments to reproduce the results in the paper. The script runs 50 requests for context length 32k, 64k and 128k and prefill to decode ratio of 500, 100 and 50. Results should be generated for `fa_paged`, `fi_paged`, `fa_vattn`.
+1. [benchmark_e2e_static_trace.py](scripts/benchmark_e2e_static_trace.py): This script is for static end-to-end benchmarking experiments to reproduce the results in the paper. The script runs 50 requests for context length 32k, 64k and 128k and prefill to decode ratio of 500, 100 and 50. Results should be generated for `fa_paged`, `fi_paged`, `fa_vattn`.
 
 ```sh
 # run benchmark scripts as follows:
