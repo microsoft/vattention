@@ -1,0 +1,10 @@
+*.pyc
+*.so
+*.o
+vllm/build/*
+vllm/*egg-info
+vattention/build
+vllm/*.pdf
+vattention/dist
+vattention/*egg-info
+sarathi-lean/*egg-info
