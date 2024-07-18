@@ -7,19 +7,19 @@ import utils
 num_requests = 50
 gpu_mem_util = 0.9
 
+models = utils.models
 attention_backends = ['fa_paged', 'fi_paged', 'fa_vattn', 'fi_vattn']
 context_lengths = [32768, 65536, 131072]
 pd_ratios = [500, 100, 50]
 
 # fixed
 src, root, main = utils.get_paths()
-experiment_dir = os.path.join(root, 'experiments', 'e2e_static_eval')
-
-models = utils.models
+experiment_dir = utils.static_experiment_dir
 
 # for quick testing
-models, attention_backends = {'01-ai/Yi-6B-200k'}, ['fa_paged', 'fa_vattn']
-num_requests, context_lengths, pd_ratios = 5, [32768], [500]
+if utils.args.test == True:
+    models, attention_backends = {'01-ai/Yi-6B-200k'}, ['fa_paged', 'fa_vattn']
+    num_requests, context_lengths, pd_ratios = 10, [32768], [500]
 
 for model in models:
     for backend in attention_backends:
@@ -48,7 +48,7 @@ for model in models:
                     '--model_max_model_len', str(max_tokens),
                     '--metrics_store_enable_op_level_metrics', 'false',
                     '--metrics_store_keep_individual_batch_metrics', 'true',
-                    '--output_dir', f'{experiment_dir}/{model_file_name}_attn_{backend}_cl_{context_len}_pd_{p_d}/',
+                    '--output_dir', f'{experiment_dir}/model_{model_file_name}_tp_{tp_dim}_attn_{backend}_cl_{context_len}_pd_{p_d}_reqs_{num_requests}/',
                     '--synthetic_request_generator_num_requests', str(num_requests),
                     '--trace_request_generator_max_tokens', str(max_tokens),
                     '--model_block_size', str(kv_block_size),

@@ -3,23 +3,26 @@ import sys
 import os
 import utils
 
+
 # configurable
 num_requests = 256
 gpu_mem_util = 0.9
 max_batch_size = 256
 
+models = utils.models
 attention_backends = ['fa_paged', 'fi_paged', 'fa_vattn', 'fi_vattn']
 qps_values = [0.4, 0.8, 1, 2, 4, 6]
 chunk_size = 4096
 
 # fixed
 src, root, main = utils.get_paths()
-experiment_dir = os.path.join(root, 'experiments', 'e2e_dynamic_eval')
+experiment_dir = utils.dynamic_experiment_dir
 dataset_path = os.path.join(root, 'sarathi-lean', utils.dataset_subpath)
 
 # for quick testing
-models, attention_backends = {'01-ai/Yi-6B-200k'}, ['fa_paged', 'fa_vattn']
-num_requests, qps_values = 16, [1]
+if utils.args.test == True:
+    models, attention_backends = {'01-ai/Yi-6B-200k'}, ['fa_paged', 'fa_vattn']
+    num_requests, qps_values = 8, [1, 2]
 
 for model in models:
     for qps in qps_values:
@@ -47,7 +50,7 @@ for model in models:
                     '--model_max_model_len', str(max_tokens),
                     '--metrics_store_enable_op_level_metrics', 'false',
                     '--metrics_store_keep_individual_batch_metrics', 'false',
-                     '--output_dir', f'{experiment_dir}/{utils.dataset_name}/{model_file_name}_attn_{backend}_qps_{qps}/',
+                     '--output_dir', f'{experiment_dir}/dataset_{utils.dataset_name}_model_{model_file_name}_tp_{tp_dim}_attn_{backend}_qps_{qps}_reqs_{num_requests}/',
                     '--synthetic_request_generator_num_requests', str(num_requests),
                     '--trace_request_length_generator_max_tokens', str(max_tokens),
                     '--trace_request_length_generator_min_tokens', str(0),
