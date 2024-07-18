@@ -12,13 +12,6 @@ Using this repo requires **PyTorch 2.3.0** and **CUDA 12.1** (other CUDA version
 
 ### Installing vAttention and Sarathi-Serve
 
-Create and activate a conda environment first:
-
-```sh
-conda create -n vattention python=3.10
-conda activate vattention
-```
-
 Please download and extract libtorch first (this is required to build the vattention memory allocator), and then build sarathi-serve and vattention as follows:
 
 ```sh
@@ -36,9 +29,9 @@ cd vattention/
 LIBTORCH_PATH=<path to libtorch dir> python setup.py install
 cd ../
 ```
-# Running a benchmark
+# Running benchmarks
 
-Sarathi-Serve is an LLM serving system. The repo provides a benchmark-runner which can be used to run different workloads (dynamic/static, datasets/synthetic) with various attention-backends and schedulers. The benchmark-runner provides a comprehensive list of configuration knobs listed in [default.yml](sarathi-lean/sarathi/benchmark/config/default.yml). A thorough explaination of the knobs can be found here: [Sarathi-Serve](sarathi-lean/sarathi/benchmark/README.md).
+The repo provides a benchmark-runner which can be used to run different workloads (dynamic/static, datasets/synthetic) with various attention-backends and schedulers. The benchmark-runner provides a comprehensive list of configuration knobs listed in [default.yml](sarathi-lean/sarathi/benchmark/config/default.yml). A thorough explaination of the knobs can be found here: [Sarathi-Serve](sarathi-lean/sarathi/benchmark/README.md).
 
 For experiments related to vAttention, the following are the most important knobs (note that the knobs are case-insensitive):
 - `attention_backend` : Specify the attention kernel to be used for attention. Currently supports `fa_paged`, `fi_paged`, `fa_vattn`, `fi_vattn`, `fa_vattn_sync`, `fi_vattn_sync` where *'fa'* denotes FLASHATTENTION and *'fi'* denotes FLASHINFER. We tested v2.5.9 for FLASHATTENTION and v0.0.6 for FLASHINFER. More details on the backends can be found here: [Attention Backends](#attention-backends).
@@ -56,7 +49,14 @@ or
 python scripts/benchmark_e2e_dynamic_trace.py
 ```
 
-Benchmark results are redirected to `experiments/e2e_dynamic_eval` or `experiments/e2e_dynamic_eval`. By default, the scripts run Yi-6B (single GPU). Other models such as Llama-2-7b, Llama-2-13B, Llama-2-70B, Llama-3-8B, Yi-9B, Yi-34B, and Llama-3-70B are also supported along with tensor-parallelism.
+Benchmark results are redirected to `experiments/e2e_static_eval` or `experiments/e2e_dynamic_eval`. Model configurations can be found in `scripts/utils.py` (all Yi and Llama family of models are expected to work). Parse benchmark results as follows:
+
+```sh
+python scripts/process_e2e_static.py
+or
+python scripts/process_e2e_dynamic.py
+```
+
 
 <br/>
 

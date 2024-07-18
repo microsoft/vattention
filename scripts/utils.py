@@ -1,8 +1,16 @@
 import os
+import argparse
+
+parser = argparse.ArgumentParser(description='Run e2e dynamic trace experiments')
+parser.add_argument('--test', action='store_true', help='Run a test experiment')
+args = parser.parse_args()
 
 src = os.path.dirname(os.path.abspath(__file__))
 root = os.path.dirname(src)
 main = os.path.join(root, 'sarathi-lean', 'sarathi', 'benchmark', 'main.py')
+
+static_experiment_dir = os.path.join(root, 'experiments', 'e2e_static_eval')
+dynamic_experiment_dir = os.path.join(root, 'experiments', 'e2e_dynamic_eval')
 
 # dataset_subpath = 'data/processed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv'
 # dataset_name = 'sharegpt'
@@ -32,3 +40,24 @@ def get_max_context_length(attn_backend, context_len):
 
 def get_paths():
     return src, root, main
+
+def extract_substr(log, start_sub, end_sub):
+    start_index = log.find(start_sub)
+    if start_index == -1:
+        return None
+    start_index += len(start_sub)
+
+    end_index = log.find(end_sub, start_index)
+    if end_index == -1:
+        return None
+
+    return log[start_index:end_index].strip("/")
+
+def get_output_files(experiment_dir, log_file='sequence_metrics.csv'):
+    logs = []
+    for dirpath, dirnames, filenames in os.walk(experiment_dir):
+        for filename in filenames:
+            log = os.path.join(dirpath, filename)
+            if log.endswith(log_file):
+                logs.append(log)
+    return logs
