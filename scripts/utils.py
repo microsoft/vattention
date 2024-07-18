@@ -4,10 +4,10 @@ src = os.path.dirname(os.path.abspath(__file__))
 root = os.path.dirname(src)
 main = os.path.join(root, 'sarathi-lean', 'sarathi', 'benchmark', 'main.py')
 
-dataset_subpath = 'data/processed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv'
-dataset_name = 'sharegpt'
-# dataset_subpath = 'data/processed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv'
-# dataset_name = 'arxiv'
+# dataset_subpath = 'data/processed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv'
+# dataset_name = 'sharegpt'
+dataset_subpath = 'data/processed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv'
+dataset_name = 'arxiv'
 
 # upper limit on maximum context length for dynamic traces
 MAX_CONTEXT_LENGTH_DYNAMIC_TRACES = 32768
