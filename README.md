@@ -1,6 +1,6 @@
 # Introduction
 
-vAttention is a memory manager for KV cache in LLM serving systems. The key feature of vAttention is that it adds support for dynamic memory allocation to unmodified attention kernels, enabling more efficient use of GPU memory without re-writing GPU kernels. We achieve this by storing KV cache in contiguous virtual memory while leverating system (CUDA) support for dynamic allocation of physical memory. vAttention also improves performance in many cases, over the state-of-the-art PagedAttention approach, especially for prefill-bound workloads. Please checkout our [paper](https://arxiv.org/abs/2405.04437) for more details.
+vAttention is a KV cache memory manager for LLM serving systems. It enables dynamic memory allocation for unmodified attention kernels by storing KV cache in contiguous virtual memory and leveraging system support (CUDA virtual memory APIs) for on-demand allocation of physical memory. This is in startk contrast to the popular [PagedAttention](https://blog.vllm.ai/2023/06/20/vllm.html) approach that implements demand paging in user space and requires rewriting custom kernels to support dynamic memory allocation.  vAttention also improves performance over PagedAttention in many cases, especially for prefill-bound workloads. Please checkout our [paper](https://arxiv.org/abs/2405.04437) for more details.
 
 # Getting Started
 
@@ -12,7 +12,14 @@ Using this repo requires **PyTorch 2.3.0** and **CUDA 12.1** (other CUDA version
 
 ### Installing vAttention and Sarathi-Serve
 
-Please download and extract libtorch first (this is required to build the vattention memory allocator), and then build sarathi-serve and vattention as follows:
+Create a conda environment as follows:
+
+```sh
+conda create -n vattn python=3.10
+conda activate vattn
+```
+
+Now, download and extract libtorch first (this is required to build the vattention memory allocator), and then build sarathi-serve and vattention as follows:
 
 ```sh
 # the libtorch version has to match with the torch version, and we have tested only v2.3.0
