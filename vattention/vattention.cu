@@ -801,11 +801,10 @@ public:
     /* TODO(ashish): check if this is compatible with PyTorch destructor */
     void cleanup() {
         wait_kvcache_manager_sync();
-        if (use_uvm_backend) {
+        if (use_uvm_backend)
             do_uvm_kvcache_cleanup();
-            return;
-        }
-        do_cuda_kvcache_cleanup();
+        else
+            do_cuda_kvcache_cleanup();
         k_tensors.clear();
         v_tensors.clear();
         page_handles.clear();

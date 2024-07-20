@@ -91,7 +91,7 @@ int reserve_uvm_pages(size_t num_layers, size_t free_memory)
     Log log;
     unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory);
     log.log("Reserving " + std::to_string(num_phys_blocks) + " pages " + std::to_string(page_size_bytes) + " ...");
-    while (page_handles.size() < num_phys_blocks)
+    while (uvm_page_handles.size() < num_phys_blocks)
     {
         NvU64 handle;
         CHECK_VATTN(vattn_get_mem_handle(&handle));
