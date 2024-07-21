@@ -10,7 +10,7 @@ gpu_mem_util = 0.9
 max_batch_size = 256
 
 models = utils.models
-attention_backends = ['fa_paged', 'fi_paged', 'fa_vattn', 'fi_vattn']
+attention_backends = ['fa_paged_256', 'fi_paged_16', 'fa_vattn_2mb', 'fa_vattn_256kb', 'fi_vattn_2mb', 'fi_vattn_256kb']
 qps_values = [0.4, 0.8, 1, 2, 4, 6]
 chunk_size = 4096
 
@@ -21,16 +21,17 @@ dataset_path = os.path.join(root, 'sarathi-lean', utils.dataset_subpath)
 
 # for quick testing
 if utils.args.test == True:
-    models, attention_backends = {'01-ai/Yi-6B-200k'}, ['fa_paged', 'fa_vattn']
-    num_requests, qps_values = 8, [1, 2]
+    models, attention_backends = {'01-ai/Yi-6B-200k'}, ['fa_vattn_256kb', 'fa_vattn_2mb']
+    num_requests, qps_values = 8, [1]
 
 for model in models:
     for qps in qps_values:
         for backend in attention_backends:
             model_file_name = utils.models[model]['logentry']
             tp_dim = utils.models[model]['tp']
-            kv_block_size = 2048 if 'fa' in backend.lower() else 16
             max_tokens = utils.get_max_context_length(backend, utils.MAX_CONTEXT_LENGTH_DYNAMIC_TRACES)
+            kv_block_size = utils.get_block_or_page_size(backend)
+            attn_backend_arg = utils.get_backend(backend)
             command = [
                 'python', main,
                     '--model_name', model,
@@ -55,7 +56,7 @@ for model in models:
                     '--trace_request_length_generator_max_tokens', str(max_tokens),
                     '--trace_request_length_generator_min_tokens', str(0),
                     '--model_block_size', f'{kv_block_size}',
-                    '--model_attention_backend', f'{backend}',
+                    '--model_attention_backend', f'{attn_backend_arg}',
                     '--gpu_memory_utilization', f'{gpu_mem_util}',
                 ]
             # assert dataset_name in dataset_path

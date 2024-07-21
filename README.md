@@ -1,14 +1,14 @@
 # Introduction
 
-vAttention is a KV cache memory manager for LLM serving systems. It enables dynamic memory allocation for unmodified attention kernels by storing KV cache in contiguous virtual memory and leveraging system support (CUDA virtual memory APIs) for on-demand allocation of physical memory. This is in startk contrast to the popular [PagedAttention](https://blog.vllm.ai/2023/06/20/vllm.html) approach that implements demand paging in user space and requires rewriting custom kernels to support dynamic memory allocation.  vAttention also improves performance over PagedAttention in many cases, especially for prefill-bound workloads. Please checkout our [paper](https://arxiv.org/abs/2405.04437) for more details.
+vAttention is a memory manager for KV-cache in LLM serving systems. It adds support for dynamic memory allocation to unmodified attention kernels, by storing KV-cache in contiguous virtual memory and leveraging system support ([CUDA virtual memory APIs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__VA.html)) for on-demand allocation of physical memory. This way of memory management is different from the popular [PagedAttention](https://blog.vllm.ai/2023/06/20/vllm.html) approach; PagedAttention implements demand paging in user space and requires rewriting custom kernels to support dynamic memory allocation. vAttention also improves performance over PagedAttention in many cases, especially for prefill-bound workloads. Please checkout our [paper](https://arxiv.org/abs/2405.04437) for more details.
 
 # Getting Started
 
-This repository contains an implementation of vAttention, intergrated with an LLM serving system Sarathi-Serve ([paper](https://www.usenix.org/conference/osdi24/presentation/agrawal), [code](https://github.com/microsoft/sarathi-serve)) published in OSDI'24.
+This repository contains an implementation of vAttention, intergrated with an LLM serving system Sarathi-Serve that was published in OSDI'24 ([paper](https://www.usenix.org/conference/osdi24/presentation/agrawal), [code](https://github.com/microsoft/sarathi-serve)).
 
 # Installation
 
-Using this repo requires **PyTorch 2.3.0** and **CUDA 12.1** (other CUDA versions may or may not work). We have tested vAttention on **A100 GPUs** using **python 3.10.13** but expect it to work on other systems as long as they are running the specified CUDA and PyTorch versions.
+Using this repo requires **PyTorch 2.3.0** and **CUDA 12.1** (or later but other CUDA versions may or may not work). We have tested vAttention on **A100 GPUs** using **python 3.10** but expect it to work on other systems as long as they are running the specified CUDA and PyTorch versions.
 
 ### Installing vAttention and Sarathi-Serve
 
@@ -38,19 +38,24 @@ cd ../
 ```
 # Running benchmarks
 
-The repo provides a benchmark-runner which can be used to run different workloads (dynamic/static, datasets/synthetic) with various attention-backends and schedulers. The benchmark-runner provides a comprehensive list of configuration knobs listed in [default.yml](sarathi-lean/sarathi/benchmark/config/default.yml). A thorough explaination of the knobs can be found here: [Sarathi-Serve](sarathi-lean/sarathi/benchmark/README.md).
+The repo provides a benchmark-runner which can be used to run different workloads (dynamic/static, datasets/synthetic) with various attention-backends and schedulers. The benchmark-runner provides a comprehensive list of configuration knobs listed in [default.yml](sarathi-lean/sarathi/benchmark/config/default.yml). Please check [Sarathi-Serve](sarathi-lean/sarathi/benchmark/README.md) for a detailed explanation of the knobs.
 
-For experiments related to vAttention, the following are the most important knobs (note that the knobs are case-insensitive):
-- `attention_backend` : Specify the attention kernel to be used for attention. Currently supports `fa_paged`, `fi_paged`, `fa_vattn`, `fi_vattn`, `fa_vattn_sync`, `fi_vattn_sync` where *'fa'* denotes FLASHATTENTION and *'fi'* denotes FLASHINFER. We tested v2.5.9 for FLASHATTENTION and v0.0.6 for FLASHINFER. More details on the backends can be found here: [Attention Backends](#attention-backends).
+For experiments related to vAttention, the following are the most important knobs (these are case-insensitive):
+- `attention_backend` : Specify the attention kernel to be used. Currently supports `fa_paged_[block_size]`, `fi_paged_[block_size]`, `fa_vattn_[page_size]`, `fi_vattn_[page_size]`, `fa_vattn_[page_size]_sync`, `fi_vattn_[page_size]_sync` where `fa` denotes FlashAttention (we tested v2.5.9) and `fi` denotes FlashInfer (we tested v0.0.6). We recommend using block size 256 for FlashAttention and 16 for FlashInfer (set the knobs as `fa_paged_256`, `fi_paged_16`) because we have observed them performing best with these block sizes. vAttention supports 64KB, 128KB, 256KB and 2MB page sizes (example knobs: `fa_vattn_256kb`, `fi_vattn_2mb_sync`). Using suffix `_sync` in vAttention knob disables our optimization of overlapping memory allocation with compute (i.e., GPU physical memory is allocated synchronously). More details on the backends can be found here: [Attention Backends](#attention-backends).
 
 This repository includes **two** template benchmark scripts:
 
 1. [benchmark_e2e_dynamic_trace.py](scripts/benchmark_e2e_dynamic_trace.py): This script is to run expriments on a dynamic trace. It runs **256** requests from the **_arxive dataset_** for qps of 0.4, 0.8, 1, 2, 4 and 6 where requests arrive in an interval of **_poisson_** distribution.
 
-1. [benchmark_e2e_static_trace.py](scripts/benchmark_e2e_static_trace.py): This script is for static end-to-end benchmarking experiments to reproduce the results in the paper. The script runs 50 requests for context length 32k, 64k and 128k and prefill to decode ratio of 500, 100 and 50. Results should be generated for `fa_paged`, `fi_paged`, `fa_vattn`.
+1. [benchmark_e2e_static_trace.py](scripts/benchmark_e2e_static_trace.py): This script is for static end-to-end benchmarking experiments to reproduce the results in the paper. The script runs 50 requests for context length 32k, 64k and 128k and prefill to decode ratio of 500, 100 and 50.
 
 ```sh
-# run benchmark scripts as follows:
+# testing the setup:
+python scripts/benchmark_e2e_static_trace.py --test
+or 
+python scripts/benchmark_e2e_dynamic_trace.py --test
+
+# run benchmarks for performance evaluation as follows:
 python scripts/benchmark_e2e_static_trace.py
 or
 python scripts/benchmark_e2e_dynamic_trace.py
@@ -69,7 +74,7 @@ python scripts/process_e2e_dynamic.py
 
 # Implementation Details
 
-vAttention delegates the responsibility of memory management to the kernel space (CUDA drivers). By separating the allocation of virtual and physical memory, and allocating physical memory on demand, it provides a contiguous interface to the per-request KV cache without compromising on efficiency of GPU kernels. 
+vAttention delegates the responsibility of memory management to CUDA drivers that run in the OS kernel space. By decoupling the allocation of virtual and physical memory, vAttention enables allocating physical memory on demand while retaining the virtual memory contiguity of KV-cache.
 
 Integrating vAttention into an LLM serving system is simple. We choose Sarathi-Serve to exemplify this because Sarathi-Serve is a state-of-the-art LLM inference scheduler, has an elaborate metric store and a versatile benchmark_runner that makes running traces and performing experiments easy. Furthermore, its modular setup for the attention backends makes it easy to add more attention backends.
 
@@ -77,37 +82,37 @@ The core of our code changes are as follows:
 
 - [vATTN_cache_engine.py](sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py):
 
-    A `vATTNCacheEngine` class initializes and manages some aspects of the KV cache in python land e.g., mapping the sequence id of a request to its batch index in the KV cache, and the current context length of the each request [like vLLMCacheEngine].
+    A `vATTNCacheEngine` class initializes and manages some aspects of the KV cache in python land e.g., mapping the sequence id of a request to its batch index in the KV-cache, and the current context length of the each request [like vLLMCacheEngine]. A serving system initializes the vAttention memory allocator as follows:
 
-    - But unlike its vLLM counterpart, when an object of this class is instantiated, it calls:
+    ```sh
+    vattention.init_kvcache(
+        self.num_layers,
+        self.num_heads,
+        self.head_size,
+        self.max_batch_size,
+        self.max_model_seq_len,
+        self.device_idx,
+        self.dtype,
+        USE_UVM)
+    ```
 
-        ```sh
-        vattention.init_kvcache(
-            self.num_layers,
-            self.num_heads,
-            self.head_size,
-            self.max_batch_size,
-            self.max_model_seq_len,
-            self.device_idx,
-            self.dtype,
-            USE_UVM)
-        ```
+    which returns **virtual** PyTorch tensors without any physical memory mapped underneath. The serving system can also reserve physical memory for KV-cache ahead-of-time as follows:
 
-        which returns **virtual** PyTorch tensors without any physical memory mapped underneath.
-        <br/>
-
-    - vATTNCacheEngine also calls the following api
-
-        ```sh
-        vattention.reserve_physical_pages(cache_config.memory_for_gpu)
-        ```
-        which pre-allocates physical memory pages on the GPU for KV cache. These pages are then attached to the virtual memory tensors at runtime. 
+    ```sh
+    vattention.reserve_physical_pages(cache_config.memory_for_gpu)
+    ```
+    
+    which pre-allocates physical memory pages on the GPU. These pages are then attached to the virtual tensors at runtime. 
 
 - [base_worker.py](sarathi-lean/sarathi/worker/base_worker.py)
 
     - before the model forward pass, the worker calls
         ```sh
+        # asynchronous memory allocation
         vattention.step_async(self.curr_seq_lens)
+        or
+        # synchronous memory allocation
+        vattention.step(self.curr_seq_lens)
         ```
         which allocates physical memory pages for the active requests, based on their requirement.
 
@@ -128,18 +133,19 @@ We have modified Sarathi-Serve to support the following backends:
 
     This backend implements non-paged prefill and decode using [flash_attention](https://github.com/Dao-AILab/flash-attention)'s `flash_attn_with_kvcache` API [for both prefill and decode computation]
 
-    Can be accessed by setting the values of *'--attention_backend'* to *'fa_vattn'*
+    Can be accessed by setting the values of `--attention_backend` to `fa_vattn_[page_size]` or `fa_vattn_[page_size]_sync`
 
 2. [vattention_flashinfer_wrapper.py](sarathi-lean/sarathi/model_executor/attention/vattention_flashinfer_wrapper.py):
 
     This backend implements non-paged prefill using [flashinfer](https://github.com/flashinfer-ai/flashinfer)'s `flashinfer.prefill.single_prefill_with_kv_cache` and non-paged decode using flash_attention's `flash_attn_with_kvcache`
 
-    Can be accessed by setting the values of *'--attention_backend'* to *'fi_vattn'*
+    Can be accessed by setting the values of `--attention_backend` to `fi_vattn_[page_size]` or `fi_vattn_[page_size]_sync`.
 
-Note: Using *'fa_vattn'* or *'fi_vattn'* automatically runs vAttention with asynchronous memory allocation. To access the synchronous version, add suffix *'_sync'* to the *'--attention_backend'* knob. For example, if you want to run *'fa_vattn'* or *'fi_vattn'* with synchronous memory allocation, supply *'fa_vattn_sync'* or *'fi_vattn_sync'* to *'--attention_backend'*.
+## Using smaller page sizes
 
-Our current release supports only 2MB pages. Support for smaller pages (e.g., 64KB) is work-in-progress.
+NVIDIA CUDA drivers allocate memory only at the granularity of large pages (2MB or above). If you want to use smaller page sizes of 64KB, 128KB or 256KB with vAttention, please follow the [README.md](./nvidia-vattn-uvm-driver/README.md) to replace the default CUDA UVM driver with our custom driver (nvidia-vattn-uvm-driver).
 
+**NOTE:** Replacing CUDA drivers is not required if you only want to use vAttention with 2MB pages.
 
 ## Citation
 

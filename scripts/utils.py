@@ -1,6 +1,9 @@
 import os
 import argparse
 
+KB = 1024
+MB = 1024 * KB
+
 parser = argparse.ArgumentParser(description='Run e2e dynamic trace experiments')
 parser.add_argument('--test', action='store_true', help='Run a test experiment')
 args = parser.parse_args()
@@ -61,3 +64,31 @@ def get_output_files(experiment_dir, log_file='sequence_metrics.csv'):
             if log.endswith(log_file):
                 logs.append(log)
     return logs
+
+def get_block_or_page_size(attn_backend):
+    if '64kb' in attn_backend.lower():
+        return 64 * KB
+    elif '128kb' in attn_backend.lower():
+        return 128 * KB
+    elif '256kb' in attn_backend.lower():
+        return 256 * KB
+    elif '2mb' in attn_backend.lower():
+        return 2 * MB
+    elif 'fa_paged' in attn_backend.lower():
+        return attn_backend.split('_')[-1]
+    elif 'fi_paged' in attn_backend.lower():
+        return attn_backend.split('_')[-1]
+    else:
+        raise ValueError(f"Unsupported attention backend: {attn_backend}")
+
+def get_backend(attn_backend):
+    if 'fa_vattn' in attn_backend.lower():
+        return 'fa_vattn_sync' if '_sync' in attn_backend else 'fa_vattn'
+    elif 'fi_vattn' in attn_backend.lower():
+        return 'fi_vattn_sync' if '_sync' in attn_backend else 'fi_vattn'
+    elif 'fa_paged' in attn_backend.lower():
+        return 'fa_paged'
+    elif 'fi_paged' in attn_backend.lower():
+        return 'fi_paged'
+    else:
+        raise ValueError(f"Unsupported attention backend: {attn_backend}")
