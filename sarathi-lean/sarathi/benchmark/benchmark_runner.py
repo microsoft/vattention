@@ -194,6 +194,7 @@ class BenchmarkRunner:
         self._run()
         self._llm_engine.pull_worker_metrics()
         metric_store = self._llm_engine.get_metric_store()
+        self._llm_engine.cleanup()
         return metric_store
 
 

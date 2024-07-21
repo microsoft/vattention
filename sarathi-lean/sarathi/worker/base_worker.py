@@ -244,6 +244,9 @@ class BaseWorker:
             f"{self.metrics_config.output_dir}/profiler_trace_rank_{self.rank}.json"
         )
 
+    @synchronized
+    def cleanup(self) -> None:
+        self.cache_engine.cleanup_kvcache()
 
 def _init_distributed_environment(
     parallel_config: ParallelConfig,

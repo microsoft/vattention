@@ -24,7 +24,7 @@
         }                                                                   \
     } while (0)
 
-unsigned long get_num_phys_blocks(size_t num_layers, size_t free_memory)
+unsigned long get_num_phys_blocks(size_t num_layers, size_t free_memory, size_t page_size)
 {
     // size_t free, total;
     unsigned long num_phys_blocks;
@@ -32,19 +32,19 @@ unsigned long get_num_phys_blocks(size_t num_layers, size_t free_memory)
     /* reserving 80% for kv cache */
     // free = (free * 80) / 100;
     /* do not allocate if we can't use a handle. we need multiples of 2 * num_layers */
-    num_phys_blocks = free_memory / page_size_bytes;
+    num_phys_blocks = free_memory / page_size;
     num_phys_blocks -= num_phys_blocks % (2 * num_layers);
     return num_phys_blocks;
 }
 
-size_t do_cuda_default_init(int device)
+size_t do_cuda_default_init(int device, size_t page_size)
 {
     size_t phys_granularity;
     CHECK_CUDA(cuInit(0));
     CHECK_CUDA(cuCtxGetCurrent(&ctx));
     if (ctx == NULL)
     {
-        std::cerr << "[vAttention ]No CUDA context found.";
+        std::cerr << "[vAttention] No CUDA context found.";
         std::cerr << " Please initialize PyTorch before configuring vAttention." << std::endl;
         exit(1);
     }
@@ -55,61 +55,71 @@ size_t do_cuda_default_init(int device)
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     accessDesc.location.id = device;
     CHECK_CUDA(cuMemGetAllocationGranularity(&phys_granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
+    assert (phys_granularity == page_size);
     return phys_granularity;
 }
 
-size_t do_cuda_uvm_init(int device)
+size_t do_cuda_uvm_init(int device, size_t page_size)
 {
-    CHECK_VATTN(vattn_init(device, VATTN_DEF_HANDLE_SIZE));
-    return VATTN_DEF_HANDLE_SIZE;
+    /* our uvm driver support only 64KB, 128KB and 256KB page sizes */
+    assert (page_size == 64*KB || page_size == 128*KB ||
+                page_size == 256*KB);
+    CHECK_VATTN(vattn_init(device, (NvU64)page_size));
+    return page_size;
 }
 
-size_t do_cuda_init(int device, bool use_uvm_backend = false)
+size_t do_cuda_init(int device, size_t page_size)
 {
-    if (!use_uvm_backend)
-        return do_cuda_default_init(device);
-    return do_cuda_uvm_init(device);
+    if (use_uvm_backend(page_size))
+        return do_cuda_uvm_init(device, page_size);
+
+    return do_cuda_default_init(device, page_size);
 }
 
-int reserve_cuda_pages(size_t num_layers, size_t free_memory)
+int reserve_cuda_pages(size_t num_layers, size_t free_memory, size_t page_size)
 {
     Log log;
-    unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory);
-    log.log("Reserving " + std::to_string(num_phys_blocks) + " pages of size " + std::to_string(page_size_bytes) + " ...");
+    unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory, page_size);
+    log.log("Reserving " + std::to_string(num_phys_blocks) + " pages of size " + std::to_string(page_size) + " ...");
+
     while (page_handles.size() < num_phys_blocks)
     {
         CUmemGenericAllocationHandle handle;
-        CHECK_CUDA(cuMemCreate(&handle, page_size_bytes, &prop, 0));
+        CHECK_CUDA(cuMemCreate(&handle, page_size, &prop, 0));
         page_handles.push_back(handle);
     }
+
     return page_handles.size();
 }
 
-int reserve_uvm_pages(size_t num_layers, size_t free_memory)
+int reserve_uvm_pages(size_t num_layers, size_t free_memory, size_t page_size)
 {
     /* This method must be called only after do_cuda_init */
     Log log;
-    unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory);
-    log.log("Reserving " + std::to_string(num_phys_blocks) + " pages " + std::to_string(page_size_bytes) + " ...");
-    while (page_handles.size() < num_phys_blocks)
+    unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory, page_size);
+    log.log("Reserving " + std::to_string(num_phys_blocks) + " pages " + std::to_string(page_size) + " ...");
+
+    while (uvm_page_handles.size() < num_phys_blocks)
     {
         NvU64 handle;
         CHECK_VATTN(vattn_get_mem_handle(&handle));
         uvm_page_handles.push_back(handle);
     }
+
     return uvm_page_handles.size();
 }
 
-int reserve_gpu_pages(size_t num_layers, size_t free_memory, bool use_uvm_backend = false)
+int reserve_gpu_pages(size_t num_layers, size_t free_memory, size_t page_size)
 {
-    if (!use_uvm_backend)
-        return reserve_cuda_pages(num_layers, free_memory);
-    return reserve_uvm_pages(num_layers, free_memory);
+    if (use_uvm_backend(page_size))
+        return reserve_uvm_pages(num_layers, free_memory, page_size);
+
+    return reserve_cuda_pages(num_layers, free_memory, page_size);
 }
 
 void test_func()
 {
-    do_cuda_init(0, false);
+    do_cuda_init(0, 2*MB);
     // TODO: change this test to also consider UVM backend
     for (int i = 0; i < 100; i++)
     {

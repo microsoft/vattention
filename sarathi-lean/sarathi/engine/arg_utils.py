@@ -143,8 +143,21 @@ class EngineArgs:
             attention_backend=self.attention_backend,
         )
         elem_size = torch.tensor([1], dtype=model_config.hf_config.dtype).element_size()
+
+        # vattention uses page size as allocation granularity. convert this to block_size here.
+        page_size = -1 if AttentionBackend.is_vLLM(self.attention_backend) else self.block_size
+        block_size = self.block_size
+        if AttentionBackend.is_vATTN(self.attention_backend):
+            # divide page size by number of kv heads per worker
+            block_size = page_size // (model_config.hf_config.num_key_value_heads // self.tensor_parallel_size)
+            # now, divide block size by head_dim per kv head
+            block_size = block_size // (model_config.hf_config.hidden_size // model_config.hf_config.num_attention_heads)
+            # finally, divide by number of bytes per element
+            block_size = block_size // elem_size
+
         cache_config = CacheConfig(
-            block_size=self.block_size if AttentionBackend.is_vLLM(self.attention_backend) else 2097152//((model_config.hf_config.num_key_value_heads // self.tensor_parallel_size) * (model_config.hf_config.hidden_size // model_config.hf_config.num_attention_heads) * elem_size),
+            block_size=block_size,
+            page_size=page_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             max_batch_size=self.max_num_seqs,
         )

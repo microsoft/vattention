@@ -73,8 +73,9 @@ private:
 
     // defer free optimization
     bool deferred_reclaim = true;
-    // use uvm backend
-    bool use_uvm_backend = false;
+
+    // memory allocator specific. page_size is in bytes
+    size_t page_size = 2 * MB;
 
     /* custom virtual tensor allocator */
     VirtualTensorAllocator *allocator;
@@ -85,8 +86,8 @@ private:
 public:
 
     void init_kv_block_size() {
-        page_size_bytes = do_cuda_init(device, use_uvm_backend);
-        tokens_per_page = page_size_bytes / (num_kv_heads * head_size * bytes_per_elem);
+        page_size = do_cuda_init(device, page_size);
+        tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem);
         log.log("Initialized CUDA context and memory config etc...");
         log.log("num_tokens_per_kvblock: " + std::to_string(tokens_per_page));
     }
@@ -97,13 +98,13 @@ public:
         virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem;
         virt_buff_size_per_req = virt_buff_size_per_token * max_context_length;
 
-        assert(virt_buff_size_per_req % page_size_bytes == 0);
-        max_pages_per_req = virt_buff_size_per_req / page_size_bytes;
+        assert(virt_buff_size_per_req % page_size == 0);
+        max_pages_per_req = virt_buff_size_per_req / page_size;
 
         /* align to ensure that each request begins at a mappable offset */
-        remainder = virt_buff_size_per_req % page_size_bytes;
+        remainder = virt_buff_size_per_req % page_size;
         if (remainder != 0)
-            virt_buff_size_per_req += page_size_bytes - remainder;
+            virt_buff_size_per_req += page_size - remainder;
 
         virt_buff_size = virt_buff_size_per_req * max_batch_size;
         virt_buff_num_kv_tokens = max_batch_size * max_context_length;
@@ -186,7 +187,7 @@ public:
 
     inline void show_allocator_state() {
         std::stringstream ss;
-        size_t pages = !use_uvm_backend ? page_handles.size() : uvm_page_handles.size();
+        size_t pages = !use_uvm_backend(page_size) ? page_handles.size() : uvm_page_handles.size();
         log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS(pages)) + " KV blocks");
         log.log("reqId : seqlen: mapped: required");
         for (int i = 0; i < max_batch_size; i++) {
@@ -201,7 +202,7 @@ public:
 
     inline size_t get_req_current_map_offset(int reqId) const {
         int num_mapped_blocks = get_req_pages(reqId);
-        size_t block_offset_within_req = num_mapped_blocks * page_size_bytes;
+        size_t block_offset_within_req = num_mapped_blocks * page_size;
 
         return get_req_begin_offset_virt(reqId) + block_offset_within_req;
     }
@@ -214,7 +215,7 @@ public:
         /* unmap should not be called if nothing is mapped */
         assert(num_mapped_blocks > 0);
         /* return the offset to unmap, which is the beginning of the last mapped block */
-        block_offset_within_req = (num_mapped_blocks-1) * page_size_bytes;
+        block_offset_within_req = (num_mapped_blocks-1) * page_size;
         return get_req_begin_offset_virt(reqId) + block_offset_within_req;
     }
 
@@ -225,7 +226,7 @@ public:
                             unsigned long max_context_length_,
                             int device_,
                             py::object dtype_,
-                            bool use_uvm_backend_) {
+                            size_t page_size_) {
         assert(max_batch_size_ > 0 && max_batch_size_ < 1000);
         assert(max_context_length_ > 0 && max_context_length_ < 1000000);
         assert(num_layers_ > 0 && num_layers_ < 100);
@@ -237,14 +238,14 @@ public:
         max_context_length = max_context_length_;
         device = device_;
         dtype = dtype_;
-        use_uvm_backend = use_uvm_backend_;
+        page_size = page_size_;
         bytes_per_elem = dtype.attr("itemsize").cast<int>();
         init_kv_block_size();
         init_buffer_sizes();
         init_kvcache_batch_metadata();
         k_ptr.resize(num_layers);
         v_ptr.resize(num_layers);
-        allocator = new VirtualTensorAllocator(device, use_uvm_backend);
+        allocator = new VirtualTensorAllocator(device, page_size);
         is_configured = true;
     }
 
@@ -262,8 +263,7 @@ public:
     at::Tensor allocate_virtual_buffer() {
         at::ScalarType type_ = torch::python::detail::py_object_to_dtype(dtype);
         at::IntArrayRef shape = {max_batch_size, max_context_length, num_kv_heads, head_size};
-        //at::Tensor t = at::detail::empty_cuda_virtual(shape, page_size_bytes, type_, device, use_uvm_backend);
-        at::Tensor t = alloc_vtensor(shape, page_size_bytes, type_, allocator, device);
+        at::Tensor t = alloc_vtensor(shape, page_size, type_, allocator, device);
 
         return t;
     }
@@ -288,7 +288,7 @@ public:
     }
 
     int reserve_physical_pages(size_t free_memory) {
-        return reserve_gpu_pages(num_layers, free_memory, use_uvm_backend);
+        return reserve_gpu_pages(num_layers, free_memory, page_size);
     }
 
     inline size_t get_num_overcommitted_kvblocks() {
@@ -301,7 +301,7 @@ public:
     inline size_t get_num_free_kvblocks() {
         size_t free_kvblocks, overcommitted_kvblocks;
 
-        if (!use_uvm_backend)
+        if (!use_uvm_backend(page_size))
             free_kvblocks = PAGES_TO_KVBLOCKS(page_handles.size());
         else
             free_kvblocks = PAGES_TO_KVBLOCKS(uvm_page_handles.size());
@@ -312,21 +312,7 @@ public:
 
     /* check pages that are free as well as overcommitted */
     int can_allocate_new_sequence() {
-        /* TODO(ashish): quick and dirty fix to let the system make forward progress in profiling pass */
-        // if (!is_configured)
-        //     // return true;
-        //     return 1024288;
-
-        /* add space for the first decode token */
-        // size_t nr_blocks_required = PAGES_TO_KVBLOCKS(tokens_to_pages(seq_len + 1));
-        size_t num_blocks_available = get_num_free_kvblocks();
-
-        /* keep buffer for at least 1 block to avoid running into weird cases */
-        // if (num_blocks_available > nr_blocks_required)
-        //     return true;
-
-        // return false;
-        return num_blocks_available;
+        return get_num_free_kvblocks();
     }
 
     int nr_blocks_required(size_t seq_len) {
@@ -338,7 +324,7 @@ public:
     inline bool kvblocks_available(size_t num_kvblocks) {
         size_t num_pages = KVBLOCKS_TO_PAGES(num_kvblocks);
 
-        if (!use_uvm_backend)
+        if (!use_uvm_backend(page_size))
             return page_handles.size() >= num_pages;
         else
             return uvm_page_handles.size() >= num_pages;
@@ -372,9 +358,9 @@ public:
         for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
             CUdeviceptr k_data_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
             CUdeviceptr v_data_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
-            if (!use_uvm_backend) {
-                CHECK_CUDA(cuMemUnmap(k_data_ptr + req_offset, page_size_bytes));
-                CHECK_CUDA(cuMemUnmap(v_data_ptr + req_offset, page_size_bytes));
+            if (!use_uvm_backend(page_size)) {
+                CHECK_CUDA(cuMemUnmap(k_data_ptr + req_offset, page_size));
+                CHECK_CUDA(cuMemUnmap(v_data_ptr + req_offset, page_size));
                 std::pair p_handles = page_handles_map[std::make_tuple(reqId, req_offset, layer_idx)];
                 page_handles.push_back(p_handles.first);
                 page_handles.push_back(p_handles.second);
@@ -414,10 +400,10 @@ public:
         if (req_offset >= (reqId + 1) * virt_buff_size_per_req)
             std::runtime_error("***** [Unexpected] request has already received max number of pages *****");
 
-        CHECK_CUDA(cuMemMap(k_data_ptr + req_offset, page_size_bytes, 0, k_handle, 0));
-        CHECK_CUDA(cuMemMap(v_data_ptr + req_offset, page_size_bytes, 0, v_handle, 0));
-        CHECK_CUDA(cuMemSetAccess(k_data_ptr + req_offset, page_size_bytes, &accessDesc, 1));
-        CHECK_CUDA(cuMemSetAccess(v_data_ptr + req_offset, page_size_bytes, &accessDesc, 1));
+        CHECK_CUDA(cuMemMap(k_data_ptr + req_offset, page_size, 0, k_handle, 0));
+        CHECK_CUDA(cuMemMap(v_data_ptr + req_offset, page_size, 0, v_handle, 0));
+        CHECK_CUDA(cuMemSetAccess(k_data_ptr + req_offset, page_size, &accessDesc, 1));
+        CHECK_CUDA(cuMemSetAccess(v_data_ptr + req_offset, page_size, &accessDesc, 1));
         page_handles_map[std::make_tuple(reqId, req_offset, layer_idx)] = std::make_pair(k_handle, v_handle);
     }
 
@@ -477,7 +463,7 @@ public:
             for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
                 CUdeviceptr k_data_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
                 CUdeviceptr v_data_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
-                if (!use_uvm_backend) {
+                if (!use_uvm_backend(page_size)) {
                     CUHandle k_handle = pop_page_handle();
                     CUHandle v_handle = pop_page_handle();
                     /*
@@ -519,7 +505,7 @@ public:
             for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
                 CUdeviceptr k_data_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
                 CUdeviceptr v_data_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
-                if (!use_uvm_backend) {
+                if (!use_uvm_backend(page_size)) {
                     CUHandle k_handle = pop_page_handle();
                     CUHandle v_handle = pop_page_handle();
                     for (int reqId = 0; reqId < max_batch_size; reqId++) {
@@ -801,11 +787,10 @@ public:
     /* TODO(ashish): check if this is compatible with PyTorch destructor */
     void cleanup() {
         wait_kvcache_manager_sync();
-        if (use_uvm_backend) {
+        if (use_uvm_backend(page_size))
             do_uvm_kvcache_cleanup();
-            return;
-        }
-        do_cuda_kvcache_cleanup();
+        else
+            do_cuda_kvcache_cleanup();
         k_tensors.clear();
         v_tensors.clear();
         page_handles.clear();
@@ -819,11 +804,11 @@ static vAttentionCachingAllocator vattn;
 std::vector<at::Tensor> init_kvcache(unsigned long num_layers, unsigned long num_kv_heads,
                         unsigned long head_size, unsigned long max_batch_size,
                         unsigned long max_context_length, int device,
-                        py::object dtype, bool use_uvm_backend=false) {
+                        py::object dtype, size_t page_size) {
     std::vector<at::Tensor> tensors;
     vattn.init_kvcache(num_layers, num_kv_heads, head_size,
                                     max_batch_size, max_context_length,
-                                    device, dtype, use_uvm_backend);
+                                    device, dtype, page_size);
     tensors = vattn.init_kvcache_virtual();
     return tensors;
 }

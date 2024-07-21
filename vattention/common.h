@@ -21,9 +21,11 @@ CUmemAccessDesc accessDesc = {};
 std::vector<CUmemGenericAllocationHandle> page_handles;
 // physical memory handles for uvm backend (custom driver)
 std::vector<NvU64> uvm_page_handles;
-size_t page_size_bytes; // this depends on GPU alloc granularity
-
 
 static inline size_t pad_size(size_t orig, size_t align) {
     return (orig + align - 1) & ~(align - 1);
+}
+
+static inline bool use_uvm_backend(size_t page_size) {
+    return page_size != 2 * MB;
 }
