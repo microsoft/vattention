@@ -9,13 +9,13 @@ void raise_warning_for_complex_half(at::ScalarType scalar_type)
 class VirtualTensorAllocator : public at::Allocator
 {
 public:
-    bool use_uvm_backend = false;
     int device_idx = 0;
+    size_t page_size = 0;
 
-    VirtualTensorAllocator(int device_idx, bool use_uvm_backend)
+    VirtualTensorAllocator(int device_idx_, size_t page_size_)
     {
-        this->device_idx = device_idx;
-        this->use_uvm_backend = use_uvm_backend;
+        this->device_idx = device_idx_;
+        this->page_size = page_size_;
     }
 
     c10::DataPtr allocate(size_t size) override
@@ -32,7 +32,7 @@ public:
 
         C10_CUDA_CHECK(c10::cuda::GetDevice(&device));
         CUdeviceptr ptr_gpu;
-        if (!this->use_uvm_backend)
+        if (!use_uvm_backend(this->page_size))
         {
             CHECK_CUDA(cuMemAddressReserve(&ptr_gpu, size, 0, 0, 0));
         }
