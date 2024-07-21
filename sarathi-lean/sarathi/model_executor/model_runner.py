@@ -23,7 +23,6 @@ from sarathi.model_executor.utils import pad_to_alignment
 from sarathi.utils import get_gpu_memory
 from sarathi.worker.cache_engine import get_cache_engine
 from sarathi.model_executor.attention import AttentionBackend
-import vattention
 logger = init_logger(__name__)
 
 USE_UVM = False
@@ -206,18 +205,13 @@ class ModelRunner:
         total_gpu_memory = get_gpu_memory()
         # print(f"peak_memory: {peak_memory}, total_gpu_memory: {total_gpu_memory}")
         physical_memory = int(total_gpu_memory * gpu_memory_utilization - peak_memory)
-        if AttentionBackend.is_vATTN(self.model_config.attention_backend):
-            num_pages = physical_memory // 2097152
-            num_gpu_blocks = num_pages// (2*self.model_config.get_num_layers(self.parallel_config))
-        
-        else:
-            cache_block_size = get_cache_engine(self.model_config.attention_backend).get_cache_block_size(
-                block_size, self.model_config, self.parallel_config
-            )
-            num_gpu_blocks = int(
-                physical_memory // cache_block_size
-            )
-            num_gpu_blocks = max(num_gpu_blocks, 0)
+        cache_block_size = get_cache_engine(self.model_config.attention_backend).get_cache_block_size(
+            block_size, self.model_config, self.parallel_config
+        )
+        num_gpu_blocks = int(
+            physical_memory // cache_block_size
+        )
+        num_gpu_blocks = max(num_gpu_blocks, 0)
         torch.cuda.empty_cache()
 
         get_attention_wrapper().end_forward()

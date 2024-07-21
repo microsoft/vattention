@@ -67,6 +67,9 @@ class vLLMCacheEngine(BaseCacheEngine):
     def num_free_blocks(self) -> int:
         return self.num_gpu_blocks 
 
+    def cleanup_kvcache(self) -> None:
+        pass
+
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()

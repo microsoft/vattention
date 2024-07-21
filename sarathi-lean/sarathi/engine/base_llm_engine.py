@@ -32,7 +32,6 @@ _MAX_WORKER_CONCURRENCY = 3
 
 ModelParallelRank = Tuple[int, int]
 import torch
-import vattention
 
 class BaseLLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -484,3 +483,6 @@ class BaseLLMEngine:
 
     def get_metric_store(self) -> MetricsStore:
         return self.metrics_store
+
+    def cleanup(self) -> None:
+        self._run_workers("cleanup")

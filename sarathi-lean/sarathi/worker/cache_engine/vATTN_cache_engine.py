@@ -15,8 +15,6 @@ logger = init_logger(__name__)
 
 KVCache = Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
 
-USE_UVM = False
-
 class vATTNCacheEngine(BaseCacheEngine):
     """Manages the KV cache.
 
@@ -33,47 +31,38 @@ class vATTNCacheEngine(BaseCacheEngine):
     ) -> None:
         self.max_batch_size = cache_config.max_batch_size
         self.device = torch.empty(1).cuda().device if not in_wsl() else torch.device("cuda")
-        
+        self.device_idx = int(str(self.device).split(":")[-1])
         self.max_model_seq_len = model_config.max_model_len
-        super().__init__(cache_config, model_config, parallel_config) 
         self.curr_seq_lens = [0 for i in range(self.max_batch_size)]
         self.seq_to_batch_idx = {}
-        vattention.reserve_physical_pages(cache_config.memory_for_gpu)
-        self.set_mem_alloc_backend(mem_alloc_backend)
+        self.page_size = cache_config.page_size
+        self.vattn_async = True if mem_alloc_backend == "async" else False
+        self.cache_mem_size = cache_config.memory_for_gpu
+        super().__init__(cache_config, model_config, parallel_config)
 
     def num_free_blocks(self) -> int:
         return vattention.can_allocate_new_sequence()
 
-    def set_mem_alloc_backend(self, mem_alloc_backend: str) -> None:
-        if mem_alloc_backend == "sync":
-            self.use_async_vattn_backend = False
-        else:
-            self.use_async_vattn_backend = True
-
     def allocate_gpu_cache(self) -> List[torch.Tensor]:
-
         kv_cache = vattention.init_kvcache(
                                     self.num_layers,
                                     self.num_heads,
                                     self.head_size,
                                     self.max_batch_size,
                                     self.max_model_seq_len,
-                                    int(str(self.device).split(":")[-1]),
+                                    self.device_idx,
                                     self.dtype,
-                                    USE_UVM)
+                                    self.page_size)
 
         k_cache = kv_cache[:self.num_layers]
         v_cache = kv_cache[self.num_layers:]
-
         for i in range(self.num_layers):
             assert k_cache[i].device == self.device, \
                         "k_cache device mismatch. expected: {}, got: {}".format(self.device, self.k_cache[i].device)
             assert v_cache[i].device == self.device, \
                         "v_cache device mismatch expected: {}, got: {}".format(self.device, self.v_cache[i].device)
-
+        vattention.reserve_physical_pages(self.cache_mem_size)
         return list(zip(k_cache, v_cache))
-
-
 
     def get_k_cache(self, layer_idx: int) -> torch.Tensor:
         return self.gpu_cache[layer_idx][0]
@@ -82,7 +71,6 @@ class vATTNCacheEngine(BaseCacheEngine):
         return self.gpu_cache[layer_idx][1]
     
     def step(self, seq_metadata_list: List[SequenceMetadata]) -> None:
-        
         b_idx_prompt = []
         b_idx_gen = []
         for seq_metadata in seq_metadata_list:
@@ -109,7 +97,7 @@ class vATTNCacheEngine(BaseCacheEngine):
                 # b_idx.append(new_batch_idx)
                 b_idx_gen.append(new_batch_idx)
 
-        if self.use_async_vattn_backend:
+        if self.vattn_async:
             vattention.step_async(self.curr_seq_lens)
         else:
             vattention.step(self.curr_seq_lens, True)
@@ -164,8 +152,6 @@ class vATTNCacheEngine(BaseCacheEngine):
     def get_attention_context_lens(self):
         return self.attn_context_lens
 
-    
-
     @staticmethod
     def get_cache_block_size(
         block_size: int,
@@ -181,6 +167,10 @@ class vATTNCacheEngine(BaseCacheEngine):
         total = num_layers * (key_cache_block + value_cache_block)
         dtype_size = _get_dtype_size(model_config.dtype)
         return dtype_size * total
+
+    def cleanup_kvcache(self):
+        # this is required to ensure UVM module is not holding on to the memory
+        vattention.cleanup()
 
 
 def _get_dtype_size(dtype: torch.dtype) -> int:

@@ -198,10 +198,12 @@ class CacheConfig:
     def __init__(
         self,
         block_size: int,
+        page_size: int,
         gpu_memory_utilization: float,
         max_batch_size: int,
     ) -> None:
         self.block_size = block_size
+        self.page_size = page_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self._verify_args()
         self.max_batch_size = max_batch_size
