@@ -10,7 +10,7 @@ This repository contains an implementation of vAttention, intergrated with an LL
  * `vattention` contains the source code of vattention memory allocator
  * `sarathi-lean` modified version of Sarathi-Serve with support for both PagedAttention and vAttention style of memory management
  * `scripts` contains scripts to run the experiments
- * `nvidia-attn-uvm-driver` contains our modified version of the NVIDIA UVM drivers
+ * `nvidia-vattn-uvm-driver` contains our modified version of the NVIDIA UVM drivers
  * `microbenchmarks` contains scripts to run some useful microbenchmarks
 
 
