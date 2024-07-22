@@ -52,6 +52,14 @@ sudo ./deploy_nvidia_modules.sh
 
 **Note:** Some other modules (e.g., nvidia-drm) may conflict with this step. You can update the script to remove the offending module and insert the built version of it. Check the script for directions.
 
+Enable nvidia persistence mode for the user (inside the root sheel):
+
+```sh
+# move to root shell
+sudo su
+# enable persistence mode
+nvidia-persistenced --user <username>
+```
 
 ## Development
 
