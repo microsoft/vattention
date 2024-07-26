@@ -76,7 +76,7 @@ at::Tensor _alloc_vtensor(
     raise_warning_for_complex_half(scalar_type);
     caffe2::TypeMeta dtype = scalarTypeToTypeMeta(scalar_type);
     auto size_bytes = at::detail::computeStorageNbytesContiguous(shape, dtype.itemsize());
-    size_bytes = pad_size(size_bytes, page_size);
+    size_bytes = ROUND_UP(size_bytes, page_size);
     /*
      * ensure that each request's buffer is at least as big as the page size
      * first element of shape should always be batch size

@@ -97,8 +97,8 @@ public:
 
         virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem;
         virt_buff_size_per_req = virt_buff_size_per_token * max_context_length;
+        virt_buff_size_per_req = ROUND_UP(virt_buff_size_per_req, page_size);
 
-        assert(virt_buff_size_per_req % page_size == 0);
         max_pages_per_req = virt_buff_size_per_req / page_size;
 
         /* align to ensure that each request begins at a mappable offset */

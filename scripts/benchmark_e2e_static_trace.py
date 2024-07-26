@@ -18,14 +18,14 @@ experiment_dir = utils.static_experiment_dir
 
 # for quick testing
 if utils.args.test == True:
-    models, attention_backends = {'01-ai/Yi-6B-200k'}, ['fa_vattn_256kb', 'fa_vattn_2mb']
+    models, attention_backends = {'yi-6b-1'}, ['fa_vattn_2mb']
     num_requests, context_lengths, pd_ratios = 5, [32768], [500]
 
 for model in models:
     for backend in attention_backends:
        for p_d in pd_ratios:
          for context_len in context_lengths:
-            model_file_name = utils.models[model]['logentry']
+            model_logentry = utils.models[model]['logentry']
             tp_dim = utils.models[model]['tp']
             max_batch_size = min(256, num_requests) if 'yi-34b' in model.lower() else 16
             max_tokens = utils.get_max_context_length(backend, context_len)
@@ -33,7 +33,7 @@ for model in models:
             attn_backend_arg = utils.get_backend(backend)
             command = [
                     'python', main,
-                    '--model_name', model,
+                    '--model_name', utils.models[model]['hfrecord'],
                     '--model_tensor_parallel_degree', f'{tp_dim}',
                     '--request_generator_provider', 'synthetic',
                     '--synthetic_request_generator_length_provider', 'uniform',
@@ -49,7 +49,7 @@ for model in models:
                     '--model_max_model_len', str(max_tokens),
                     '--metrics_store_enable_op_level_metrics', 'false',
                     '--metrics_store_keep_individual_batch_metrics', 'true',
-                    '--output_dir', f'{experiment_dir}/model_{model_file_name}_tp_{tp_dim}_attn_{backend}_cl_{context_len}_pd_{p_d}_reqs_{num_requests}/',
+                    '--output_dir', f'{experiment_dir}/model_{model_logentry}_tp_{tp_dim}_attn_{backend}_cl_{context_len}_pd_{p_d}_reqs_{num_requests}/',
                     '--synthetic_request_generator_num_requests', str(num_requests),
                     '--trace_request_generator_max_tokens', str(max_tokens),
                     '--model_block_size', str(kv_block_size),
