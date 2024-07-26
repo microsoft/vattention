@@ -9,6 +9,7 @@
 
 #define KVBLOCKS_TO_PAGES(slots) ((slots) * (2) * (num_layers))
 #define PAGES_TO_KVBLOCKS(pages) ((pages) / (2 * (num_layers)))
+#define ROUND_UP(x, y) ((((x) + (y) - 1) / (y)) * (y))
 
 typedef CUmemGenericAllocationHandle CUHandle;
 
@@ -21,10 +22,6 @@ CUmemAccessDesc accessDesc = {};
 std::vector<CUmemGenericAllocationHandle> page_handles;
 // physical memory handles for uvm backend (custom driver)
 std::vector<NvU64> uvm_page_handles;
-
-static inline size_t pad_size(size_t orig, size_t align) {
-    return (orig + align - 1) & ~(align - 1);
-}
 
 static inline bool use_uvm_backend(size_t page_size) {
     return page_size != 2 * MB;
