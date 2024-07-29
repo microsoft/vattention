@@ -2,7 +2,7 @@ import copy
 import math
 import time
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from sarathi.config import (
     BaseSchedulerConfig,
@@ -106,7 +106,6 @@ class BaseLLMEngine:
 
         # Create the parallel GPU workers.
         self._init_workers_ray()
-
         # Profile the memory usage and initialize the cache.
         self._init_cache()
         # Initialize the worker map.
@@ -230,7 +229,7 @@ class BaseLLMEngine:
             block_size=self.cache_config.block_size,
             gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
         )
-        # print(f"num_gpu_blocks_across_workers: {num_gpu_blocks_across_workers}")
+        
         # exit(0)
         num_gpu_blocks_across_workers, physical_memory_all = map(list, zip(*output_all))
 
@@ -308,6 +307,7 @@ class BaseLLMEngine:
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
+        seq_id: Optional[Union[str, int]] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -335,7 +335,8 @@ class BaseLLMEngine:
         # Create the sequences.
         block_size = self.cache_config.block_size
         eos_token_id = self.tokenizer.eos_token_id
-        seq_id = next(self.seq_counter)
+        if seq_id is None:
+            seq_id = next(self.seq_counter)
         seq = Sequence(
             seq_id,
             prompt,

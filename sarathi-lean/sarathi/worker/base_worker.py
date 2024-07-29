@@ -185,10 +185,6 @@ class BaseWorker:
         )
 
         self.on_step_completed(scheduler_outputs, sampler_outputs)
-        # print("after on_step_completed")
-        # for seq in seq_metadata_list:
-        #     if seq.seq.is_finished():
-        #         print(seq.seq.seq_id, seq.seq.get_status())
         self.cache_engine.on_step_completion(seq_metadata_list)
         
 

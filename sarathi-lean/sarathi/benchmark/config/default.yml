@@ -1,3 +1,5 @@
+host: localhost
+port: 8000
 seed: 42
 log_level: info
 output_dir: ./benchmark_output/
@@ -6,20 +8,20 @@ write_chrome_trace: true
 write_metrics: true
 enable_profiling: false
 gpu_memory_utilization: 0.85
-time_limit: 1800 # seconds
+time_limit: 10281800 # seconds
 replica_resource_mapping: ""
 
 cluster:
   num_replicas: 1
 
 model:
-  name: meta-llama/Meta-Llama-3-8B
-  tensor_parallel_degree: 2
+  name: 01-ai/Yi-6B-200k
+  tensor_parallel_degree: 1
   pipeline_parallel_degree: 1
-  max_model_len: 4096
+  max_model_len: 65536
   load_format: dummy
-  attention_backend: vattn_fa #flash_attention
-  block_size: 128
+  attention_backend: fa_vattn
+  block_size: 2097152
 
 request_generator:
   provider: synthetic
@@ -39,8 +41,8 @@ trace_request_generator:
 
 # Config for synthetic trace generator
 trace_request_length_generator:
-  trace_file: ./data/processed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv
-  # trace_file: ./data/processed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv
+  # trace_file: ./data/processed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv
+  trace_file: ./data/processed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv
   prefill_scale_factor: 1
   decode_scale_factor:  1
   max_tokens: 32768
@@ -76,7 +78,7 @@ fixed_request_length_generator:
   decode_tokens: 512
 
 replica_scheduler:
-  provider: sarathi
+  provider: vllm
   max_batch_size: 128
 
 sarathi_scheduler:

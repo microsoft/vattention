@@ -7,7 +7,7 @@ import utils
 
 # prefills do not batch well together. hence profiling bs=1 is enough
 bs = 1
-context_lens = [1024, 2048, 4096, 8192, 16384]
+context_lens = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
 
 print("model;num_heads;num_kv_heads;head_dim;bs;cl;fa_latency;fa_paged_latency;fi_latency;fi_ragged_latency;fi_paged_latency")
 for model in utils.attn_configs:

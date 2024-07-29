@@ -6,7 +6,7 @@ pandas  # Required for Ray data.
 pyarrow  # Required for Ray data.
 sentencepiece  # Required for LLaMA tokenizer.
 numpy
-torch == 2.3.0
+torch >= 2.3.0
 transformers >= 4.37.0  # Required for Mistral.
 matplotlib
 plotly_express
@@ -20,3 +20,6 @@ pillow
 tiktoken
 grpcio
 flash-attn == 2.5.9.post1
+fastapi
+uvicorn
+openai

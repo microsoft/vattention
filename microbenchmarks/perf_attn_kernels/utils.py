@@ -13,10 +13,10 @@ attn_configs = {
     #'llama-7b-tp1': {'num_heads': 32, 'num_kv_heads': 32, 'head_dim': 128},
     #'llama-7b-tp2': {'num_heads': 16, 'num_kv_heads': 16, 'head_dim': 128},
     #'yi-34B-tp1': {'num_heads': 56, 'num_kv_heads': 8, 'head_dim': 128},
-    #'yi-34B-tp2': {'num_heads': 28, 'num_kv_heads': 4, 'head_dim': 128},
+    'yi-34B-tp2': {'num_heads': 28, 'num_kv_heads': 4, 'head_dim': 128},
     #'llama-70B-tp1': {'num_heads': 64, 'num_kv_heads': 8, 'head_dim': 128},
     #'llama-70B-tp2': {'num_heads': 32, 'num_kv_heads': 4, 'head_dim': 128},
-    'llama-70B-tp4': {'num_heads': 16, 'num_kv_heads': 2, 'head_dim': 128},
+    #'llama-70B-tp4': {'num_heads': 16, 'num_kv_heads': 2, 'head_dim': 128},
     #'llama-70B-tp8': {'num_heads': 8, 'num_kv_heads': 1, 'head_dim': 128},
 }
 
