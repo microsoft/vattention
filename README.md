@@ -89,8 +89,60 @@ NVIDIA CUDA drivers allocate memory only at the granularity of large pages (2MB 
 
 **NOTE:** Replacing CUDA drivers is not required if you want to use vAttention with only 2MB pages.
 
+# OpenAI Compatible API
 
-# Using vAttention APIs in an LLM Serving System
+We also provide an OpenAI compatible API to facilitate benchmarking. An endpoint such as this one can be used with LLM benchmarking tools like [metron](https://github.com/project-metron/metron/tree/main?tab=readme-ov-file).
+Start the server as follows:
+
+```sh
+cd sarathi-lean/
+python -m sarathi.entrypoints.openai_server.api_server [COMMAND LINE ARGUMENTS]
+
+# for example, run Yi-6B on a single GPU with fa_paged attention backend
+python -m sarathi.entrypoints.openai_server.api_server --model_name 01-ai/Yi-6B-200k --model_tensor_parallel_degree 1 --model_attention_backend fa_paged --model_block_size 256
+# or, run Llama-3-8B on two GPUs with fa_vattn attention backend using 2MB pages
+python -m sarathi.entrypoints.openai_server.api_server --model_name meta-llama/Meta-Llama-3-8B --model_tensor_parallel_degree 2  --model_attention_backend fa_vattn --model_block_size 2097152
+```
+Just like the benchmark runner, you can configure many other knobs listed here: [default.yml](sarathi-lean/sarathi/benchmark/config/default.yml). Once the serve is up and running, you can use metron to benchmark performance as follows:
+
+```sh
+# Export API Key and URL
+export OPENAI_API_KEY=secret_abcdefg
+export OPENAI_API_BASE=http://localhost:8000/v1
+
+# running a static trace
+ python -m metron.run_benchmark \
+--model "01-ai/Yi-6B-200k" \
+--max-num-completed-requests 150 \
+--timeout 600 \
+--num-ray-clients 2 \
+--num-concurrent-requests-per-client 5 \
+--output-dir "experiments" \
+--request-interval-generator-provider "static" \
+--request-length-generator-provider "fixed" \
+--fixed-request-generator-prefill-tokens 65536 \ 
+--fixed-request-generator-decode-tokens 128 \
+--request-generator-max-tokens 65536 \
+
+# running a dynamic trace
+python -m metron.run_benchmark \
+--model "01-ai/Yi-6B-200k" \
+--max-num-completed-requests 150 \
+--timeout 600 \
+--num-ray-clients 2 \
+--num-concurrent-requests-per-client 5 \
+--output-dir "experiments" \
+--request-interval-generator-provider "poisson" \
+--poisson-request-interval-generator-qps 0.5 \
+--request-length-generator-provider "trace" \
+--trace-request-length-generator-trace-file "sarathi-lean/data/processed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv" \
+--request-generator-max-tokens 8192 \
+```
+
+The results would be redirected to `experiments` directory. You can learn more about customising the benchmarks you run here: [project metron](https://project-metron.readthedocs.io/en/latest/).
+
+
+# Using vAttention APIs for memory management in LLM serving
 
 vAttention exports a set of simple APIs that a serving system can use for KV-cache related memory management. We choose Sarathi-Serve to exemplify this because Sarathi-Serve is a state-of-the-art LLM inference scheduler, has an elaborate metric store and a versatile benchmark_runner that makes running traces and performing experiments easy. Furthermore, its modular setup makes it easy to add more attention backends. Our core APIs are used as follows in Sarathi-Serve:
 
@@ -139,7 +191,6 @@ vAttention exports a set of simple APIs that a serving system can use for KV-cac
 
 
 And that is most of it.
-
 
 ## Citation
 

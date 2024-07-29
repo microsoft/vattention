@@ -1,11 +1,11 @@
 from typing import List, Optional
 
 import torch
-# from flashinfer import (
-#     BatchDecodeWithPagedKVCacheWrapper,
-#     append_paged_kv_cache,
-#     single_prefill_with_kv_cache,
-# )
+from flashinfer import (
+    BatchDecodeWithPagedKVCacheWrapper,
+    append_paged_kv_cache,
+    single_prefill_with_kv_cache,
+)
 
 from sarathi.config import ModelConfig, ParallelConfig
 from sarathi.core.datatypes.sequence import SequenceMetadata

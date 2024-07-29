@@ -83,6 +83,8 @@ def get_block_or_page_size(attn_backend):
         raise ValueError(f"Unsupported attention backend: {attn_backend}")
 
 def get_backend(attn_backend):
+    if 'fa3_vattn' in attn_backend.lower():
+        return 'fa3_vattn_sync' if '_sync' in attn_backend else 'fa3_vattn'
     if 'fa_vattn' in attn_backend.lower():
         return 'fa_vattn_sync' if '_sync' in attn_backend else 'fa_vattn'
     elif 'fi_vattn' in attn_backend.lower():

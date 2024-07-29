@@ -103,7 +103,6 @@ class ModelRunner:
             context_len = seq_metadata.seq.get_len()
             position = context_len - 1
             input_positions.append(position)
-
         # Optimization: Pad the input length to be a multiple of 8.
         # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
         input_tokens = pad_to_alignment(input_tokens, multiple_of=8)
@@ -147,6 +146,7 @@ class ModelRunner:
             chunk_size = self.scheduler_config.chunk_size
             seq_len = self.model_config.get_max_model_len()
             chunk_size = min(chunk_size, seq_len)
+            
             seq = Sequence(
                 seq_id=0,
                 prompt=None,
@@ -156,12 +156,14 @@ class ModelRunner:
                 arrival_time=None,
                 sampling_params=sampling_params,
             )
+            
             seq_metadata = SequenceMetadata(
                 seq=seq,
                 block_table=None,
                 prompt_chunk_len=chunk_size,
             )
             seq_metadata_list.append(seq_metadata)
+            
         else:
             # Profile memory usage with max_num_sequences sequences and the total
             # number of tokens equal to max_num_batched_tokens.
@@ -188,6 +190,7 @@ class ModelRunner:
 
         input_tokens, input_positions = self._prepare_inputs(seq_metadata_list)
         get_attention_wrapper().begin_forward(seq_metadata_list)
+
         if AttentionBackend.is_vATTN(self.model_config.attention_backend):
             get_attention_wrapper().is_profiling_iteration = True
         # Execute the model.

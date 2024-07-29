@@ -19,7 +19,9 @@ from sarathi.model_executor.attention.vattention_flashattention_wrapper import (
 from sarathi.model_executor.attention.flashinfer_unpaged_attention_wrapper import (
     FlashinferUnpagedAttentionWrapper,
 )
-
+from sarathi.model_executor.attention.vattention_flashattention3_wrapper import (
+    VAttentionFlashAttention3_Wrapper,
+)
 # FA: FLASHATTENTION
 # FI: FLASHINFER
 class AttentionBackend(Enum):
@@ -32,6 +34,8 @@ class AttentionBackend(Enum):
     #TODO(ashish): remove the following?
     FI_UNPAGED = "FI_UNPAGED"
     NO_OP = "NO_OP"
+    FA3_VATTN = "FA3_VATTN"
+    FA3_VATTN_SYNC = "FA3_VATTN_SYNC"
 
     def is_attn_contiguous(attn_cfg):
       
@@ -40,6 +44,8 @@ class AttentionBackend(Enum):
             AttentionBackend.FI_VATTN.value,
             AttentionBackend.FA_VATTN_SYNC.value,
             AttentionBackend.FI_VATTN_SYNC.value,
+            AttentionBackend.FA3_VATTN.value,
+            AttentionBackend.FA3_VATTN_SYNC.value,
         ]
 
     def is_vATTN(attn_cfg):
@@ -48,12 +54,15 @@ class AttentionBackend(Enum):
             AttentionBackend.FI_VATTN.value,
             AttentionBackend.FA_VATTN_SYNC.value,
             AttentionBackend.FI_VATTN_SYNC.value,
+            AttentionBackend.FA3_VATTN.value,
+            AttentionBackend.FA3_VATTN_SYNC.value,
         ]
 
     def is_vATTN_SYNC(attn_cfg):
         return attn_cfg.upper() in [
             AttentionBackend.FA_VATTN_SYNC.value,
             AttentionBackend.FI_VATTN_SYNC.value,
+            AttentionBackend.FA3_VATTN_SYNC.value,
         ]
 
     def is_vLLM(attn_cfg):
@@ -99,6 +108,10 @@ def get_attention_wrapper():
         return VAttentionFlashInferWrapper.get_instance()
     elif ATTENTION_BACKEND == AttentionBackend.FI_UNPAGED:
         return FlashinferUnpagedAttentionWrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FA3_VATTN:
+        return VAttentionFlashAttention3_Wrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FA3_VATTN_SYNC:
+        return VAttentionFlashAttention3_Wrapper.get_instance()
 
 
     raise ValueError(f"Unsupported attention backend: {ATTENTION_BACKEND}")
@@ -110,6 +123,9 @@ def is_vattention_backend():
         AttentionBackend.FI_VATTN,
         AttentionBackend.FA_VATTN_SYNC,
         AttentionBackend.FI_VATTN_SYNC,
+        AttentionBackend.FA3_VATTN,
+        AttentionBackend.FA3_VATTN_SYNC,
+
     ]
 
 def is_vLLM_backend():
@@ -117,6 +133,7 @@ def is_vLLM_backend():
         AttentionBackend.FA_PAGED,
         AttentionBackend.FI_PAGED,
         AttentionBackend.FI_UNPAGED,
+
     ]
 
 def is_attn_contiguous():
@@ -125,4 +142,6 @@ def is_attn_contiguous():
         AttentionBackend.FI_VATTN,
         AttentionBackend.FA_VATTN_SYNC,
         AttentionBackend.FI_VATTN_SYNC,
+        AttentionBackend.FA3_VATTN,
+        AttentionBackend.FA3_VATTN_SYNC,
     ]
