@@ -31,14 +31,9 @@ class VAttentionFlashInferWrapper(BaseAttentionWrapper):
         self.is_profiling_iteration = False
         self.prefill_query_lens: List[int] = None
         self.prefill_cache_lens: List[torch.Tensor] = None
-        self.decode_cache_len: torch.Tensor = None
+        self.decode_cache_lens: torch.Tensor = None
         self.batch_index: List[int] = None
         self.batch_index_gen: List[int] = None
-        self.prefill_cache_lens_cpu: List[int] = []
-        self.prefill_cache_lens_device: List[torch.Tensor] = None
-        self.decode_cache_lens_cpu: List[int] = []
-        self.decode_cache_lens_device: torch.Tensor = None
-        self.prefill_query_lens_cpu: List[int] = []
         # self.prefill_block_tables: List[torch.Tensor] = None
         # self.decode_block_table: torch.Tensor = None
 
@@ -57,7 +52,7 @@ class VAttentionFlashInferWrapper(BaseAttentionWrapper):
     ) -> None:
         prefill_query_lens: List[int] = []
         prefill_cache_lens: List[List[int]] = []
-        decode_cache_len: List[int] = []
+        decode_cache_lens: List[int] = []
        
         self.is_profiling_iteration = False
         self.is_metadata_initialized = True
@@ -77,26 +72,22 @@ class VAttentionFlashInferWrapper(BaseAttentionWrapper):
             if seq_metadata.is_prompt:
                 continue
             context_len = seq_metadata.seq.get_len()
-            decode_cache_len.append(context_len - 1)
+            decode_cache_lens.append(context_len - 1)
 
         self.prefill_query_lens = prefill_query_lens
-        self.prefill_cache_lens = [
-            torch.tensor(cache_lens, dtype=torch.int32, device=self.device)
-            for cache_lens in prefill_cache_lens
-        ]
-        self.prefill_cache_lens_cpu = [torch.tensor(cache_lens) for cache_lens in prefill_cache_lens]
-        self.prefill_query_lens_cpu = torch.tensor(prefill_query_lens)
+        #self.prefill_cache_lens = [
+        #    torch.tensor(cache_lens, dtype=torch.int32, device=self.device)
+        #    for cache_lens in prefill_cache_lens
+        #]
+        self.prefill_cache_lens = [torch.tensor(cache_lens) for cache_lens in prefill_cache_lens]
 
-        if decode_cache_len == []:
+        if decode_cache_lens == []:
             # no decode block table
             return
 
-        self.decode_cache_len = torch.tensor(
-            decode_cache_len, dtype=torch.int32, device=self.device
+        self.decode_cache_lens = torch.tensor(
+            decode_cache_lens, dtype=torch.int32, device=self.device
         )
-        self.decode_cache_lens_cpu = torch.tensor(decode_cache_len)
-
-       
 
     def end_forward(self):
         self.is_metadata_initialized = False
@@ -104,14 +95,10 @@ class VAttentionFlashInferWrapper(BaseAttentionWrapper):
         self.prefill_query_lens = None
         self.prefill_cache_lens = None
         self.prefill_block_tables = None
-        self.decode_cache_len = None
+        self.decode_cache_lens = None
         self.decode_block_table = None
         self.batch_index = None
         self.batch_index_gen = None
-        self.prefill_cache_lens_cpu = []
-        self.prefill_cache_lens_device = None
-        self.decode_cache_lens_cpu = []
-        self.decode_cache_lens_device = None
 
     def forward(
         self,
@@ -133,34 +120,33 @@ class VAttentionFlashInferWrapper(BaseAttentionWrapper):
         output = torch.empty_like(query, device=self.device)
         # first process the prefill attention
         idx = 0
-        for prefill_cache_len, query_len, prefill_cache_len_cpu, query_lens_cpu  in zip(
-            self.prefill_cache_lens, self.prefill_query_lens, self.prefill_cache_lens_cpu, self.prefill_query_lens_cpu
+        for prefill_cache_len, query_len  in zip(
+            self.prefill_cache_lens, self.prefill_query_lens
         ):
             
             with self.get_timer(OperationMetrics.ATTN_INPUT_RESHAPE, layer_id):
-                seq_query = query[token_offset : token_offset + query_lens_cpu].reshape(
+                seq_query = query[token_offset : token_offset + query_len].reshape(
                     -1, self.num_q_heads, self.head_dim
                 ).contiguous()
-                seq_key = key[token_offset : token_offset + query_lens_cpu].reshape(
+                seq_key = key[token_offset : token_offset + query_len].reshape(
                     -1, self.num_kv_heads, self.head_dim
                 ).contiguous()
-                seq_value = value[token_offset : token_offset + query_lens_cpu].reshape(
+                seq_value = value[token_offset : token_offset + query_len].reshape(
                     -1, self.num_kv_heads, self.head_dim
                 ).contiguous()
                 index = self.batch_index[idx]
                 # kv_cache[0][index][prefill_cache_len:prefill_cache_len+query_len].copy_(seq_key.squeeze(0))
                 # kv_cache[1][index][prefill_cache_len:prefill_cache_len+query_len].copy_(seq_value.squeeze(0))
-                key_cache = kv_cache[0][index][:prefill_cache_len_cpu+query_lens_cpu].reshape(-1, self.num_kv_heads, self.head_dim)
-                value_cache = kv_cache[1][index][:prefill_cache_len_cpu+query_lens_cpu].reshape(-1, self.num_kv_heads, self.head_dim)
+                key_cache = kv_cache[0][index][:prefill_cache_len+query_len].reshape(-1, self.num_kv_heads, self.head_dim)
+                value_cache = kv_cache[1][index][:prefill_cache_len+query_len].reshape(-1, self.num_kv_heads, self.head_dim)
             
             with self.get_timer(OperationMetrics.ATTN_KV_CACHE_SAVE, layer_id):
                 cache_flat(seq_key.squeeze(0), 
                            seq_value.squeeze(0), 
-                           key_cache.squeeze(0)[prefill_cache_len_cpu:], 
-                           value_cache.squeeze(0)[prefill_cache_len_cpu:],
+                           key_cache.squeeze(0)[prefill_cache_len:],
+                           value_cache.squeeze(0)[prefill_cache_len:],
                            "auto")
             
-
             with self.get_timer(OperationMetrics.ATTN_PREFILL, layer_id):
                 seq_output = single_prefill_with_kv_cache(
                                     seq_query,
@@ -181,10 +167,10 @@ class VAttentionFlashInferWrapper(BaseAttentionWrapper):
             idx += 1
        
 
-        if self.decode_cache_len is None:
+        if self.decode_cache_lens is None:
             return output
 
-        decode_batch_size = self.decode_cache_len.size(0)
+        decode_batch_size = self.decode_cache_lens.size(0)
 
         with self.get_timer(OperationMetrics.ATTN_INPUT_RESHAPE, layer_id):
             decode_query = query[
@@ -205,7 +191,7 @@ class VAttentionFlashInferWrapper(BaseAttentionWrapper):
                     kv_cache[1],  # v_cache,
                     decode_key,
                     decode_value,
-                    cache_seqlens=self.decode_cache_len,
+                    cache_seqlens=self.decode_cache_lens,
                     block_table=None, #self.decode_block_table,
                     softmax_scale=softmax_scale,
                     causal=True,
