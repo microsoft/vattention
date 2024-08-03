@@ -12,34 +12,9 @@
         }                                                                             \
     } while (0)
 
-#define CHECK_VATTN(x)                                                      \
-    do                                                                      \
-    {                                                                       \
-        NvU64 res = x;                                                      \
-        if (res != VATTN_OK)                                                \
-        {                                                                   \
-            std::cerr << __FILE__ << ':' << __LINE__ << ' ' << #x           \
-                      << "failed (" << (unsigned)res << "): " << std::endl; \
-            exit(1);                                                        \
-        }                                                                   \
-    } while (0)
-
-unsigned long get_num_phys_blocks(size_t num_layers, size_t free_memory, size_t page_size)
+u64 do_cuda_default_init(int device, u64 page_size)
 {
-    // size_t free, total;
-    unsigned long num_phys_blocks;
-    // CHECK_CUDA(cuMemGetInfo(&free, &total));
-    /* reserving 80% for kv cache */
-    // free = (free * 80) / 100;
-    /* do not allocate if we can't use a handle. we need multiples of 2 * num_layers */
-    num_phys_blocks = free_memory / page_size;
-    num_phys_blocks -= num_phys_blocks % (2 * num_layers);
-    return num_phys_blocks;
-}
-
-size_t do_cuda_default_init(int device, size_t page_size)
-{
-    size_t phys_granularity;
+    u64 phys_granularity;
     CHECK_CUDA(cuInit(0));
     CHECK_CUDA(cuCtxGetCurrent(&ctx));
     if (ctx == NULL)
@@ -59,89 +34,61 @@ size_t do_cuda_default_init(int device, size_t page_size)
     return phys_granularity;
 }
 
-size_t do_cuda_uvm_init(int device, size_t page_size)
+u64 do_cuda_init(int device, u64 page_size)
 {
-    /* our uvm driver support only 64KB, 128KB and 256KB page sizes */
-    assert (page_size == 64*KB || page_size == 128*KB ||
-                page_size == 256*KB);
-    CHECK_VATTN(vattn_init(device, (NvU64)page_size));
-    return page_size;
-}
-
-size_t do_cuda_init(int device, size_t page_size)
-{
-    if (use_uvm_backend(page_size))
+    if (is_uvm_backend(page_size))
         return do_cuda_uvm_init(device, page_size);
 
     return do_cuda_default_init(device, page_size);
 }
 
-int reserve_cuda_pages(size_t num_layers, size_t free_memory, size_t page_size)
+u64 reserve_cuda_pages(u64 num_layers, u64 free_memory, u64 page_size)
 {
     Log log;
-    unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory, page_size);
+    u64 num_phys_blocks = get_num_phys_blocks(num_layers, free_memory, page_size);
     log.log("Reserving " + std::to_string(num_phys_blocks) + " pages of size " + std::to_string(page_size) + " ...");
 
-    while (page_handles.size() < num_phys_blocks)
+    while (cuda_pages.size() < num_phys_blocks)
     {
-        CUmemGenericAllocationHandle handle;
-        CHECK_CUDA(cuMemCreate(&handle, page_size, &prop, 0));
-        page_handles.push_back(handle);
+        CUmemGenericAllocationHandle cuda_page;
+        CHECK_CUDA(cuMemCreate(&cuda_page, page_size, &prop, 0));
+        cuda_pages.push_back(cuda_page);
     }
 
-    return page_handles.size();
+    return cuda_pages.size();
 }
 
-int reserve_uvm_pages(size_t num_layers, size_t free_memory, size_t page_size)
+/* This function must be called only after do_cuda_init */
+u64 reserve_gpu_pages(u64 num_layers, u64 free_memory, u64 page_size)
 {
-    /* This method must be called only after do_cuda_init */
-    Log log;
-    unsigned long num_phys_blocks = get_num_phys_blocks(num_layers, free_memory, page_size);
-    log.log("Reserving " + std::to_string(num_phys_blocks) + " pages " + std::to_string(page_size) + " ...");
-
-    while (uvm_page_handles.size() < num_phys_blocks)
-    {
-        NvU64 handle;
-        CHECK_VATTN(vattn_get_mem_handle(&handle));
-        uvm_page_handles.push_back(handle);
-    }
-
-    return uvm_page_handles.size();
-}
-
-int reserve_gpu_pages(size_t num_layers, size_t free_memory, size_t page_size)
-{
-    if (use_uvm_backend(page_size))
+    if (is_uvm_backend(page_size))
         return reserve_uvm_pages(num_layers, free_memory, page_size);
 
     return reserve_cuda_pages(num_layers, free_memory, page_size);
 }
 
-void test_func()
-{
-    do_cuda_init(0, 2*MB);
-    // TODO: change this test to also consider UVM backend
-    for (int i = 0; i < 100; i++)
-    {
-        std::cout << "Iteration: " << i << std::endl;
-        CUdeviceptr ptr;
-        std::cout << "Reserving address..." << std::endl;
-        CHECK_CUDA(cuMemAddressReserve(&ptr, 2 * MB, 0, 0, 0));
-        std::cout << "ptr: " << ptr << std::endl;
-        CUmemGenericAllocationHandle handle;
-        std::cout << "Creating memory..." << std::endl;
-        CHECK_CUDA(cuMemCreate(&handle, 2 * MB, &prop, 0));
-        std::cout << "handle: " << handle << std::endl;
-        std::cout << "Mapping memory..." << std::endl;
-        CHECK_CUDA(cuMemMap(ptr, 2 * MB, 0, handle, 0));
-        std::cout << "Setting access..." << std::endl;
-        CHECK_CUDA(cuMemSetAccess(ptr, 2 * MB, &accessDesc, 1));
-        std::cout << "Unmapping memory..." << std::endl;
-        CHECK_CUDA(cuMemUnmap(ptr, 2 * MB));
-        std::cout << "Releasing memory..." << std::endl;
-        CHECK_CUDA(cuMemRelease(handle));
-        std::cout << "Freeing address..." << std::endl;
-        CHECK_CUDA(cuMemAddressFree(ptr, 2 * MB));
-        std::cout << "test_func done..." << std::endl;
+inline void map_cuda_pages(int reqId,
+                        int layer_idx,
+                        u64 req_offset,
+                        CUdeviceptr kcache_ptr,
+                        CUdeviceptr vcache_ptr,
+                        CUPage k_page,
+                        CUPage v_page) {
+    CHECK_CUDA(cuMemMap(kcache_ptr + req_offset, page_size, 0, k_page, 0));
+    CHECK_CUDA(cuMemMap(vcache_ptr + req_offset, page_size, 0, v_page, 0));
+    CHECK_CUDA(cuMemSetAccess(kcache_ptr + req_offset, page_size, &accessDesc, 1));
+    CHECK_CUDA(cuMemSetAccess(vcache_ptr + req_offset, page_size, &accessDesc, 1));
+    cuda_pagemap[std::make_tuple(reqId, req_offset, layer_idx)] = std::make_pair(k_page, v_page);
+}
+
+void do_cuda_kvcache_cleanup() {
+    for (int i = 0; i < k_tensors.size(); i++) {
+        CHECK_CUDA(cuMemUnmap(reinterpret_cast<CUdeviceptr>(k_tensors[i].data_ptr()), virt_buff_size));
+        CHECK_CUDA(cuMemUnmap(reinterpret_cast<CUdeviceptr>(v_tensors[i].data_ptr()), virt_buff_size));
+        CHECK_CUDA(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(k_tensors[i].data_ptr()), virt_buff_size));
+        CHECK_CUDA(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(v_tensors[i].data_ptr()), virt_buff_size));
     }
+
+    for(int i = 0; i < cuda_pages.size(); i++)
+        CHECK_CUDA(cuMemRelease(cuda_pages[i]));
 }

@@ -41,7 +41,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         super().__init__(cache_config, model_config, parallel_config)
 
     def num_free_blocks(self) -> int:
-        return vattention.can_allocate_new_sequence()
+        return vattention.num_free_kvblocks()
 
     def allocate_gpu_cache(self) -> List[torch.Tensor]:
         kv_cache = vattention.init_kvcache(

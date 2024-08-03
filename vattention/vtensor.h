@@ -32,7 +32,7 @@ public:
 
         C10_CUDA_CHECK(c10::cuda::GetDevice(&device));
         CUdeviceptr ptr_gpu;
-        if (!use_uvm_backend(this->page_size))
+        if (!is_uvm_backend(this->page_size))
         {
             CHECK_CUDA(cuMemAddressReserve(&ptr_gpu, size, 0, 0, 0));
         }
