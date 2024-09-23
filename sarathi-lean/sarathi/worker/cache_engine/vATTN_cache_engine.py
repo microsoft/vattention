@@ -37,6 +37,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         self.seq_to_batch_idx = {}
         self.page_size = cache_config.page_size
         self.vattn_async = True if mem_alloc_backend == "async" else False
+        self.vattn_mega_cache = True if "megacache" in model_config.attention_backend.lower() else False
         self.cache_mem_size = cache_config.memory_for_gpu
         super().__init__(cache_config, model_config, parallel_config)
 
@@ -52,17 +53,30 @@ class vATTNCacheEngine(BaseCacheEngine):
                                     self.max_model_seq_len,
                                     self.device_idx,
                                     self.dtype,
-                                    self.page_size)
+                                    self.page_size,
+                                    self.vattn_mega_cache)
+        if self.vattn_mega_cache:
+            k_cache = kv_cache[0]
+            v_cache = kv_cache[1]
+            assert k_cache.device == self.device, \
+                        "k_cache device mismatch. expected: {}, got: {}".format(self.device, self.k_cache.device)
+            assert v_cache.device == self.device, \
+                        "v_cache device mismatch expected: {}, got: {}".format(self.device, self.v_cache.device) 
 
-        k_cache = kv_cache[:self.num_layers]
-        v_cache = kv_cache[self.num_layers:]
-        for i in range(self.num_layers):
-            assert k_cache[i].device == self.device, \
-                        "k_cache device mismatch. expected: {}, got: {}".format(self.device, self.k_cache[i].device)
-            assert v_cache[i].device == self.device, \
-                        "v_cache device mismatch expected: {}, got: {}".format(self.device, self.v_cache[i].device)
+            cache_list = []
+            for i in range(self.num_layers):
+                cache_list.append((k_cache[:,:,i], v_cache[:,:,i]))
+        else:
+            k_cache = kv_cache[:self.num_layers]
+            v_cache = kv_cache[self.num_layers:]
+            for i in range(self.num_layers):
+                assert k_cache[i].device == self.device, \
+                            "k_cache device mismatch. expected: {}, got: {}".format(self.device, self.k_cache[i].device)
+                assert v_cache[i].device == self.device, \
+                            "v_cache device mismatch expected: {}, got: {}".format(self.device, self.v_cache[i].device)
+            cache_list = list(zip(k_cache, v_cache))
         vattention.reserve_physical_pages(self.cache_mem_size)
-        return list(zip(k_cache, v_cache))
+        return cache_list
 
     def get_k_cache(self, layer_idx: int) -> torch.Tensor:
         return self.gpu_cache[layer_idx][0]

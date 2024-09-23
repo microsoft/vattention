@@ -34,9 +34,13 @@ private:
     Log log;
 
 public:
+    bool megacache_enabled;
     void init_kv_block_size() {
         page_size = do_cuda_init(device, page_size);
-        tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem);
+        if (megacache_enabled)
+            tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem * num_layers);
+        else
+            tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem);
         log.log("Initialized CUDA context and memory config etc...");
         log.log("num_tokens_per_kvblock: " + std::to_string(tokens_per_page));
     }
@@ -44,7 +48,10 @@ public:
     void init_buffer_sizes() {
         u64 remainder;
 
-        virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem;
+        if (megacache_enabled)
+            virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem * num_layers;
+        else
+            virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem;
         virt_buff_size_per_req = virt_buff_size_per_token * max_context_length;
         virt_buff_size_per_req = ROUND_UP(virt_buff_size_per_req, page_size);
 
@@ -57,6 +64,8 @@ public:
 
         virt_buff_size = virt_buff_size_per_req * max_batch_size;
         virt_buff_num_kv_tokens = max_batch_size * max_context_length;
+        if (megacache_enabled)
+            virt_buff_num_kv_tokens *= num_layers;
         log.log("virt_buff_num_kv_tokens: " + std::to_string(virt_buff_num_kv_tokens));
         log.log("virt_buff_size_per_req: " + std::to_string(virt_buff_size_per_req / MB) + " MB");
         log.log("virt_buff_size: " + std::to_string(virt_buff_size / MB) + " MB");
@@ -65,7 +74,11 @@ public:
     inline void show_allocator_state() {
         std::stringstream ss;
         u64 nr_pages = !is_uvm_backend(page_size) ? cuda_pages.size() : uvm_pages.size();
-        log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS(nr_pages)) + " KV blocks");
+        if (megacache_enabled)
+            log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(nr_pages)) + " KV blocks");
+        else
+            log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS(nr_pages)) + " KV blocks");
+
         log.log("reqId : seqlen: mapped: required");
         for (int i = 0; i < max_batch_size; i++) {
             ss.str(std::string());
@@ -84,7 +97,8 @@ public:
                     long max_context_length_,
                     int device_,
                     py::object dtype_,
-                    u64 page_size_) {
+                    u64 page_size_,
+                    bool megacache) {
         assert(max_batch_size_ > 0 && max_batch_size_ < 1000);
         assert(max_context_length_ > 0 && max_context_length_ < 1000000);
         assert(num_layers_ > 0 && num_layers_ < 100);
@@ -97,6 +111,7 @@ public:
         device = device_;
         dtype = dtype_;
         page_size = page_size_;
+        megacache_enabled = megacache;
         bytes_per_elem = dtype.attr("itemsize").cast<int>();
         init_kv_block_size();
         init_buffer_sizes();
@@ -120,9 +135,13 @@ public:
 
     at::Tensor alloc_virtual_tensor() {
         at::ScalarType type_ = torch::python::detail::py_object_to_dtype(dtype);
-        at::IntArrayRef shape = {max_batch_size, max_context_length, num_kv_heads, head_size};
-        at::Tensor t = alloc_vtensor(shape, page_size, type_, allocator, device);
+        at::IntArrayRef shape;
+        if (megacache_enabled)
+            shape = {max_batch_size, max_context_length, num_layers, num_kv_heads, head_size};
+        else
+            shape = {max_batch_size, max_context_length, num_kv_heads, head_size};
 
+        at::Tensor t = alloc_vtensor(shape, page_size, type_, allocator, device);
         return t;
     }
 
@@ -132,13 +151,23 @@ public:
             return std::vector<at::Tensor>();
         }
 
-        for(int i = 0; i < 2 * num_layers; i++) {
-            at::Tensor t = alloc_virtual_tensor();
-            if (i < num_layers) {
-                k_tensors.push_back(t);
-                continue;
+        if (megacache_enabled)
+        {
+            at::Tensor t0 = alloc_virtual_tensor();
+            at::Tensor t1 = alloc_virtual_tensor();
+            k_tensors.push_back(t0);
+            v_tensors.push_back(t1);
+        }
+        else
+        {
+            for(int i = 0; i < 2 * num_layers; i++) {
+                at::Tensor t = alloc_virtual_tensor();
+                if (i < num_layers) {
+                    k_tensors.push_back(t);
+                    continue;
+                }
+                v_tensors.push_back(t);
             }
-            v_tensors.push_back(t);
         }
         std::vector<at::Tensor> tensors;
         tensors.insert(tensors.end(), k_tensors.begin(), k_tensors.end());
@@ -151,11 +180,14 @@ public:
     }
 
     inline u64 get_num_free_kvblocks() {
-        u64 free_kvblocks, overcommitted_kvblocks;
+        u64 free_kvblocks;
 
-        free_kvblocks = PAGES_TO_KVBLOCKS(get_num_free_pages(page_size));
-        overcommitted_kvblocks = get_num_overcommitted_kvblocks();
-        return free_kvblocks + overcommitted_kvblocks;
+        if (megacache_enabled)
+            free_kvblocks = PAGES_TO_KVBLOCKS_MEGACACHE(get_num_free_pages(page_size));
+        else
+            free_kvblocks = PAGES_TO_KVBLOCKS(get_num_free_pages(page_size));
+
+        return free_kvblocks + get_num_overcommitted_kvblocks();
     }
 
     /* check pages that are free as well as overcommitted */
@@ -164,19 +196,31 @@ public:
     }
 
     inline bool kvblocks_available(u64 num_kvblocks) {
+        if (megacache_enabled)
+            return PAGES_TO_KVBLOCKS_MEGACACHE(get_num_free_pages(page_size)) >= num_kvblocks? true : false;
         return PAGES_TO_KVBLOCKS(get_num_free_pages(page_size)) >= num_kvblocks? true : false;
     }
 
     inline void unmap_req_page_one(int reqId) {
         u64 req_offset;
-
         req_offset = get_req_current_unmap_offset(reqId);
-        for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
-            CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
-            CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
-            UNMAP_PAGES(reqId, layer_idx, req_offset, kcache_ptr, vcache_ptr, page_size);
+        if (megacache_enabled)
+        {
+            CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[0].data_ptr());
+            CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[0].data_ptr());
+            UNMAP_PAGES(reqId, 0, req_offset, kcache_ptr, vcache_ptr, page_size);
+            dec_req_page_count(reqId);
         }
-        dec_req_page_count(reqId);
+        else
+        {
+
+            for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
+                CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
+                CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
+                UNMAP_PAGES(reqId, layer_idx, req_offset, kcache_ptr, vcache_ptr, page_size);
+            }
+            dec_req_page_count(reqId);
+        }
     }
 
     inline void release_kvcache_pages_some(int reqId, u64 retain_blocks) {
@@ -215,8 +259,16 @@ public:
 
             /* there is no other option but to abort */
             verbose = true;
-            log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
-            log.log("required: " + std::to_string(num_blocks));
+            if (megacache_enabled)
+            {
+                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(cuda_pages.size())));
+                log.log("required: " + std::to_string(num_blocks));
+            }
+            else
+            {
+                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
+                log.log("required: " + std::to_string(num_blocks));
+            }
             show_allocator_state();
             throw std::runtime_error("***** OOM on demand: not enough free pages to continue *****");
             return;
@@ -227,13 +279,24 @@ public:
             if (!is_valid_offset(reqId, req_offset, sync))
                 return;
 
-            for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
-                CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
-                CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
-                MAP_PAGES(reqId, layer_idx, req_offset, kcache_ptr, vcache_ptr, page_size);
+            if (megacache_enabled)
+            {
+                CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[0].data_ptr());
+                CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[0].data_ptr());
+                MAP_PAGES(reqId, 0, req_offset, kcache_ptr, vcache_ptr, page_size);
+                inc_req_page_count(reqId);
 
             }
-            inc_req_page_count(reqId);
+            else
+            {
+                for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
+                    CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
+                    CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
+                    MAP_PAGES(reqId, layer_idx, req_offset, kcache_ptr, vcache_ptr, page_size);
+
+                }
+                inc_req_page_count(reqId);
+            }
         }
     }
 
@@ -247,20 +310,39 @@ public:
             return;
 
         if(!kvblocks_available(num_blocks)) {
-            log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
-            log.log("required: " + std::to_string(num_blocks));
+            if (megacache_enabled)
+            {
+                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(cuda_pages.size())));
+                log.log("required: " + std::to_string(num_blocks));
+            }
+            else
+            {
+                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
+                log.log("required: " + std::to_string(num_blocks));
+            }
             throw std::runtime_error("***** OOM on demand: not enough free pages to continue *****");
             return;
         }
 
         for (int count = 0; count < num_blocks; count++) {
-            for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
-                CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
-                CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
-                MAP_COMMON_PAGES(layer_idx, kcache_ptr, vcache_ptr, page_size);
+            if (megacache_enabled)
+            {
+                CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[0].data_ptr());
+                CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[0].data_ptr());
+                MAP_COMMON_PAGES(0, kcache_ptr, vcache_ptr, page_size);
+                for (int reqId = 0; reqId < max_batch_size; reqId++)
+                    inc_req_page_count(reqId);
             }
-            for (int reqId = 0; reqId < max_batch_size; reqId++)
-                inc_req_page_count(reqId);
+            else
+            {
+                for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
+                    CUdeviceptr kcache_ptr = reinterpret_cast<CUdeviceptr>(k_tensors[layer_idx].data_ptr());
+                    CUdeviceptr vcache_ptr = reinterpret_cast<CUdeviceptr>(v_tensors[layer_idx].data_ptr());
+                    MAP_COMMON_PAGES(layer_idx, kcache_ptr, vcache_ptr, page_size);
+                }
+                for (int reqId = 0; reqId < max_batch_size; reqId++)
+                    inc_req_page_count(reqId);
+            }
         }
     }
 

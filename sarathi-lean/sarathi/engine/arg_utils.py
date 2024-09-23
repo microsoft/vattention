@@ -154,6 +154,8 @@ class EngineArgs:
             # now, divide block size by head_dim per kv head
             block_size = block_size // (model_config.hf_config.hidden_size // model_config.hf_config.num_attention_heads)
             # finally, divide by number of bytes per element
+            if "megacache" in self.attention_backend.lower():
+                block_size = block_size // (model_config.hf_config.num_hidden_layers // self.pipeline_parallel_size)
             block_size = block_size // elem_size
 
         cache_config = CacheConfig(

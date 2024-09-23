@@ -3,11 +3,11 @@ static vAttentionCachingAllocator vattn;
 std::vector<at::Tensor> init_kvcache(unsigned long num_layers, unsigned long num_kv_heads,
                         unsigned long head_size, unsigned long max_batch_size,
                         unsigned long max_context_length, int device,
-                        py::object dtype, u64 page_size) {
+                        py::object dtype, u64 page_size, bool megacache) {
     std::vector<at::Tensor> tensors;
     vattn.init_kvcache(num_layers, num_kv_heads, head_size,
                                     max_batch_size, max_context_length,
-                                    device, dtype, page_size);
+                                    device, dtype, page_size, megacache);
     tensors = vattn.init_kvcache_virtual();
     return tensors;
 }

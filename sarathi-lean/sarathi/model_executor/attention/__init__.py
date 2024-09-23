@@ -36,6 +36,8 @@ class AttentionBackend(Enum):
     NO_OP = "NO_OP"
     FA3_VATTN = "FA3_VATTN"
     FA3_VATTN_SYNC = "FA3_VATTN_SYNC"
+    FA_VATTN_MEGACACHE = "FA_VATTN_MEGACACHE"
+    FA_VATTN_MEGACACHE_SYNC = "FA_VATTN_MEGACACHE_SYNC"
 
     def is_attn_contiguous(attn_cfg):
       
@@ -46,6 +48,8 @@ class AttentionBackend(Enum):
             AttentionBackend.FI_VATTN_SYNC.value,
             AttentionBackend.FA3_VATTN.value,
             AttentionBackend.FA3_VATTN_SYNC.value,
+            AttentionBackend.FA_VATTN_MEGACACHE.value,
+            AttentionBackend.FA_VATTN_MEGACACHE_SYNC.value,
         ]
 
     def is_vATTN(attn_cfg):
@@ -56,6 +60,8 @@ class AttentionBackend(Enum):
             AttentionBackend.FI_VATTN_SYNC.value,
             AttentionBackend.FA3_VATTN.value,
             AttentionBackend.FA3_VATTN_SYNC.value,
+            AttentionBackend.FA_VATTN_MEGACACHE.value,
+            AttentionBackend.FA_VATTN_MEGACACHE_SYNC.value,
         ]
 
     def is_vATTN_SYNC(attn_cfg):
@@ -63,6 +69,7 @@ class AttentionBackend(Enum):
             AttentionBackend.FA_VATTN_SYNC.value,
             AttentionBackend.FI_VATTN_SYNC.value,
             AttentionBackend.FA3_VATTN_SYNC.value,
+            AttentionBackend.FA_VATTN_MEGACACHE_SYNC.value,
         ]
 
     def is_vLLM(attn_cfg):
@@ -112,7 +119,10 @@ def get_attention_wrapper():
         return VAttentionFlashAttention3_Wrapper.get_instance()
     elif ATTENTION_BACKEND == AttentionBackend.FA3_VATTN_SYNC:
         return VAttentionFlashAttention3_Wrapper.get_instance()
-
+    elif ATTENTION_BACKEND == AttentionBackend.FA_VATTN_MEGACACHE:
+        return VAttentionFlashAttentionWrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FA_VATTN_MEGACACHE_SYNC:
+        return VAttentionFlashAttentionWrapper.get_instance()
 
     raise ValueError(f"Unsupported attention backend: {ATTENTION_BACKEND}")
 
@@ -125,7 +135,8 @@ def is_vattention_backend():
         AttentionBackend.FI_VATTN_SYNC,
         AttentionBackend.FA3_VATTN,
         AttentionBackend.FA3_VATTN_SYNC,
-
+        AttentionBackend.FA_VATTN_MEGACACHE,
+        AttentionBackend.FA_VATTN_MEGACACHE_SYNC,
     ]
 
 def is_vLLM_backend():
@@ -144,4 +155,6 @@ def is_attn_contiguous():
         AttentionBackend.FI_VATTN_SYNC,
         AttentionBackend.FA3_VATTN,
         AttentionBackend.FA3_VATTN_SYNC,
+        AttentionBackend.FA_VATTN_MEGACACHE,
+        AttentionBackend.FA_VATTN_MEGACACHE_SYNC,
     ]

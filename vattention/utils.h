@@ -8,6 +8,7 @@
 #define KVBLOCKS_TO_PAGES(kvblocks) ((kvblocks) * (2) * (num_layers))
 #define PAGES_TO_KVBLOCKS(pages) ((pages) / (2 * (num_layers)))
 #define ROUND_UP(x, y) ((((x) + (y) - 1) / (y)) * (y))
+#define PAGES_TO_KVBLOCKS_MEGACACHE(pages) ((pages) / 2)
 bool verbose = false;
 
 typedef long long unsigned int NvU64;
