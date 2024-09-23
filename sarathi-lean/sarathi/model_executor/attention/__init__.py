@@ -22,6 +22,15 @@ from sarathi.model_executor.attention.flashinfer_unpaged_attention_wrapper impor
 from sarathi.model_executor.attention.vattention_flashattention3_wrapper import (
     VAttentionFlashAttention3_Wrapper,
 )
+from sarathi.model_executor.attention.vattention_flashattention_pod_wrapper import (
+    VAttentionFlashAttentionPODWrapper,
+)
+from sarathi.model_executor.attention.vattention_flashattention_streams_wrapper import (
+    VAttentionFlashAttentionStreamsWrapper,
+)
+from sarathi.model_executor.attention.flashinfer_paged_serial_attention_wrapper import (
+    FlashInferSerialAttentionWrapper,
+)
 # FA: FLASHATTENTION
 # FI: FLASHINFER
 class AttentionBackend(Enum):
@@ -38,9 +47,14 @@ class AttentionBackend(Enum):
     FA3_VATTN_SYNC = "FA3_VATTN_SYNC"
     FA_VATTN_MEGACACHE = "FA_VATTN_MEGACACHE"
     FA_VATTN_MEGACACHE_SYNC = "FA_VATTN_MEGACACHE_SYNC"
+    FA_POD = "FA_POD"
+    FA_STREAMS = "FA_STREAMS"
+    FI_SERIAL_PAGED = "FI_SERIAL_PAGED"
+    FA_POD_MEGACACHE = "FA_POD_MEGACACHE"
+    FA_STREAMS_MEGACACHE = "FA_STREAMS_MEGACACHE"
 
     def is_attn_contiguous(attn_cfg):
-      
+
         return attn_cfg.upper() in [
             AttentionBackend.FA_VATTN.value,
             AttentionBackend.FI_VATTN.value,
@@ -50,6 +64,10 @@ class AttentionBackend(Enum):
             AttentionBackend.FA3_VATTN_SYNC.value,
             AttentionBackend.FA_VATTN_MEGACACHE.value,
             AttentionBackend.FA_VATTN_MEGACACHE_SYNC.value,
+            AttentionBackend.FA_POD.value,
+            AttentionBackend.FA_STREAMS.value,
+            AttentionBackend.FA_POD_MEGACACHE.value,
+            AttentionBackend.FA_STREAMS_MEGACACHE.value,
         ]
 
     def is_vATTN(attn_cfg):
@@ -62,6 +80,10 @@ class AttentionBackend(Enum):
             AttentionBackend.FA3_VATTN_SYNC.value,
             AttentionBackend.FA_VATTN_MEGACACHE.value,
             AttentionBackend.FA_VATTN_MEGACACHE_SYNC.value,
+            AttentionBackend.FA_POD.value,
+            AttentionBackend.FA_STREAMS.value,
+            AttentionBackend.FA_POD_MEGACACHE.value,
+            AttentionBackend.FA_STREAMS_MEGACACHE.value,
         ]
 
     def is_vATTN_SYNC(attn_cfg):
@@ -77,14 +99,15 @@ class AttentionBackend(Enum):
             AttentionBackend.FA_PAGED.value,
             AttentionBackend.FI_PAGED.value,
             AttentionBackend.FI_UNPAGED.value,
+            AttentionBackend.FI_SERIAL_PAGED.value,
         ]
 
 ATTENTION_BACKEND = AttentionBackend.NO_OP
 
 def get_attn_type():
-    return ATTENTION_BACKEND.value  
+    return ATTENTION_BACKEND.value
 
-    
+
 def set_attention_backend(backend: Union[str, AttentionBackend]):
     if isinstance(backend, str):
         backend = backend.upper()
@@ -123,6 +146,16 @@ def get_attention_wrapper():
         return VAttentionFlashAttentionWrapper.get_instance()
     elif ATTENTION_BACKEND == AttentionBackend.FA_VATTN_MEGACACHE_SYNC:
         return VAttentionFlashAttentionWrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FI_SERIAL_PAGED:
+        return FlashInferSerialAttentionWrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FA_POD:
+        return VAttentionFlashAttentionPODWrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FA_STREAMS:
+        return VAttentionFlashAttentionStreamsWrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FA_POD_MEGACACHE:
+        return VAttentionFlashAttentionPODWrapper.get_instance()
+    elif ATTENTION_BACKEND == AttentionBackend.FA_STREAMS_MEGACACHE:
+        return VAttentionFlashAttentionStreamsWrapper.get_instance()
 
     raise ValueError(f"Unsupported attention backend: {ATTENTION_BACKEND}")
 
@@ -137,6 +170,10 @@ def is_vattention_backend():
         AttentionBackend.FA3_VATTN_SYNC,
         AttentionBackend.FA_VATTN_MEGACACHE,
         AttentionBackend.FA_VATTN_MEGACACHE_SYNC,
+        AttentionBackend.FA_POD,
+        AttentionBackend.FA_STREAMS,
+        AttentionBackend.FA_POD_MEGACACHE,
+        AttentionBackend.FA_STREAMS_MEGACACHE,
     ]
 
 def is_vLLM_backend():
@@ -144,7 +181,7 @@ def is_vLLM_backend():
         AttentionBackend.FA_PAGED,
         AttentionBackend.FI_PAGED,
         AttentionBackend.FI_UNPAGED,
-
+        AttentionBackend.FI_SERIAL_PAGED,
     ]
 
 def is_attn_contiguous():
@@ -157,4 +194,8 @@ def is_attn_contiguous():
         AttentionBackend.FA3_VATTN_SYNC,
         AttentionBackend.FA_VATTN_MEGACACHE,
         AttentionBackend.FA_VATTN_MEGACACHE_SYNC,
+        AttentionBackend.FA_POD,
+        AttentionBackend.FA_STREAMS,
+        AttentionBackend.FA_POD_MEGACACHE,
+        AttentionBackend.FA_STREAMS_MEGACACHE,
     ]
