@@ -25,6 +25,9 @@ from sarathi.metrics.metrics_store import MetricsStore
 from sarathi.transformers_utils.tokenizer import get_tokenizer
 from sarathi.utils import Counter, get_ip, get_random_port, unset_cuda_visible_devices
 from sarathi.model_executor.attention import AttentionBackend
+from sarathi.core.block_space_manager.vattention_block_space_manager import (
+    vAttentionBlockSpaceManager
+)
 
 logger = init_logger(__name__)
 
@@ -376,7 +379,14 @@ class BaseLLMEngine:
         Finally, it decodes the sequences and returns the newly generated results.
         """
         outputs = self._run_workers("get_free_blocks" ,get_all_outputs=True)
-        # print(f"free blocks: {outputs}")
+        if type(self.scheduler.block_manager)==vAttentionBlockSpaceManager:
+            if len(self.scheduler.block_manager.preemption_queue)>0:
+                preemption_queue = self.scheduler.block_manager.preemption_queue
+                self.scheduler.block_manager.preemption_queue = []
+            else:
+                preemption_queue = []
+        else:
+            preemption_queue = []
         self.scheduler.block_manager.set_free_blocks(min(outputs))
         start_time = time.perf_counter()
         with self._scheduler_timer:
@@ -391,6 +401,7 @@ class BaseLLMEngine:
         sampler_outputs = self._run_workers(
             "execute_model",
             scheduler_outputs=scheduler_outputs,
+            preempted_seq=preemption_queue,
         )
         # self.scheduler.block_manager.reset_free_blocks()
         # sampler_outputs, num_free_blocks = zip(*sampler_outputs)

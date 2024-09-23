@@ -78,6 +78,10 @@ class vATTNCacheEngine(BaseCacheEngine):
         vattention.reserve_physical_pages(self.cache_mem_size)
         return cache_list
 
+    def preempt_requests(self, preempted_seq: List[int]) -> None:
+        for seq in preempted_seq:
+            self.free_request(seq.seq_id)
+
     def get_k_cache(self, layer_idx: int) -> torch.Tensor:
         return self.gpu_cache[layer_idx][0]
 
