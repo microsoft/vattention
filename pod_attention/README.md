@@ -1,0 +1,2 @@
+# Introduction
+This repository contains the source code and profiling scripts for Sangam. Sangam fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously.
