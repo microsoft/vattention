@@ -33,7 +33,7 @@ def true_fused_attn_with_kvcache(
     alibi_slopes=None,
     num_splits=0,
     return_softmax_lse=False,
-    fused_params=0,
+    fused_params=9,
 ):
     # If only one set of params is sent, call vanilla flash attention instead
     if q_p == None:
