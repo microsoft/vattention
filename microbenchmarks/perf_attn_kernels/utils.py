@@ -2,7 +2,7 @@ import torch
 
 dtype = torch.float16
 device = 'cuda'
-warmup_steps, active_steps = 5, 10
+warmup_steps, active_steps = 5, 1000
 
 start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
@@ -21,11 +21,12 @@ attn_configs = {
 }
 
 def launch_big_kernel():
-    m, n, k = 48000, 48000, 48000
-    a = torch.randn(m, k, device='cuda', dtype=torch.float16)
-    b = torch.randn(k, n, device='cuda', dtype=torch.float16)
-    c = torch.matmul(a, b)
-    return c
+    return 0
+    # m, n, k = 2000, 1000, 2000
+    # a = torch.randn(m, k, device='cuda', dtype=torch.float16)
+    # b = torch.randn(k, n, device='cuda', dtype=torch.float16)
+    # c = torch.matmul(a, b)
+    # return c
 
 def calc_latency(start, end, steps):
     return round(start.elapsed_time(end) / steps, 3)
