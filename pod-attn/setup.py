@@ -32,7 +32,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
-PACKAGE_NAME = "pod_ampere"
+PACKAGE_NAME = "pod-attn"
 
 BASE_WHEEL_URL = (
     "https://github.com/Dao-AILab/flash-attention/releases/download/{tag_name}/{wheel_name}"
@@ -134,21 +134,21 @@ if not SKIP_CUDA_BUILD:
         CUDAExtension(
             name="fused_attn",
             sources=[
-                "pod_ampere/fused_api.cpp",
-                "pod_ampere/fused_fwd_hdim128_fp16_sm80.cu",
-                "pod_ampere/fused_fwd_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/fused_fwd_split_hdim128_fp16_sm80.cu",
-                "pod_ampere/fused_fwd_split_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_split_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_fo9_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_fo11_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_fo13_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_split_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_fo9_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_fo11_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_fo13_sm80.cu",
+                "pod-attn/fused_api.cpp",
+                "pod-attn/fused_fwd_hdim128_fp16_sm80.cu",
+                "pod-attn/fused_fwd_hdim128_fp16_causal_sm80.cu",
+                "pod-attn/fused_fwd_split_hdim128_fp16_sm80.cu",
+                "pod-attn/fused_fwd_split_hdim128_fp16_causal_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_split_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_fo9_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_fo11_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_fo13_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_causal_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_causal_split_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_causal_fo9_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_causal_fo11_sm80.cu",
+                "pod-attn/truefused_fwd_hdim128_fp16_causal_fo13_sm80.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"] + generator_flag,
@@ -188,11 +188,11 @@ if not SKIP_CUDA_BUILD:
         CUDAExtension(
             name="flash_attn_og",
             sources=[
-                "pod_ampere/flash_api.cpp",
-                "pod_ampere/flash_fwd_hdim128_fp16_sm80.cu",
-                "pod_ampere/flash_fwd_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/flash_fwd_split_hdim128_fp16_sm80.cu",
-                "pod_ampere/flash_fwd_split_hdim128_fp16_causal_sm80.cu",
+                "pod-attn/flash_api.cpp",
+                "pod-attn/flash_fwd_hdim128_fp16_sm80.cu",
+                "pod-attn/flash_fwd_hdim128_fp16_causal_sm80.cu",
+                "pod-attn/flash_fwd_split_hdim128_fp16_sm80.cu",
+                "pod-attn/flash_fwd_split_hdim128_fp16_causal_sm80.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"] + generator_flag,
@@ -231,7 +231,7 @@ if not SKIP_CUDA_BUILD:
 
 
 def get_package_version():
-    with open(Path(this_dir) / "pod_ampere" / "__init__.py", "r") as f:
+    with open(Path(this_dir) / "pod-attn" / "__init__.py", "r") as f:
         version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
     public_version = ast.literal_eval(version_match.group(1))
     local_version = os.environ.get("FLASH_ATTN_LOCAL_VERSION")
@@ -335,7 +335,7 @@ setup(
             "benchmarks",
             "microbenchmarks",
             "fused_hopper",
-            "pod_ampere.egg-info",
+            "pod-attn.egg-info",
             "fused_hopper.egg-info",
         )
     ),

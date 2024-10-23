@@ -7,7 +7,7 @@ import torch.nn as nn
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import fused_attn as fused_attn_cuda
-import pod_ampere.flash_attn_interface as fa
+import pod-attn.flash_attn_interface as fa
 
 def true_fused_attn_with_kvcache(
     q_p,

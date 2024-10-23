@@ -8,7 +8,7 @@ This repository originally started as a fork of [FlashAttention](https://github.
 
 To build POD-Attention, run the following command:
 ```sh
-python setup_ampere.py install 
+python setup.py install 
 ```
 
 # Running POD-Attention
