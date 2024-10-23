@@ -22,6 +22,7 @@ class vAttentionBlockSpaceManager():
         assert watermark >= 0.0
         self.watermark_blocks = int(watermark * num_gpu_blocks)
         self.active_requests: Dict[int, Sequence] = {}
+        self.preemption_queue = []
 
     # def reset_free_blocks():
     #     self.free_blocks = 0
@@ -77,6 +78,7 @@ class vAttentionBlockSpaceManager():
             return
         else:
             del self.active_requests[seq.seq_id]
+            self.free_blocks += self.get_num_blocks(seq)
 
     def reset(self) -> None:
         self.active_requests = {}
@@ -92,7 +94,7 @@ class vAttentionBlockSpaceManager():
         return seq.seq_id in self.active_requests
     
     def get_num_free_gpu_blocks(self, seq: Sequence) -> int:
-        return vattention.get_num_free_blocks(seq.get_len())
+        return self.free_blocks
 
 
 # class BaseBlockSpaceManager(ABC):

@@ -2,7 +2,7 @@
 
 import os
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 import torch.distributed
@@ -153,6 +153,9 @@ class BaseWorker:
     def get_free_blocks(self) -> int:
         return self.cache_engine.num_free_blocks()
     
+    def preempt_requests(self, preempted_seq: List) -> None:
+        self.cache_engine.preempt_requests(preempted_seq)
+
     @synchronized
     def add_seq(self, seq: Sequence) -> None:
         self.seq_manager.add_seq(seq)
@@ -171,11 +174,14 @@ class BaseWorker:
     def execute_model(
         self,
         scheduler_outputs: SchedulerOutputs,
+        preempted_seq: Optional[List] = None,
     ) -> Optional[SamplerOutputs]:
         
         batch_stage_start_time = time.monotonic()
         self.seq_manager.block_manager.set_free_blocks(self.cache_engine.num_free_blocks()) 
         _, seq_metadata_list = self.seq_manager.on_schedule(scheduler_outputs)
+        if preempted_seq:
+            self.preempt_requests(preempted_seq)
 
         self.cache_engine.step(seq_metadata_list)
 

@@ -8,6 +8,7 @@
 #define KVBLOCKS_TO_PAGES(kvblocks) ((kvblocks) * (2) * (num_layers))
 #define PAGES_TO_KVBLOCKS(pages) ((pages) / (2 * (num_layers)))
 #define ROUND_UP(x, y) ((((x) + (y) - 1) / (y)) * (y))
+#define PAGES_TO_KVBLOCKS_MEGACACHE(pages) ((pages) / 2)
 bool verbose = false;
 
 typedef long long unsigned int NvU64;
@@ -64,89 +65,108 @@ u64 tokens_per_page; // number of elements per physical block
 u64 max_pages_per_req;
 
 /* physical memory metadata */
-std::vector<u64> mapped_pages; // per request allocated block count
+std::vector<u64> mapped_pages;     // per request allocated block count
 std::vector<u64> curr_seq_lengths; // per request allocated block count
 
 /* garbage collection thread to utilize slack */
 std::thread gc_thread;
 
 /*
-* This controls whether we want to reclaim memory in the background
-* thread or not. If set to false, reclaim memory only when required.
-*/
+ * This controls whether we want to reclaim memory in the background
+ * thread or not. If set to false, reclaim memory only when required.
+ */
 bool deferred_reclaim = true;
 
 /* memory allocator specific. page_size is in bytes */
 u64 page_size = 2 * MB;
 
-static inline bool is_uvm_backend(u64 page_size) {
+static inline bool is_uvm_backend(u64 page_size)
+{
     return page_size != 2 * MB;
 }
 
-void init_kvcache_batch_metadata() {
+void init_kvcache_batch_metadata()
+{
     mapped_pages.resize(max_batch_size);
     curr_seq_lengths.resize(max_batch_size);
-    for(int i = 0; i < max_batch_size; i++) {
+    for (int i = 0; i < max_batch_size; i++)
+    {
         curr_seq_lengths[i] = 0;
         mapped_pages[i] = 0;
     }
 }
 
-bool check_kvcache_config() {
+bool check_kvcache_config()
+{
     return !(num_layers == 0 || num_kv_heads == 0 || head_size == 0 ||
-                max_batch_size == 0 || max_context_length == 0);
+             max_batch_size == 0 || max_context_length == 0);
 }
 
-inline u64 tokens_to_pages(u64 num_tokens) {
+inline u64 tokens_to_pages(u64 num_tokens)
+{
     return (num_tokens + tokens_per_page - 1) / tokens_per_page;
 }
 
-inline u64 pages_to_tokens(u64 num_blocks) {
+inline u64 pages_to_tokens(u64 num_blocks)
+{
     return num_blocks * tokens_per_page;
 }
 
-inline u64 get_req_mapped_tokens(int reqId) {
+inline u64 get_req_mapped_tokens(int reqId)
+{
     return pages_to_tokens(mapped_pages[reqId]);
 }
 
-inline u64 get_req_pages(int reqId) {
+inline u64 get_req_pages(int reqId)
+{
     return mapped_pages[reqId];
 }
 
-inline u64 inc_req_page_count(int reqId) {
+inline u64 inc_req_page_count(int reqId)
+{
     return ++mapped_pages[reqId];
 }
 
-inline u64 dec_req_page_count(int reqId) {
+inline u64 dec_req_page_count(int reqId)
+{
     return --mapped_pages[reqId];
 }
 
-inline u64 get_req_begin_offset_virt(int reqId) {
+inline u64 get_req_begin_offset_virt(int reqId)
+{
     return reqId * virt_buff_size_per_req;
 }
 
-inline bool is_active_req(int reqId) {
+inline bool is_active_req(int reqId)
+{
     return curr_seq_lengths[reqId] != 0;
 }
 
-inline u64 get_req_seq_length(int reqId) {
+inline u64 get_req_seq_length(int reqId)
+{
     return curr_seq_lengths[reqId];
 }
 
-inline void set_req_seq_length(int reqId, u64 seq_len) {
+inline void set_req_seq_length(int reqId, u64 seq_len)
+{
     curr_seq_lengths[reqId] = seq_len;
 }
 
-inline void set_curr_seq_lengths(std::vector<u64> seq_lens) {
+inline void set_curr_seq_lengths(std::vector<u64> seq_lens)
+{
     curr_seq_lengths = seq_lens;
 }
 
-inline void wait_kvcache_manager_sync() {
-    while (mem_manager_running);
+inline void wait_kvcache_manager_sync()
+{
+    while (mem_manager_running)
+        ;
 }
 
-inline void set_seq_lengths_for_next_step(std::vector<u64> seq_lens) {
-    for (int reqId = 0; reqId < max_batch_size; reqId++) {
+inline void set_seq_lengths_for_next_step(std::vector<u64> seq_lens)
+{
+    for (int reqId = 0; reqId < max_batch_size; reqId++)
+    {
         if (!is_active_req(reqId))
             continue;
 
@@ -154,21 +174,24 @@ inline void set_seq_lengths_for_next_step(std::vector<u64> seq_lens) {
     }
 }
 
-inline u64 get_num_overcommitted_kvblocks() {
+inline u64 get_num_overcommitted_kvblocks()
+{
     u64 overcommitted_kvblocks = 0;
     for (int reqId = 0; reqId < max_batch_size; reqId++)
         overcommitted_kvblocks += mapped_pages[reqId] - tokens_to_pages(get_req_seq_length(reqId));
     return overcommitted_kvblocks;
 }
 
-inline u64 get_req_current_map_offset(int reqId) {
+inline u64 get_req_current_map_offset(int reqId)
+{
     u64 num_mapped_blocks = get_req_pages(reqId);
     u64 block_offset_within_req = num_mapped_blocks * page_size;
 
     return get_req_begin_offset_virt(reqId) + block_offset_within_req;
 }
 
-inline u64 get_req_current_unmap_offset(int reqId) {
+inline u64 get_req_current_unmap_offset(int reqId)
+{
     u64 num_mapped_blocks;
     u64 block_offset_within_req;
 
@@ -176,11 +199,12 @@ inline u64 get_req_current_unmap_offset(int reqId) {
     /* unmap should not be called if nothing is mapped */
     assert(num_mapped_blocks > 0);
     /* return the offset to unmap, which is the beginning of the last mapped block */
-    block_offset_within_req = (num_mapped_blocks-1) * page_size;
+    block_offset_within_req = (num_mapped_blocks - 1) * page_size;
     return get_req_begin_offset_virt(reqId) + block_offset_within_req;
 }
 
-u64 need_new_page_async(int reqId, int eager_step_count) {
+u64 need_new_page_async(int reqId, int eager_step_count)
+{
     if (!is_active_req(reqId))
         return 0;
 
@@ -203,10 +227,12 @@ u64 get_num_phys_blocks(u64 num_layers, u64 free_memory, u64 page_size)
     return num_phys_blocks;
 }
 
-class Log {
-  public:
-    void log(const std::string& msg) {
-      if (verbose)
-        std::cout << msg << std::endl;
+class Log
+{
+public:
+    void log(const std::string &msg)
+    {
+        if (verbose)
+            std::cout << msg << std::endl;
     }
 };

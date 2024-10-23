@@ -138,6 +138,8 @@ class BaseScheduler(ABC):
     ) -> None:
         assert seq.is_executing()
         self._free_seq(seq)
+        if type(self.block_manager) == vAttentionBlockSpaceManager:
+            self.block_manager.preemption_queue.append(seq)
         self.waiting.insert(0, seq)
 
     def _check_request_prompt_length(self, seq: Sequence) -> bool:
