@@ -340,7 +340,7 @@ setup(
     description="POD-Attention: Unlocking Full Prefill-Decode Overlap for Faster LLM Inference",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/AKKamath/vattention/tree/main/pod_attn",
+    url="https://github.com/microsoft/vattention/tree/main/pod_attn",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Operating System :: Unix",
