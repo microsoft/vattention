@@ -63,7 +63,7 @@ for model in model_configs:
                     fa_prefill, fa_p_latency = fabench.do_fa_prefill(q_p, k_p, v_p, seq_lens_k=cache_seqlens_p)
                     fa_decode, fa_d_latency = fabench.do_fa_decode(q_d, k_d, v_d, k_new=k_new, v_new=v_new, seq_lens_k=cache_seqlens_d, cache_batch_idx=cache_batch_idx)
                     fa_stream_p, fa_stream_d, fa_stream_latency = fabench.do_fa_prefill_decode_streams(q_p, k_p, v_p, q_d, k_d, v_d, k_new=k_new, v_new=v_new, seq_lens_k_p=cache_seqlens_p, seq_lens_k_d=cache_seqlens_d, cache_batch_idx=cache_batch_idx)
-                    fi_p_latency = fibench.do_flashinfer_prefill_paged(1, cs, cache_seqlen, num_heads, num_kv_heads, head_size, 16)
+                    fi_prefill, fi_p_latency = fibench.do_flashinfer_prefill_paged(1, cs, cache_seqlen, num_heads, num_kv_heads, head_size, 16)
                     fi_d_latency = fibench.do_flashinfer_decode_paged(bs, cl, num_heads, num_kv_heads, head_size, 16)
                     fi_fused_latency = fibench.do_flashinfer_fused_paged(cs, cache_seqlen, bs, cl, num_heads, num_kv_heads, head_size, 16)
                     fa_fused_latency, best_fused_op = 99999, -1
