@@ -10,16 +10,25 @@ def do_flashinfer_prefill(bs, cl, num_heads, num_kv_heads, head_dim):
         q = torch.randn(cl, num_heads, head_dim, device=utils.device, dtype=utils.dtype)
         k = torch.randn(cl, num_kv_heads, head_dim, device=utils.device, dtype=utils.dtype)
         v = torch.randn(cl, num_kv_heads, head_dim, device=utils.device, dtype=utils.dtype)
+        return do_flashinfer_prefill_input(q, k, v)
+    except Exception as e:
+        print(e)
+        return -1
+
+@torch.inference_mode
+def do_flashinfer_prefill_input(q, k, v):
+    try:
+        #assert bs == 1, "batch size must be 1 for flashinfer prefill"
         for _ in range(utils.warmup_steps):
-            fi.single_prefill_with_kv_cache(q, k, v)
+            fi.single_prefill_with_kv_cache(q, k, v, causal=True)
         utils.launch_big_kernel()
         utils.start.record()
         for _ in range(utils.active_steps):
-            fi.single_prefill_with_kv_cache(q, k, v)
+            output = fi.single_prefill_with_kv_cache(q, k, v, causal=True)
         utils.end.record()
         torch.cuda.synchronize()
         latency = utils.calc_latency(utils.start, utils.end, utils.active_steps)
-        return latency
+        return output, latency
     except Exception as e:
         print(e)
         return -1
@@ -31,6 +40,22 @@ def do_flashinfer_prefill_ragged(bs, cl, cache_seqlen, num_heads, num_kv_heads, 
         q = torch.randn(bs*cl, num_heads, head_dim, dtype=utils.dtype, device=utils.device)
         k = torch.randn(bs*cache_seqlen, num_kv_heads, head_dim, dtype=utils.dtype, device=utils.device)
         v = torch.randn(bs*cache_seqlen, num_kv_heads, head_dim, dtype=utils.dtype, device=utils.device)
+        return do_flashinfer_prefill_ragged_input(q, k, v)
+    except Exception as e:
+        print(e)
+        return -1
+
+@torch.inference_mode
+def do_flashinfer_prefill_ragged_input(q, k, v):
+    try:
+        #assert bs == 1, "batch size must be 1 for flashinfer prefill"
+        bs = 1
+        assert k.size(2) == q.size(2), "head_dim must be the same for q and k"
+        cl = q.size(0)
+        num_heads = q.size(1)
+        cache_seqlen = k.size(0)
+        num_kv_heads = k.size(1)
+        head_dim = k.size(2)
         qo_idx_ptr = torch.tensor([i*cl for i in range(bs+1)], dtype=torch.int32, device=utils.device)
         kv_idx_ptr = torch.tensor([i*cache_seqlen for i in range(bs+1)], dtype=torch.int32, device=utils.device)
         # allocate 16MB workspace buffer

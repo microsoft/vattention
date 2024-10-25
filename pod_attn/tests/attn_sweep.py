@@ -67,7 +67,7 @@ for model in model_configs:
                     fi_d_latency = fibench.do_flashinfer_decode_paged(bs, cl, num_heads, num_kv_heads, head_size, 16)
                     fi_fused_latency = fibench.do_flashinfer_fused_paged(cs, cache_seqlen, bs, cl, num_heads, num_kv_heads, head_size, 16)
                     fa_fused_latency, best_fused_op = 99999, -1
-                    for fused_op in [9, 9, 11, 15]:
+                    for fused_op in [9, 11, 15]:
                         # Our shiny new FusedAttention operation
                         fu_prefill, fu_decode, fused_latency = fabench.do_true_fused_attn(q_p, k_p, v_p, q_d, k_d, v_d, fused_op, k_new=k_new, v_new=v_new,
                             seq_lens_k_p=cache_seqlens_p, seq_lens_k_d=cache_seqlens_d, cache_batch_idx=cache_batch_idx)
