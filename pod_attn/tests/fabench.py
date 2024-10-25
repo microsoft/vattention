@@ -1,6 +1,6 @@
 import sys
 import os
-import fused_ampere as fused_amp
+import pod_attn
 import torch
 import math
 from einops import rearrange
@@ -22,11 +22,11 @@ repeat = 100
 def do_fa_prefill(q, k, v, seq_lens_k=None, fused_params=0):
     try:
         output = None
-        output = fused_amp.flash_attn_with_kvcache(q, k, v, causal=True, cache_seqlens=seq_lens_k, fused_params=fused_params)
+        output = pod_attn.flash_attn_with_kvcache(q, k, v, causal=True, cache_seqlens=seq_lens_k, fused_params=fused_params)
         launch_big_kernel()
         start.record()
         for _ in range(repeat):
-            output = fused_amp.flash_attn_with_kvcache(q, k, v, causal=True, cache_seqlens=seq_lens_k, fused_params=fused_params)
+            output = pod_attn.flash_attn_with_kvcache(q, k, v, causal=True, cache_seqlens=seq_lens_k, fused_params=fused_params)
         end.record()
         torch.cuda.synchronize()
         if repeat == 0:
@@ -40,11 +40,11 @@ def do_fa_prefill(q, k, v, seq_lens_k=None, fused_params=0):
 @torch.inference_mode
 def do_fa_decode(q, k, v, k_new=None, v_new=None, seq_lens_k=None, cache_batch_idx=None, splits=0, fused_params=0):
     try:
-        output = fused_amp.flash_attn_with_kvcache(q, k, v, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k, cache_batch_idx=cache_batch_idx, num_splits=splits, fused_params=fused_params)
+        output = pod_attn.flash_attn_with_kvcache(q, k, v, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k, cache_batch_idx=cache_batch_idx, num_splits=splits, fused_params=fused_params)
         launch_big_kernel()
         start.record()
         for _ in range(repeat):
-            output = fused_amp.flash_attn_with_kvcache(q, k, v, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k, cache_batch_idx=cache_batch_idx, num_splits=splits, fused_params=fused_params)
+            output = pod_attn.flash_attn_with_kvcache(q, k, v, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k, cache_batch_idx=cache_batch_idx, num_splits=splits, fused_params=fused_params)
         end.record()
         torch.cuda.synchronize()
         if repeat == 0:
@@ -58,13 +58,13 @@ def do_fa_decode(q, k, v, k_new=None, v_new=None, seq_lens_k=None, cache_batch_i
 @torch.inference_mode
 def do_fa_prefill_decode(q_p, k_p, v_p, q_d, k_d, v_d, k_new=None, v_new=None, seq_lens_k_p=None, seq_lens_k_d=None, cache_batch_idx=None, splits=0, fused_params=0):
     try:
-        output_pref = fused_amp.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
-        output_dec = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
+        output_pref = pod_attn.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
+        output_dec = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
         launch_big_kernel()
         start.record()
         for _ in range(repeat):
-            output_pref = fused_amp.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
-            output_dec = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
+            output_pref = pod_attn.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
+            output_dec = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
         end.record()
         torch.cuda.synchronize()
         if repeat == 0:
@@ -119,12 +119,12 @@ def do_fa3_prefill_decode(q_p, k_p, v_p, q_d, k_d, v_d, k_new=None, v_new=None, 
     import fused_hopper as fused_hop
     try:
         output_pref = fused_hop.flash_attn_func(q_p, k_p, v_p, causal=True)[0]
-        output_dec = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
+        output_dec = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
         #launch_big_kernel()
         start.record()
         for _ in range(repeat):
             output_pref = fused_hop.flash_attn_func(q_p, k_p, v_p, causal=True)[0]
-            output_dec = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
+            output_dec = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
         end.record()
         torch.cuda.synchronize()
         if repeat == 0:
@@ -141,18 +141,18 @@ stream2 = torch.cuda.Stream()
 def do_fa_prefill_decode_streams(q_p, k_p, v_p, q_d, k_d, v_d, k_new=None, v_new=None, seq_lens_k_p=None, seq_lens_k_d=None, cache_batch_idx=None, splits=0, fused_params=0):
     try:
         with torch.cuda.stream(stream1):
-            output_pref = fused_amp.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
+            output_pref = pod_attn.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
         with torch.cuda.stream(stream2):
-            output_dec = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
+            output_dec = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
 
         stream1.synchronize()
         stream2.synchronize()
         start.record()
         for _ in range(repeat):
             with torch.cuda.stream(stream1):
-                output_pref = fused_amp.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
+                output_pref = pod_attn.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p)
             with torch.cuda.stream(stream2):
-                output_dec = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
+                output_dec = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, causal=False, fused_params=fused_params)
             stream1.synchronize()
             stream2.synchronize()
 
@@ -169,11 +169,11 @@ def do_mps_prefill(queue, bs, cl, k_cl, num_heads, num_kv_heads, head_size, reps
         q_p = torch.randn(bs, cl, num_heads, head_size, device='cuda', dtype=torch.float16)
         k_p = torch.randn(bs, k_cl, num_kv_heads, head_size, device='cuda', dtype=torch.float16)
         v_p = torch.randn(bs, k_cl, num_kv_heads, head_size, device='cuda', dtype=torch.float16)
-        output = fused_amp.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p, fused_params=fused_params)
+        output = pod_attn.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p, fused_params=fused_params)
         launch_big_kernel()
         queue.put(("prefill", time.perf_counter_ns()))
         for _ in range(reps):
-            output = fused_amp.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p, fused_params=fused_params)
+            output = pod_attn.flash_attn_with_kvcache(q_p, k_p, v_p, causal=True, cache_seqlens=seq_lens_k_p, fused_params=fused_params)
         torch.cuda.synchronize()
         queue.put(("prefill", time.perf_counter_ns()))
     except Exception as e:
@@ -185,11 +185,11 @@ def do_mps_decode(queue, bs, cl, k_cl, num_heads, num_kv_heads, head_size, reps,
         q_d = torch.randn(bs, cl, num_heads, head_size, device='cuda', dtype=torch.float16)
         k_d = torch.randn(bs, k_cl, num_kv_heads, head_size, device='cuda', dtype=torch.float16)
         v_d = torch.randn(bs, k_cl, num_kv_heads, head_size, device='cuda', dtype=torch.float16)
-        output = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, fused_params=fused_params)
+        output = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, fused_params=fused_params)
         launch_big_kernel()
         queue.put(("decode", time.perf_counter_ns()))
         for _ in range(reps):
-            output = fused_amp.flash_attn_with_kvcache(q_d, k_d, v_d, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, fused_params=fused_params)
+            output = pod_attn.flash_attn_with_kvcache(q_d, k_d, v_d, causal=False, k=k_new, v=v_new, cache_seqlens=seq_lens_k_d, cache_batch_idx=cache_batch_idx, fused_params=fused_params)
         torch.cuda.synchronize()
         queue.put(("decode", time.perf_counter_ns()))
     except Exception as e:
@@ -243,11 +243,11 @@ def do_mps_attn(prefill_params, decode_params):
 def do_fused_attn(q_p, k_p, v_p, q_d, k_d, v_d, ratio=0):
     try:
         output = None
-        fused_amp.fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, causal=True, ratio=ratio)
+        pod_attn.fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, causal=True, ratio=ratio)
         launch_big_kernel()
         start.record()
         for _ in range(repeat):
-            output = fused_amp.fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, causal=True, ratio=ratio)
+            output = pod_attn.fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, causal=True, ratio=ratio)
         end.record()
         torch.cuda.synchronize()
         duration = round(start.elapsed_time(end) / repeat, 3)
@@ -260,12 +260,12 @@ def do_fused_attn(q_p, k_p, v_p, q_d, k_d, v_d, ratio=0):
 @torch.inference_mode
 def do_true_fused_attn(q_p, k_p, v_p, q_d, k_d, v_d, fused_params=0, k_new=None, v_new=None, seq_lens_k_p=None, seq_lens_k_d=None, cache_batch_idx=None, num_splits_p=0, num_splits_d=0):
     try:
-        output_pref, output_dec = fused_amp.true_fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, k=k_new, v=v_new, causal=True, \
+        output_pref, output_dec = pod_attn.true_fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, k=k_new, v=v_new, causal=True, \
                 cache_seqlens_p=seq_lens_k_p, cache_seqlens_d=seq_lens_k_d, cache_batch_idx=cache_batch_idx, fused_params=fused_params, num_splits_p=num_splits_p, num_splits_d=num_splits_d)
         launch_big_kernel()
         start.record()
         for _ in range(repeat):
-            output_pref, output_dec = fused_amp.true_fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, k=k_new, v=v_new, causal=True, \
+            output_pref, output_dec = pod_attn.true_fused_attn_with_kvcache(q_p, k_p, v_p, q_d, k_d, v_d, k=k_new, v=v_new, causal=True, \
                 cache_seqlens_p=seq_lens_k_p, cache_seqlens_d=seq_lens_k_d, cache_batch_idx=cache_batch_idx, fused_params=fused_params, num_splits_p=num_splits_p, num_splits_d=num_splits_d)
         end.record()
         torch.cuda.synchronize()
