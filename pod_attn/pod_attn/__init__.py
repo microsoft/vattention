@@ -1,4 +1,4 @@
-__version__ = "2.6.1"
+__version__ = "1.0.0"
 
 from pod_attn.fused_attn_interface import (
     true_fused_attn_with_kvcache,
