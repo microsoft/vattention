@@ -82,7 +82,7 @@ def write_kernel(kernel: Kernel, autogen_dir: Path) -> None:
 // This file is auto-generated. See "generate_kernels.py"\n
 """
     (autogen_dir / kernel.filename).write_text(prelude + kernel.template)
-    print('"fused_ampere/' + kernel.filename + '",')
+    print('"pod_attn/' + kernel.filename + '",')
 
 
 def main(output_dir: Optional[str]) -> None:
