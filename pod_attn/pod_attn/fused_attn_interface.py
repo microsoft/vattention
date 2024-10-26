@@ -7,7 +7,7 @@ import torch.nn as nn
 # isort: off
 # We need to import the CUDA kernels after importing torch
 import fused_attn as fused_attn_cuda
-import pod_ampere.flash_attn_interface as fa
+import pod_attn.flash_attn_interface as fa
 
 def true_fused_attn_with_kvcache(
     q_p,
@@ -24,16 +24,18 @@ def true_fused_attn_with_kvcache(
     cache_seqlens_d: Optional[Union[(int, torch.Tensor)]] = None,
     cache_batch_idx: Optional[torch.Tensor] = None,
     cache_leftpad: Optional[torch.Tensor] = None,
-    block_table: Optional[torch.Tensor] = None,
+    block_table_p: Optional[torch.Tensor] = None,
+    block_table_d: Optional[torch.Tensor] = None,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
     softcap=0.0, # 0.0 means deactivated
     rotary_interleaved=True,
     alibi_slopes=None,
-    num_splits=0,
+    num_splits_p=0,
+    num_splits_d=0,
     return_softmax_lse=False,
-    fused_params=9,
+    fused_params=15,
 ):
     # If only one set of params is sent, call vanilla flash attention instead
     if q_p == None:
@@ -46,14 +48,14 @@ def true_fused_attn_with_kvcache(
             rotary_cos=rotary_cos,
             rotary_sin=rotary_sin,
             cache_seqlens=cache_seqlens_d,
-            block_table=block_table,
+            block_table=block_table_d,
             cache_batch_idx=cache_batch_idx,
             softmax_scale=softmax_scale,
             causal=causal,
             window_size=window_size,  # -1 means infinite context window
             rotary_interleaved=rotary_interleaved,
             alibi_slopes=alibi_slopes,
-            num_splits=num_splits,
+            num_splits=num_splits_d,
         )
     elif q_d == None:
         return fa.flash_attn_with_kvcache(
@@ -65,14 +67,14 @@ def true_fused_attn_with_kvcache(
             rotary_cos=rotary_cos,
             rotary_sin=rotary_sin,
             cache_seqlens = cache_seqlens_p,
-            block_table=block_table,
+            block_table=block_table_p,
             cache_batch_idx=cache_batch_idx,
             softmax_scale=softmax_scale,
             causal=causal,
             window_size=window_size,  # -1 means infinite context window
             rotary_interleaved=rotary_interleaved,
             alibi_slopes=alibi_slopes,
-            num_splits=num_splits,
+            num_splits=num_splits_p,
         ), None
     # Prepare prefill data first
     assert k_cache_p.stride(-1) == 1, "k_cache must have contiguous last dimension"
@@ -95,7 +97,8 @@ def true_fused_attn_with_kvcache(
         cache_seqlens_d = maybe_contiguous(cache_seqlens_d)
     
     cache_batch_idx = maybe_contiguous(cache_batch_idx)
-    block_table = maybe_contiguous(block_table)
+    block_table_p = maybe_contiguous(block_table_p)
+    block_table_d = maybe_contiguous(block_table_d)
 
     # Now prepare decode data
     assert k_cache_d.stride(-1) == 1, "k_cache must have contiguous last dimension"
@@ -117,6 +120,8 @@ def true_fused_attn_with_kvcache(
         rotary_sin,
         cache_batch_idx,
         cache_leftpad,
+        block_table_p,
+        block_table_d,
         alibi_slopes,
         None,
         softmax_scale,
@@ -125,7 +130,8 @@ def true_fused_attn_with_kvcache(
         window_size[1],
         softcap,
         rotary_interleaved,
-        num_splits,
+        num_splits_p,
+        num_splits_d,
         fused_params,
     )
     return out_prefill, out_decode

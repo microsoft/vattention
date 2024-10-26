@@ -360,7 +360,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         Tensor rP = flash::convert_type<Element>(acc_s);
         int block_row_idx = m_block * (kBlockM / 16) + tidx / 32;
         int block_col_idx = n_block * (kBlockN / 32);
-        if (Return_softmax) {
+        if constexpr(Return_softmax) {
             Tensor rP_drop = make_fragment_like(rP);
             cute::copy(rP, rP_drop);
             dropout.template apply_dropout</*encode_dropout_in_sign_bit=*/true>(
@@ -369,7 +369,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
             cute::copy(rP_drop, tSgS);
             tSgS.data() = tSgS.data() + (-kBlockN);
         }
-        if (Is_dropout) {
+        if constexpr(Is_dropout) {
             dropout.apply_dropout(rP, block_row_idx, block_col_idx, kNWarps);
         }
 
@@ -422,7 +422,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
         Tensor rP = flash::convert_type<Element>(acc_s);
         int block_row_idx = m_block * (kBlockM / 16) + tidx / 32;
         int block_col_idx = n_block * (kBlockN / 32);
-        if (Return_softmax) {
+        if constexpr(Return_softmax) {
             Tensor rP_drop = make_fragment_like(rP);
             cute::copy(rP, rP_drop);
             dropout.template apply_dropout</*encode_dropout_in_sign_bit=*/true>(
@@ -431,7 +431,7 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
             cute::copy(rP_drop, tSgS);
             tSgS.data() = tSgS.data() + (-kBlockN);
         }
-        if (Is_dropout) {
+        if constexpr(Is_dropout) {
             dropout.apply_dropout(rP, block_row_idx, block_col_idx, kNWarps);
         }
 
@@ -1220,7 +1220,8 @@ inline __device__ void compute_fused_attn(const Params &prefill_params, const Pa
 
 template<typename Kernel_traits_prefill, typename Kernel_traits_decode, bool Is_dropout, bool Is_causal_p,  bool Is_causal_d,
     bool Is_local_p, bool Is_local_d, bool Has_alibi, bool Is_even_MN_p, bool Is_even_K_p, bool Is_even_MN_d, bool Is_even_K_d,
-    bool Is_softcap, bool Return_softmax, bool DecodeIsSplit, bool DecodeAppend_KV, int FusedOp, typename Params>
+    bool Is_softcap, bool Return_softmax, bool PrefillIsSplit, bool DecodeIsSplit, bool DecodeAppend_KV, int FusedOp, 
+    bool UseSplitPrefill, bool UseSplitDecode, typename Params>
 inline __device__ void compute_fused_tb_attn(const Params &prefill_params, const Params &decode_params, int *tbAssign) {
     // We want the fwd and bwd to generate the same dropout pattern (RNG), without restricting
     // them to have the same number of threads or have to traverse the attention matrix
@@ -1247,77 +1248,109 @@ inline __device__ void compute_fused_tb_attn(const Params &prefill_params, const
                                     Kernel_traits_prefill::kNThreads : Kernel_traits_decode::kNThreads)
                                     / Kernel_traits_decode::kNThreads;
 
-    // Dynamic threadblock scheduler code
-    // Find out which SM this threadblock is scheduled on
-    int num_SMs, sm_id;
-    // WARNING: nsmid has only been tested on A100, and matches SM count (108)
-    // No guarantee this will work on other GPUs
-    asm volatile("mov.u32 %0, %nsmid;" : "=r"(num_SMs));
-    asm volatile("mov.u32 %0, %smid;" : "=r"(sm_id));
-
-    const int prefill_blocks = (num_mblocks_p * prefill_params.b * prefill_params.h);
-    const int decode_blocks = (DecodeIsSplit ? num_mblocks_d * decode_params.b * decode_params.h * decode_params.num_splits : 
+    const int prefill_blocks = (PrefillIsSplit ? num_mblocks_p * prefill_params.b * prefill_params.h * prefill_params.num_splits:
+                                num_mblocks_p * prefill_params.b * prefill_params.h);
+    const int decode_blocks  = (DecodeIsSplit ? num_mblocks_d * decode_params.b * decode_params.h * decode_params.num_splits : 
                                 num_mblocks_d * decode_params.b * decode_params.h);
-    const int prefill_slots = (prefill_blocks + blk_factor_p - 1) / blk_factor_p;
-    const int decode_slots = (decode_blocks + blk_factor_d - 1) / blk_factor_d;
-
+    int op = 0;
+    int linear_block_id;
     if(threadIdx.x == 0) {
-        int op = 0;
+        // SM-aware threadblock scheduler code
+        // Find out which SM this threadblock is scheduled on
+        int num_SMs;
+        // WARNING: nsmid has only been tested on A100, and matches SM count
+        // No guarantee this will work on other GPUs
+        asm volatile("mov.u32 %0, %nsmid;" : "=r"(num_SMs));
+        asm volatile("mov.u32 %0, %smid;" : "=r"(linear_block_id));
+        const int prefill_slots = (prefill_blocks + blk_factor_p - 1) / blk_factor_p;
+        const int decode_slots = (decode_blocks + blk_factor_d - 1) / blk_factor_d;
+        
         if constexpr(FusedOp & 1) {
-            const int min_blocks = min(prefill_slots, decode_slots);
-            const int total_tags = (prefill_slots + decode_slots) / min_blocks;
-            
-            // For this SM, what's the next operation we want to run?
-            int tag = (atomicAdd(&tbAssign[sm_id], 1) % total_tags);
-            if(tag < prefill_slots / min_blocks) {
-                op = 0;
+            if(prefill_slots <= decode_slots) {
+                // Total tags = (decode + prefill) / min(decode, prefill)
+                // = 1 + decode / prefill; when prefill < decode
+                const int total_tags = decode_slots / prefill_slots + 1;
+                // For this SM, what's the next operation we want to run?
+                op = (atomicAdd(&tbAssign[linear_block_id], 1) % total_tags);
+                if(op > 0) {
+                    op = 1;
+                }
             } else {
-                op = 1;
+                // Total tags = (decode + prefill) / min(decode, prefill)
+                // = 1 + prefill / decode; when decode < prefill
+                const int pref_tags = prefill_slots / decode_slots;
+                
+                // For this SM, what's the next operation we want to run?
+                op = (atomicAdd(&tbAssign[linear_block_id], 1) % (pref_tags + 1));
+                if(op < pref_tags) {
+                    op = 0;
+                } else {
+                    op = 1;
+                }
             }
         } else {
-            op = atomicAdd(&tbAssign[sm_id], 1) % 2;
+            op = atomicAdd(&tbAssign[linear_block_id], 1) % 2;
         }
 
         // Get the next blockId for that operation
-        int bid = atomicAdd(&tbAssign[num_SMs + op], 1);
+        linear_block_id = atomicAdd(&tbAssign[num_SMs + op], 1);
         // If the blockId obtained exceeds the max blockIds for that op, switch to the other op
-        if(op == 0 && bid >= prefill_slots) {
-            op = (op + 1) % 2;
-            bid = atomicAdd(&tbAssign[num_SMs + op], 1);
-        } else if (op == 1 && bid >= decode_slots) {
-            op = (op + 1) % 2;
-            bid = atomicAdd(&tbAssign[num_SMs + op], 1);
+        if(op == 0 && linear_block_id >= prefill_slots) {
+            linear_block_id = atomicAdd(&tbAssign[num_SMs + 1], 1);
+            op = !op;
+        } else if (op == 1 && linear_block_id >= decode_slots) {
+            op = !op;
+            linear_block_id = atomicAdd(&tbAssign[num_SMs + 0], 1);
         }
         // Write the blockId and operation to shared memory
-        ((int*)smem_)[0] = bid;
+        ((int*)smem_)[0] = linear_block_id;
         ((int*)smem_)[1] = op;
     }
     // Sync to wait for dynamic scheduler to finish
     __syncthreads();
     // Fetch from shared memory the assigned blockId and operation.
-    int linear_block_id = ((int*)smem_)[0];
-    const int op = ((int*)smem_)[1];
+    linear_block_id = ((int*)smem_)[0];
+    op = ((int*)smem_)[1];
+    // Sync to force all threads to wait
+    __syncthreads();
 
     if(op == 0) {
-        // Remap to logical threadblock from real threadblock
-        linear_block_id = linear_block_id * blk_factor_p + tidx / Kernel_traits_prefill::kNThreads;
-        char *smem_map = smem_ + tidx / Kernel_traits_prefill::kNThreads * Kernel_traits_prefill::kSmemSize;
-        tidx = tidx % Kernel_traits_prefill::kNThreads;
+        char *smem_map = smem_;
+        // Remap to logical threadblock from real threadblock, if needed
+        if constexpr(blk_factor_p > 1) {
+            int blk_shift = threadIdx.x / Kernel_traits_prefill::kNThreads;
+            linear_block_id = linear_block_id * blk_factor_p + blk_shift;
+            smem_map += blk_shift * Kernel_traits_prefill::kSmemSize;
+            tidx = tidx % Kernel_traits_prefill::kNThreads;
+        }
         //dim3 grid(num_m_block, params.b, params.h);
         //const int m_block = blockIdx.x;
         //const int bidb = blockIdx.y;
         //const int bidh = blockIdx.z;
         if(linear_block_id >= prefill_blocks) return;
 
-        const int m_block = (linear_block_id % num_mblocks_p);
-        // The block index for the batch.
-        const int bidb = (linear_block_id / num_mblocks_p) % prefill_params.b;
-        // The block index for the head.
-        const int bidh = (linear_block_id / num_mblocks_p / prefill_params.b) % prefill_params.h;
-        
-        fused::compute_attn_1rowblock<Kernel_traits_prefill, Is_dropout, Is_causal_p, 
-            Is_local_p, Has_alibi, Is_even_MN_p, Is_even_K_p, Is_softcap, Return_softmax>
-            (prefill_params, bidb, bidh, m_block, tidx, smem_map);
+        if constexpr(UseSplitPrefill) {
+            const int num_n_splits = prefill_params.num_splits;
+            
+            const int m_block = linear_block_id % num_mblocks_p;
+            const int n_split_idx = (linear_block_id / num_mblocks_p) % num_n_splits;
+            const int bidb = (linear_block_id / num_mblocks_p / num_n_splits) % prefill_params.b;
+            const int bidh = (linear_block_id / num_mblocks_p / num_n_splits / prefill_params.b) % prefill_params.h;
+
+            fused::compute_attn_1rowblock_splitkv<Kernel_traits_prefill, Is_causal_p, Is_local_p, 
+                Has_alibi, Is_even_MN_p, Is_even_K_p, Is_softcap, PrefillIsSplit, false>
+                (prefill_params, bidb, bidh, m_block, n_split_idx, num_n_splits, tidx, smem_map);
+        } else {
+            const int m_block = (linear_block_id % num_mblocks_p);
+            // The block index for the batch.
+            const int bidb = (linear_block_id / num_mblocks_p) % prefill_params.b;
+            // The block index for the head.
+            const int bidh = (linear_block_id / num_mblocks_p / prefill_params.b) % prefill_params.h;
+            
+            fused::compute_attn_1rowblock<Kernel_traits_prefill, Is_dropout, Is_causal_p, 
+                Is_local_p, Has_alibi, Is_even_MN_p, Is_even_K_p, Is_softcap, Return_softmax>
+                (prefill_params, bidb, bidh, m_block, tidx, smem_map);
+        }
         // Seed next threadblock to be prefill
         /*if constexpr(FusedOp & 8) {
             if(threadIdx.x == 0) {
@@ -1325,13 +1358,17 @@ inline __device__ void compute_fused_tb_attn(const Params &prefill_params, const
             }
         }*/
     } else {
-        // Remap to logical threadblock from real threadblock
-        linear_block_id = linear_block_id * blk_factor_d + tidx / Kernel_traits_decode::kNThreads;
-        char *smem_map = smem_ + tidx / Kernel_traits_decode::kNThreads * Kernel_traits_decode::kSmemSize;
-        tidx = tidx % Kernel_traits_decode::kNThreads;
+        char *smem_map = smem_;
+        // Remap to logical threadblock from real threadblock, if needed
+        if constexpr(blk_factor_d > 1) {
+            int blk_shift = threadIdx.x / Kernel_traits_decode::kNThreads;
+            linear_block_id = linear_block_id * blk_factor_d + blk_shift;
+            smem_map += blk_shift * Kernel_traits_decode::kSmemSize;
+            tidx = tidx % Kernel_traits_decode::kNThreads;
+        }
         if(linear_block_id >= decode_blocks) return;
 
-        if (DecodeIsSplit || DecodeAppend_KV || decode_params.cache_batch_idx != nullptr) {
+        if constexpr(UseSplitDecode) {
             //dim3 grid(num_m_block, params.num_splits, params.b * params.h);
             const int num_n_splits = decode_params.num_splits;
             

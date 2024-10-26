@@ -16,7 +16,7 @@ DTYPE_MAP = {
 SM = [80]  # Sm80 kernels support up to
 HEAD_DIMENSIONS = [128]
 IS_CAUSAL = ["false", "true"]
-FUSED_OPS = [0, 9, 11, 13]
+FUSED_OPS = [0, 9, 11, 64]
 DECODE_SPLIT = ["false", "true"]
 KERNEL_IMPL_TEMPLATE_FWD = """#include "fused_fwd_launch_template.h"
 template<>
@@ -73,8 +73,6 @@ def get_all_kernels() -> List[Kernel]:
             yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction)
     for direction in ["truefused_fwd"]:
         for dtype, head_dim, is_causal, sm, fused_op, decode_split in itertools.product(DTYPE_MAP.keys(), HEAD_DIMENSIONS, IS_CAUSAL, SM, FUSED_OPS, DECODE_SPLIT):
-            if decode_split == "true" and fused_op != 0:
-                continue
             yield Kernel(sm=sm, dtype=dtype, head_dim=head_dim, is_causal=is_causal, direction=direction, fused_op=fused_op, decode_split=decode_split)
 
 
@@ -84,7 +82,7 @@ def write_kernel(kernel: Kernel, autogen_dir: Path) -> None:
 // This file is auto-generated. See "generate_kernels.py"\n
 """
     (autogen_dir / kernel.filename).write_text(prelude + kernel.template)
-    print('"fused_ampere/' + kernel.filename + '",')
+    print('"pod_attn/' + kernel.filename + '",')
 
 
 def main(output_dir: Optional[str]) -> None:

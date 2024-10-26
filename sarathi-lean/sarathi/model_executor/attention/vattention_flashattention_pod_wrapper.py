@@ -10,7 +10,7 @@ from sarathi.metrics.constants import OperationMetrics
 from sarathi.model_executor.attention.base_attention_wrapper import BaseAttentionWrapper
 import vattention
 from sarathi.cache_ops import cache_flat
-import pod_ampere as fused
+import pod_attn as fused
 
 logger = init_logger(__name__)
 

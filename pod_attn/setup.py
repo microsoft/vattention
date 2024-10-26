@@ -32,11 +32,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
-PACKAGE_NAME = "pod_ampere"
-
-BASE_WHEEL_URL = (
-    "https://github.com/Dao-AILab/flash-attention/releases/download/{tag_name}/{wheel_name}"
-)
+PACKAGE_NAME = "pod_attn"
 
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
 # SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files, without any cuda compilation
@@ -113,7 +109,7 @@ if not SKIP_CUDA_BUILD:
         _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
         if bare_metal_version < Version("11.6"):
             raise RuntimeError(
-                "FlashAttention is only supported on CUDA 11.6 and above.  "
+                "POD-Attention is only supported on CUDA 11.6 and above.  "
                 "Note: make sure nvcc has a supported version by running nvcc -V."
             )
     # cc_flag.append("-gencode")
@@ -134,21 +130,23 @@ if not SKIP_CUDA_BUILD:
         CUDAExtension(
             name="fused_attn",
             sources=[
-                "pod_ampere/fused_api.cpp",
-                "pod_ampere/fused_fwd_hdim128_fp16_sm80.cu",
-                "pod_ampere/fused_fwd_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/fused_fwd_split_hdim128_fp16_sm80.cu",
-                "pod_ampere/fused_fwd_split_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_split_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_fo9_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_fo11_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_fo13_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_split_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_fo9_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_fo11_sm80.cu",
-                "pod_ampere/truefused_fwd_hdim128_fp16_causal_fo13_sm80.cu",
+                "pod_attn/fused_api.cpp",
+                #"pod_attn/truefused_fwd_hdim128_fp16_sm80.cu",
+                #"pod_attn/truefused_fwd_hdim128_fp16_split_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_fo9_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_split_fo9_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_fo11_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_split_fo11_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_fo64_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_split_fo64_sm80.cu",
+                #"pod_attn/truefused_fwd_hdim128_fp16_causal_sm80.cu",
+                #"pod_attn/truefused_fwd_hdim128_fp16_causal_split_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_causal_fo9_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_causal_split_fo9_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_causal_fo11_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_causal_split_fo11_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_causal_fo64_sm80.cu",
+                "pod_attn/truefused_fwd_hdim128_fp16_causal_split_fo64_sm80.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"] + generator_flag,
@@ -188,11 +186,11 @@ if not SKIP_CUDA_BUILD:
         CUDAExtension(
             name="flash_attn_og",
             sources=[
-                "pod_ampere/flash_api.cpp",
-                "pod_ampere/flash_fwd_hdim128_fp16_sm80.cu",
-                "pod_ampere/flash_fwd_hdim128_fp16_causal_sm80.cu",
-                "pod_ampere/flash_fwd_split_hdim128_fp16_sm80.cu",
-                "pod_ampere/flash_fwd_split_hdim128_fp16_causal_sm80.cu",
+                "pod_attn/flash_api.cpp",
+                "pod_attn/flash_fwd_hdim128_fp16_sm80.cu",
+                "pod_attn/flash_fwd_hdim128_fp16_causal_sm80.cu",
+                "pod_attn/flash_fwd_split_hdim128_fp16_sm80.cu",
+                "pod_attn/flash_fwd_split_hdim128_fp16_causal_sm80.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"] + generator_flag,
@@ -231,7 +229,7 @@ if not SKIP_CUDA_BUILD:
 
 
 def get_package_version():
-    with open(Path(this_dir) / "pod_ampere" / "__init__.py", "r") as f:
+    with open(Path(this_dir) / "pod_attn" / "__init__.py", "r") as f:
         version_match = re.search(r"^__version__\s*=\s*(.*)$", f.read(), re.MULTILINE)
     public_version = ast.literal_eval(version_match.group(1))
     local_version = os.environ.get("FLASH_ATTN_LOCAL_VERSION")
@@ -239,65 +237,6 @@ def get_package_version():
         return f"{public_version}+{local_version}"
     else:
         return str(public_version)
-
-
-def get_wheel_url():
-    # Determine the version numbers that will be used to determine the correct wheel
-    # We're using the CUDA version used to build torch, not the one currently installed
-    # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
-    torch_cuda_version = parse(torch.version.cuda)
-    torch_version_raw = parse(torch.__version__)
-    # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.3
-    # to save CI time. Minor versions should be compatible.
-    torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.3")
-    python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    platform_name = get_platform()
-    flash_version = get_package_version()
-    # cuda_version = f"{cuda_version_raw.major}{cuda_version_raw.minor}"
-    cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
-    torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
-    cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
-
-    # Determine wheel URL based on CUDA version, torch version, python version and OS
-    wheel_filename = f"{PACKAGE_NAME}-{flash_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
-    wheel_url = BASE_WHEEL_URL.format(tag_name=f"v{flash_version}", wheel_name=wheel_filename)
-    return wheel_url, wheel_filename
-
-
-class CachedWheelsCommand(_bdist_wheel):
-    """
-    The CachedWheelsCommand plugs into the default bdist wheel, which is ran by pip when it cannot
-    find an existing wheel (which is currently the case for all flash attention installs). We use
-    the environment parameters to detect whether there is already a pre-built version of a compatible
-    wheel available and short-circuits the standard full build pipeline.
-    """
-
-    def run(self):
-        if FORCE_BUILD:
-            return super().run()
-
-        wheel_url, wheel_filename = get_wheel_url()
-        print("Guessing wheel URL: ", wheel_url)
-        try:
-            urllib.request.urlretrieve(wheel_url, wheel_filename)
-
-            # Make the archive
-            # Lifted from the root wheel processing command
-            # https://github.com/pypa/wheel/blob/cf71108ff9f6ffc36978069acb28824b44ae028e/src/wheel/bdist_wheel.py#LL381C9-L381C85
-            if not os.path.exists(self.dist_dir):
-                os.makedirs(self.dist_dir)
-
-            impl_tag, abi_tag, plat_tag = self.get_tag()
-            archive_basename = f"{self.wheel_dist_name}-{impl_tag}-{abi_tag}-{plat_tag}"
-
-            wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
-            print("Raw wheel path", wheel_path)
-            os.rename(wheel_filename, wheel_path)
-        except (urllib.error.HTTPError, urllib.error.URLError):
-            print("Precompiled wheel not found. Building from source...")
-            # If the wheel could not be downloaded, build from source
-            super().run()
-
 
 class NinjaBuildExtension(BuildExtension):
     def __init__(self, *args, **kwargs) -> None:
@@ -334,28 +273,19 @@ setup(
             "docs",
             "benchmarks",
             "microbenchmarks",
-            "fused_hopper",
-            "pod_ampere.egg-info",
-            "fused_hopper.egg-info",
+            "pod_attn.egg-info",
         )
     ),
-    author="Tri Dao",
-    author_email="tri@tridao.me",
-    description="Flash Attention: Fast and Memory-Efficient Exact Attention",
+    description="POD-Attention: Unlocking Full Prefill-Decode Overlap for Faster LLM Inference",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/Dao-AILab/flash-attention",
+    url="https://github.com/microsoft/vattention/tree/main/pod_attn",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: BSD License",
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,
-    cmdclass={"bdist_wheel": CachedWheelsCommand, "build_ext": NinjaBuildExtension}
-    if ext_modules
-    else {
-        "bdist_wheel": CachedWheelsCommand,
-    },
+    cmdclass={"build_ext": NinjaBuildExtension},
     python_requires=">=3.8",
     install_requires=[
         "torch",

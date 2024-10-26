@@ -17,16 +17,44 @@ void run_fused_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force
     });*/
 }
 
-void run_true_fused_mha_fwd(Flash_fwd_params &params_prefill, Flash_fwd_params &params_decode, cudaStream_t stream, bool force_split_kernel=false) {
+void run_true_fused_mha_fwd(Flash_fwd_params &params_prefill, Flash_fwd_params &params_decode, cudaStream_t stream) { 
     HEADDIM_SWITCH(params_prefill.d, [&] {
         BOOL_SWITCH(params_prefill.is_causal, Is_causal, [&] {
-            FUSED_SWITCH(params_prefill.fused_params, [&] {
-                // Default to fused param 0 for Split Decodes
-                if (params_decode.num_splits > 1) {
-                    run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, 0, true>(params_prefill, params_decode, stream);
-                } else {
-                    run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, fusedOpt, false>(params_prefill, params_decode, stream);
+            BOOL_SWITCH(params_decode.num_splits > 1, DecodeSplit, [&] {
+                if(params_prefill.fused_params == 15) {
+                    auto dprops = at::cuda::getCurrentDeviceProperties();
+                    Flash_fwd_params &pp = params_prefill;
+                    Flash_fwd_params &pd = params_decode;
+                    int dim_p = 128;
+                    if(pp.num_splits > 1)
+                        dim_p = 64;
+                    // Pick the most suitable param for this scenario
+                    int prefill_work = pp.b * pp.h * ((pp.seqlen_q + dim_p - 1) / dim_p) * pp.num_splits;
+                    int decode_work = pd.b * pd.h * ((pd.seqlen_q + 64) / 64) * pd.num_splits;
+                    if(pp.num_splits > 1 || pd.num_splits > 1) {
+                        // Prefill/Decode is split. 2 CTAs per SM by default.
+                        run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, 9, DecodeSplit>(pp, pd, stream);
+                    } else if (prefill_work < dprops->multiProcessorCount * 2 && decode_work < dprops->multiProcessorCount * 3) {
+                        // If decode is too small, use smaller tile sizes to smooth out quantization
+                        run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, 11, DecodeSplit>(pp, pd, stream);
+                    } else if (prefill_work < dprops->multiProcessorCount * 2 && pp.seqlen_k * 8 >= pd.seqlen_k * 5) {
+                        // For high relative prefill sequence length the compute util is high, so we stick to 9.
+                        // TODO: Construct a formula that encapsulates this succinctly
+                        run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, 9, DecodeSplit>(pp, pd, stream);
+                    } else if (prefill_work >= dprops->multiProcessorCount * 2 && decode_work < dprops->multiProcessorCount * 2 
+                        && pp.seqlen_k * 8 >= pd.seqlen_k * 5) {
+                        // If decode is too small, use smaller tile sizes to smooth out quantization
+                        run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, 11, DecodeSplit>(pp, pd, stream);
+                    } else if(decode_work >= prefill_work) {
+                        run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, 11, DecodeSplit>(pp, pd, stream);
+                    } else {
+                        run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, 9, DecodeSplit>(pp, pd, stream);
+                    }
+                    return;
                 }
+                FUSED_SWITCH(params_prefill.fused_params, [&] {
+                    run_true_fused_mha_fwd_<cutlass::half_t, kHeadDim, Is_causal, fusedOpt, DecodeSplit>(params_prefill, params_decode, stream);
+                });
             });
         });
     });
@@ -266,6 +294,8 @@ mha_true_fused_fwd_kvcache(at::Tensor &q_p,                 // batch_size x seql
                 c10::optional<const at::Tensor> &rotary_sin_, // seqlen_ro x (rotary_dim / 2)
                 c10::optional<const at::Tensor> &cache_batch_idx_, // indices to index into the KV cache (decode only)
                 c10::optional<const at::Tensor> &leftpad_k_, // batch_size
+                c10::optional<at::Tensor> &block_table_p_, // batch_size x max_num_blocks_per_seq
+                c10::optional<at::Tensor> &block_table_d_, // batch_size x max_num_blocks_per_seq
                 c10::optional<at::Tensor> &alibi_slopes_, // num_heads or batch_size x num_heads
                 c10::optional<at::Tensor> &out_,             // batch_size x seqlen_q x num_heads x head_size
                 const float softmax_scale,
@@ -274,7 +304,8 @@ mha_true_fused_fwd_kvcache(at::Tensor &q_p,                 // batch_size x seql
                 int window_size_right,
                 const float softcap,
                 bool is_rotary_interleaved,   // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
-                int num_splits,
+                int num_splits_p,
+                int num_splits_d,
                 uint64_t fused_params
                 ) {
 
@@ -282,12 +313,29 @@ mha_true_fused_fwd_kvcache(at::Tensor &q_p,                 // batch_size x seql
     // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
     bool is_sm8x = dprops->major == 8 && dprops->minor >= 0;
     bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
-    TORCH_CHECK(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
-    // We will support Turing in the near future
-    // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
+    TORCH_CHECK(is_sm90 || is_sm8x, "PODAttention only supports Ampere GPUs or newer.");
+    TORCH_CHECK(fused_params == 9 || fused_params == 11 || fused_params == 15 || fused_params == 64, 
+        "Invalid fused_params value, need 9, 11, 15, or 64");
+
+    at::Tensor block_table_p, block_table_d;
+    const bool paged_KV_p = block_table_p_.has_value(), paged_KV_d = block_table_d_.has_value();
+    if (paged_KV_p) {
+        block_table_p = block_table_p_.value();
+        CHECK_DEVICE(block_table_p);
+        TORCH_CHECK(block_table_p.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
+        TORCH_CHECK(block_table_p.stride(-1) == 1, "block_table must have contiguous last dimension");
+    }
+    if (paged_KV_d) {
+        TORCH_CHECK(!cache_batch_idx_.has_value(), "Paged KVcache does not support cache_batch_idx");
+        block_table_d = block_table_d_.value();
+        CHECK_DEVICE(block_table_d);
+        TORCH_CHECK(block_table_d.dtype() == torch::kInt32, "block_table must have dtype torch.int32");
+        TORCH_CHECK(block_table_d.stride(-1) == 1, "block_table must have contiguous last dimension");
+    }
 
     const int batch_size_p = q_p.sizes()[0];
     int seqlen_q_p = q_p.sizes()[1];
+    const int num_heads_p = q_p.sizes()[2];
     //const int seqlen_k_p = kcache_p.size(1);
     const int num_heads_k_p = kcache_p.size(2);
 
@@ -295,11 +343,35 @@ mha_true_fused_fwd_kvcache(at::Tensor &q_p,                 // batch_size x seql
     int seqlen_q_d = q_d.sizes()[1];
     const int seqlen_k_d = kcache_d.size(1);
     const int num_heads_k_d = kcache_d.size(2);
+    const int num_heads_d = seqlen_q_d == 1 ? num_heads_k_d : q_d.sizes()[2];
 
     assert(q_p.sizes()[3] == q_d.sizes()[3]);
     const int head_size_og = q_p.sizes()[3];
     at::Tensor out_prefill, out_decode;
     Flash_fwd_params params_prefill, params_decode;
+
+    const int num_m_blocks_p = (seqlen_q_p + 128 - 1) / 128;
+    const int num_m_blocks_d = (seqlen_q_d + 64 - 1) / 64;
+    // Generate at least 1 full wave of decode for better overlap; Used for 2 TBs per SM
+    if(fused_params == 9 || 
+        (fused_params == 15 && (batch_size_p * num_heads_p * num_m_blocks_p >= dprops->multiProcessorCount * 2 || 
+                                batch_size_p * num_heads_p * num_m_blocks_p * 2 < 0.8f * dprops->multiProcessorCount * 2))) {
+        // When prefill chunk size is at least 5/8th decode seqlen, we don't need to split. Enough compute intensity is available
+        //if (num_splits_p == 0 && batch_size_p * num_heads_p * num_m_blocks_p * 2 >= 0.8f * dprops->multiProcessorCount * 2 &&
+        //    batch_size_p * num_heads_p * num_m_blocks_p < dprops->multiProcessorCount * 2 &&
+        //    seqlen_q_p * 8 < seqlen_k_d * 5)
+        //    num_splits_p = dprops->multiProcessorCount * 2 / (batch_size_p * num_heads_p * num_m_blocks_p) + 1;
+        //printf("num_splits_p: %d\n", num_splits_p);
+        if (batch_size_d * num_heads_d * num_m_blocks_d >= 0.8f * dprops->multiProcessorCount * 2 &&
+            batch_size_d * num_heads_d * num_m_blocks_d < dprops->multiProcessorCount * 2)
+            num_splits_d = dprops->multiProcessorCount * 2 / (batch_size_d * num_heads_d * num_m_blocks_d) + 1;
+    }
+    // Minimize max splits to reduce memory accesses for prefills, where possible
+    int max_splits_p = (!(fused_params & 8) || num_splits_p != 0) ? 128 : (2 * dprops->multiProcessorCount * 2 / (batch_size_p * num_heads_p * num_m_blocks_p * 2));// > 10 ? 128 : 10;
+    
+    // When we have enough decodes for 1 full wave, we do not need to split prefill
+    if((fused_params & 8) && num_splits_p == 0 && batch_size_d * num_heads_d * num_m_blocks_d >= dprops->multiProcessorCount * 2)
+        num_splits_p = 1;
     
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_p, softmax_lse_accum_p, out_accum_p;
@@ -309,12 +381,12 @@ mha_true_fused_fwd_kvcache(at::Tensor &q_p,                 // batch_size x seql
     at::Tensor q_padded_d, kcache_padded_d, vcache_padded_d;
     bool seqlenq_ngroups_swapped_p = setup(q_p, kcache_p, vcache_p, q_padded_p, 
         kcache_padded_p, vcache_padded_p, out_prefill, window_size_left, 
-        window_size_right, softmax_scale, num_splits, is_causal, seqlen_q_p, 
-        softmax_lse_p, softmax_lse_accum_p, out_accum_p, params_prefill);
+        window_size_right, softmax_scale, num_splits_p, is_causal, seqlen_q_p, 
+        softmax_lse_p, softmax_lse_accum_p, out_accum_p, block_table_p, paged_KV_p, params_prefill, max_splits_p);
     bool seqlenq_ngroups_swapped_d = setup(q_d, kcache_d, vcache_d, q_padded_d, 
         kcache_padded_d, vcache_padded_d, out_decode, window_size_left, 
-        window_size_right, softmax_scale, num_splits, is_causal, seqlen_q_d, 
-        softmax_lse_d, softmax_lse_accum_d, out_accum_d, params_decode);
+        window_size_right, softmax_scale, num_splits_d, is_causal, seqlen_q_d, 
+        softmax_lse_d, softmax_lse_accum_d, out_accum_d, block_table_d, paged_KV_d, params_decode);
 
     // These MUST be here because set_params_fprop resets params to NULL
     // Only for decode:
