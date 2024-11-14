@@ -10,7 +10,10 @@ from sarathi.metrics.constants import OperationMetrics
 from sarathi.model_executor.attention.base_attention_wrapper import BaseAttentionWrapper
 import vattention
 from sarathi.cache_ops import cache_flat
-import pod_attn as fused
+try:
+    import pod_attn as fused
+except Exception as e:
+    print('unable to import module pod_attn')
 
 logger = init_logger(__name__)
 

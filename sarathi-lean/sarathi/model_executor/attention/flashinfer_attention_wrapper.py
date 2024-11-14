@@ -24,7 +24,7 @@ class FlashInferAttentionWrapper(BaseAttentionWrapper):
         super().init(model_config, parallel_config, block_size, device)
 
         workspace_buffer = torch.empty(
-            32 * 1024 * 1024, dtype=torch.uint8, device=device
+            256 * 1024 * 1024, dtype=torch.uint8, device=device
         )
         self._wrapper = BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, "NHD")
 
