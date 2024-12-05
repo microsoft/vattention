@@ -31,3 +31,20 @@ or
 ```
 
 The raw output logs and the final plots will be redirected to `./logs` and `./plots` subdirectories respectively. 
+
+# Using the Docker Environment
+
+To use vAttention's Docker image, you need to have [Docker](https://docs.docker.com/engine/installation/) and [NVIDIA Docker](https://github.com/NVIDIA/nvidia-docker/) installed on your system.  
+
+Once these dependencies are met, you can launch the Docker container by running the following command: 
+
+```sh
+docker run --gpus all -it -p 8181:8181 --rm --ipc=host --cap-add=SYS_ADMIN rnp1910/vattention:asplos_25_pytorch_run
+```
+This should open a shell inside the container in the `workspace` folder, which contains a clone of the vAttention repository. To run the artifact evaluation scripts, you will need to:
+
+1. Navigate to the artifact directory using:
+   ```
+   cd /workspace/vattention/script/artifact_asplos25
+   ```
+2. Use the ./run_*.sh scripts as described before.
