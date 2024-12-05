@@ -115,9 +115,12 @@ def detokenize_incrementally(
     else:
         # Put new_token_id in a list so skip_special_tokens is respected
         try:
-            new_tokens = tokenizer.convert_ids_to_tokens(
-                [new_token_id], skip_special_tokens=skip_special_tokens
-            )
+            if new_token_id >= len(tokenizer):
+                new_tokens = [""]
+            else:
+                new_tokens = tokenizer.convert_ids_to_tokens(
+                    [new_token_id], skip_special_tokens=skip_special_tokens
+                )
         except ValueError as e:
             new_tokens = [prev_tokens[-1]]
             logger.warning(f"Warning: {e}", flush=True)
