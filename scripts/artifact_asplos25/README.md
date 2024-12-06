@@ -45,6 +45,6 @@ This should open a shell inside the container in the `workspace` folder, which c
 
 1. Navigate to the artifact directory using:
    ```
-   cd /workspace/vattention/script/artifact_asplos25
+   cd /workspace/vattention/scripts/artifact_asplos25
    ```
 2. Use the ./run_*.sh scripts as described before.
