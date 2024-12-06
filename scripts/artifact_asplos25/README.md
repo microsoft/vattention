@@ -32,7 +32,7 @@ or
 
 The raw output logs and the final plots will be redirected to `./logs` and `./plots` subdirectories respectively. 
 
-# Using the Docker Environment
+# Alternative: Using the Docker Environment
 
 To use vAttention's Docker image, you need to have [Docker](https://docs.docker.com/engine/installation/) and [NVIDIA Docker](https://github.com/NVIDIA/nvidia-docker/) installed on your system.  
 
