@@ -3,3 +3,4 @@
 **/dist/
 **/output/
 **/*.egg-info/
+**/graphs/
