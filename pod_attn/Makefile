@@ -25,3 +25,25 @@ gen_figure6:
 	python scripts/plot_fig6.py ${OUTPUT}/fig6.txt ${GRAPHS}/fig6.png
 
 figure6: start
+	$(MAKE) run_figure6
+	$(MAKE) gen_figure6
+
+run_figure11:
+	python tests/attn_sweep.py > ${OUTPUT}/fig11.txt
+
+gen_figure11:
+	python scripts/plot_fig11.py ${OUTPUT}/fig11.txt ${GRAPHS}/fig11.png
+
+figure11:
+	$(MAKE) run_figure11
+	$(MAKE) gen_figure11
+
+run_figure13:
+	python tests/sens_cta.py > ${OUTPUT}/fig13.txt
+
+gen_figure13:
+	python scripts/plot_fig13.py ${OUTPUT}/fig13.txt ${GRAPHS}/fig13.png
+
+figure13: start
+	$(MAKE) run_figure13
+	$(MAKE) gen_figure13
