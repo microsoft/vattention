@@ -28,6 +28,21 @@ figure6: start
 	$(MAKE) run_figure6
 	$(MAKE) gen_figure6
 
+build/micro_compute_mem: tests/micro_compute_mem.cu
+	mkdir -p build
+	nvcc -o build/micro_compute_mem tests/micro_compute_mem.cu -arch=sm_80
+
+run_figure7: start build/micro_compute_mem
+	./build/micro_compute_mem > ${OUTPUT}/fig7.txt
+
+gen_figure7:
+	python scripts/extract_fig7.py ${OUTPUT}/fig7.txt > ${OUTPUT}/fig7_parsed.txt
+	python scripts/plot_fig7.py ${OUTPUT}/fig7_parsed.txt ${GRAPHS}/fig7.png
+
+figure7: start
+	$(MAKE) run_figure7
+	$(MAKE) gen_figure7
+
 run_figure11:
 	python tests/attn_sweep.py > ${OUTPUT}/fig11.txt
 
@@ -47,3 +62,13 @@ gen_figure13:
 figure13: start
 	$(MAKE) run_figure13
 	$(MAKE) gen_figure13
+
+run_figure14:
+	python tests/sens_scheduling.py > ${OUTPUT}/fig14.txt
+
+gen_figure14:
+	python scripts/plot_fig14.py ${OUTPUT}/fig14.txt ${GRAPHS}/fig14.png
+
+figure14: start
+	$(MAKE) run_figure14
+	$(MAKE) gen_figure14

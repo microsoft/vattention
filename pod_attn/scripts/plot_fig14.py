@@ -3,6 +3,10 @@ import numpy as np
 import seaborn as sns
 import pandas as pd
 
+import sys
+infile = sys.argv[1]
+outfile = sys.argv[2]
+
 plt.rcParams.update({'font.size': 28})
 plt.rcParams.update({'font.family': 'Sans Serif'})
 
@@ -54,5 +58,5 @@ def plot_perf(df, figname):
     plt.tight_layout()
     plt.savefig(figname)
 
-df = pd.read_csv('data.csv', sep='\t')
-plot_perf(df, 'perf-ablation.png')
+df = pd.read_csv(infile, sep='\t')
+plot_perf(df, outfile)

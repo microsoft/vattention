@@ -314,8 +314,9 @@ mha_true_fused_fwd_kvcache(at::Tensor &q_p,                 // batch_size x seql
     bool is_sm8x = dprops->major == 8 && dprops->minor >= 0;
     bool is_sm90 = dprops->major == 9 && dprops->minor == 0;
     TORCH_CHECK(is_sm90 || is_sm8x, "PODAttention only supports Ampere GPUs or newer.");
-    TORCH_CHECK(fused_params == 9 || fused_params == 11 || fused_params == 15 || fused_params == 64, 
-        "Invalid fused_params value, need 9, 11, 15, or 64");
+    TORCH_CHECK(fused_params == 8 || fused_params == 10 || fused_params == 9 || 
+        fused_params == 11 || fused_params == 15 || fused_params == 64, 
+        "Invalid fused_params value, need 8, 9, 10, 11, 15, or 64");
 
     at::Tensor block_table_p, block_table_d;
     const bool paged_KV_p = block_table_p_.has_value(), paged_KV_d = block_table_d_.has_value();
