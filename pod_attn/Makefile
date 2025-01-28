@@ -17,3 +17,11 @@ gen_figure1: start
 figure1: start
 	$(MAKE) run_figure1
 	$(MAKE) gen_figure1
+
+run_figure6:
+	python tests/chunked_quantization.py > ${OUTPUT}/fig6.txt
+
+gen_figure6:
+	python scripts/plot_fig6.py ${OUTPUT}/fig6.txt ${GRAPHS}/fig6.png
+
+figure6: start
