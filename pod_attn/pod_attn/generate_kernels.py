@@ -16,7 +16,7 @@ DTYPE_MAP = {
 SM = [80]  # Sm80 kernels support up to
 HEAD_DIMENSIONS = [128]
 IS_CAUSAL = ["false", "true"]
-FUSED_OPS = [0, 9, 11, 64]
+FUSED_OPS = [0, 8, 9, 10, 11, 64]
 DECODE_SPLIT = ["false", "true"]
 KERNEL_IMPL_TEMPLATE_FWD = """#include "fused_fwd_launch_template.h"
 template<>

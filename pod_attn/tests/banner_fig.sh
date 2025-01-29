@@ -6,7 +6,7 @@ NCU_METRICS="sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.a
 
 TEST_CMD="${PYTHON} tests/banner_fig_profile.py"
 FULL_TEST_CMD="${PYTHON} tests/banner_fig_comparison.py"
-OUTPUT="output/"
+OUTPUT="output/fig1/"
 
 profile_prefills() {
     p_cls="1024 2048 4096 8192 16384"
@@ -38,9 +38,9 @@ profile_fused() {
 }
 
 run_full() {
-    ${FULL_TEST_CMD} $c0
-    ${FULL_TEST_CMD} $c1
-    ${FULL_TEST_CMD} $c2
+    ${FULL_TEST_CMD} $c0 > ${OUTPUT}/full_C0.csv
+    ${FULL_TEST_CMD} $c1 > ${OUTPUT}/full_C1.csv
+    ${FULL_TEST_CMD} $c2 > ${OUTPUT}/full_C2.csv
 }
 
 mkdir -p ${OUTPUT}

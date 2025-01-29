@@ -101,6 +101,8 @@
 #define FUSED_SWITCH(FUSED_PARAM, ...)  \
   [&] {                                 \
     PARAM_IF(FUSED_PARAM, 9, fusedOpt, __VA_ARGS__)   \
+    else PARAM_IF(FUSED_PARAM, 8, fusedOpt, __VA_ARGS__)  \
+    else PARAM_IF(FUSED_PARAM, 10, fusedOpt, __VA_ARGS__)  \
     else PARAM_IF(FUSED_PARAM, 11, fusedOpt, __VA_ARGS__)  \
     else PARAM_IF(FUSED_PARAM, 64, fusedOpt, __VA_ARGS__)  \
   }()
