@@ -64,6 +64,18 @@ figure11: start
 	$(MAKE) run_figure11
 	$(MAKE) gen_figure11
 
+run_figure12: start
+        bash scripts/run_fig12.sh # --test # Added target for figure12
+
+figure12: start
+        $(MAKE) run_figure12  # Makefile command for running figure12
+
+run_table5: start
+        bash scripts/run_table5.sh # --test
+
+table5: start
+        $(MAKE) run_table5
+
 run_figure13: start
 	python tests/sens_cta.py > ${OUTPUT}/fig13.txt
 
