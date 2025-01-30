@@ -62,6 +62,6 @@ run_experiments() {
     done
 }
 
-#run_experiments
+run_experiments
 python $src/helpers/construct_table_5.py
 mv $src/Table-5.csv $src/../graphs/.
