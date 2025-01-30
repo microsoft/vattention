@@ -99,3 +99,14 @@ figure14: start
 install_all: start
 	python setup.py install
 	bash /workspace/vattention/scripts/artifact_asplos25/install.sh
+
+install_miniconda:
+	# Create conda directory
+	mkdir -p ~/miniconda3
+	# Download conda to home directory
+	wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+	# Install conda
+	bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
+	# Init
+	~/miniconda3/condabin/conda init
+	conda create -n pod_attn python=3.12 -y
