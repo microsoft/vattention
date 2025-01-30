@@ -95,3 +95,7 @@ gen_figure14: start
 figure14: start
 	$(MAKE) run_figure14
 	$(MAKE) gen_figure14
+
+install_all: start
+	python setup.py install
+	bash /workspace/vattention/scripts/artifact_asplos25/install.sh
