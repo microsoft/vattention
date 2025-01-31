@@ -62,8 +62,10 @@ for model in model_configs:
                     cache_batch_idx = None
                     fa_prefill, fa_p_latency = fabench.do_fa_prefill(q_p, k_p, v_p, seq_lens_k=cache_seqlens_p)
                     fa_decode, fa_d_latency = fabench.do_fa_decode(q_d, k_d, v_d, k_new=k_new, v_new=v_new, seq_lens_k=cache_seqlens_d, cache_batch_idx=cache_batch_idx)
-                    fa_stream_p, fa_stream_d, fa_stream_latency = fabench.do_fa_prefill_decode_streams(q_p, k_p, v_p, q_d, k_d, v_d, k_new=k_new, v_new=v_new, seq_lens_k_p=cache_seqlens_p, seq_lens_k_d=cache_seqlens_d, cache_batch_idx=cache_batch_idx)
-                    fi_prefill, fi_p_latency = fibench.do_flashinfer_prefill_paged(1, cs, cache_seqlen, num_heads, num_kv_heads, head_size, 16)
+                    _, _, fa_stream_latency = fabench.do_fa_prefill_decode_streams(q_p, k_p, v_p, q_d, k_d, v_d, k_new=k_new, v_new=v_new, seq_lens_k_p=cache_seqlens_p, seq_lens_k_d=cache_seqlens_d, cache_batch_idx=cache_batch_idx)
+                    #fi_prefill, fi_p_latency = fibench.do_flashinfer_prefill_paged(1, cs, cache_seqlen, num_heads, num_kv_heads, head_size, 16)
+                    _, fi_p2_time = fibench.do_flashinfer_prefill_input( \
+                        q_p.view(cs, num_heads, head_size), k_p.view(cache_seqlen, num_kv_heads, head_size), v_p.view(cache_seqlen, num_kv_heads, head_size))
                     fi_d_latency = fibench.do_flashinfer_decode_paged(bs, cl, num_heads, num_kv_heads, head_size, 16)
                     fi_fused_latency = fibench.do_flashinfer_fused_paged(cs, cache_seqlen, bs, cl, num_heads, num_kv_heads, head_size, 16)
                     fa_fused_latency, best_fused_op = 99999, -1
@@ -92,7 +94,7 @@ for model in model_configs:
                     #print()
                     #quit()
                     fa_serial_latency = round(fa_p_latency + fa_d_latency, 3)
-                    fi_serial_latency = round(fi_p_latency + fi_d_latency, 3)
+                    fi_serial_latency = round(fi_p2_time + fi_d_latency, 3)
                     speedup_fa_serial = round(fa_serial_latency / fa_fused_latency, 2)
                     #speedup_fi_serial = round(fi_serial_latency / fa_fused_latency, 2)
                     #speedup_fi_fused = round(fi_fused_latency / fa_fused_latency, 2)
@@ -107,6 +109,6 @@ for model in model_configs:
                     avg_speedup_chunks = round(all_chunks_baseline / all_chunks_opt, 2)
                     '''
                     print(f"{model};{cl};{cs};{cache_seqlen};{chunk_idx};{bs};{fa_p_latency};{fa_d_latency};{fa_serial_latency};{fa_stream_latency};" +
-                            f"{fi_p_latency};{fi_d_latency};{fi_serial_latency};{fi_fused_latency};{hfuse_latency};" +
+                            f"{fi_p2_time};{fi_d_latency};{fi_serial_latency};{fi_fused_latency};{hfuse_latency};" +
                           f"{fa_fused_latency};{best_fused_op};{speedup_fa_serial};")
         print()

@@ -84,5 +84,5 @@ for model in model_configs:
         if fu_decode is not None:
             assert torch.allclose(fa_decode, fu_decode, atol=1e-3), "decode output mismatch"
     print(";fa_p;fa_d;fi_p;fi_d;fi_batched;pod")
-    print(f";{fa_p_time:.2f};{fa_d_time:.2f};{fi_p3_time:.2f};{fi_d_time:.2f};{fi_fused_time:.2f};{fa_pod:.2f}")
+    print(f";{fa_p_time:.2f};{fa_d_time:.2f};{fi_p2_time:.2f};{fi_d_time:.2f};{fi_fused_time:.2f};{fa_pod:.2f}")
     print()
