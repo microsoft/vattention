@@ -1,7 +1,7 @@
 import torch
 start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
-warmup_steps, active_steps = 10, 100
+warmup_steps, active_steps = 10, 200
 device, dtype = 'cuda', torch.float16
 p_batch_size = 1
 
