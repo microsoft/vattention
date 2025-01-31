@@ -1,5 +1,6 @@
 # POD-Attention
 This repository contains the source code and profiling scripts for POD-Attention. POD-Attention fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously.
+POD-Attention is built on top of [FlashAttention](https://github.com/Dao-AILab/flash-attention/tree/main) kernels (v2.6.1) and is integrated with Sarathi-Serve - a state-of-the-art hybrid batching based LLM inference scheduler. This artifact contains the source code of POD-Attention, benchmarks used for evaluation, and all scripts needed to replicate results reported in the paper.
 
 Full details of our implementation can be found in our paper:
 <pre>
@@ -7,8 +8,65 @@ Full details of our implementation can be found in our paper:
 https://arxiv.org/abs/2410.18038
 </pre>
 
-This repository started as a fork of [FlashAttention](https://github.com/Dao-AILab/flash-attention/tree/main).
-<br></br>
+# Installation and dependencies
+Minimum NVIDIA Ampere GPU is needed to run this code. We tested using an A100 GPU on an x86 machine running Ubuntu 22.04.
+
+## Docker installation 
+We provide a docker image for POD-Attention with all its dependencies pre-installed. To access the docker image, you need to have [Docker](https://docs.docker.com/engine/installation/) and [NVIDIA Docker](https://github.com/NVIDIA/nvidia-docker/) installed on your system. You can then launch the docker container and navigate to the folder containing the POD-Attention artifact, as follows:
+```sh
+$ docker run --gpus all -it \
+  -p 8181:8181 --rm --ipc=host --cap-add=SYS_ADMIN \
+  rnp1910/pod_attention:asplos_25_pytorch_run
+$ cd /workspace/vattention/pod_attn  
+```
+
+## Manual installation
+For manual installation, we can download POD-Attention to the home directory to install it. 
+We use Anaconda to obtain the appropriate versions of CUDA, Python, and PyTorch. 
+This can take up to 2 hours.
+```sh
+$ git clone \
+  https://github.com/microsoft/vattention.git
+$ cd vattention/pod_attn/
+# Install miniconda; skip if already installed
+$ make install_miniconda
+$ bash # Refresh shell and activate
+$ conda activate pod_attn
+# Install CUDA Toolkit
+(pod_attn)$ conda install -y -c \
+  conda-forge cuda-toolkit=12.4.0
+# Install dependencies
+(pod_attn)$ pip install -r requirements.txt
+(pod_attn)$ pip install flashinfer==0.1.5 \
+  -i https://flashinfer.ai/whl/cu124/torch2.4
+# Install POD-Attention and vAttention
+(pod_attn)$ make install_all
+```
+
+## Test configuration
+The code has been tested with CUDA 12.4 and Python 3.9 on an A100 GPU.
+
+# Running POD-Attention
+
+POD-Attention's API has been integrated into vAttention's fork of Sarathi-serve. You can run the associated backend by running sarathi-serve's benchmark runner with the attention backend `'FA_POD'` or `'FA_POD_MEGACACHE'`.
+
+Our evaluation primarily contains two kinds of experiments, attention performance (Figures 1, 6, 10, 11, 13, 14) and end-to-end LLM performance (Figure 12 and Table 5). 
+Figure 7 evaluates various kernel fusion strategies with a micro-benchmark. Most of these require only one GPU except for Table 5 and Figure 12 that require two GPUs. Use the Makefile present in the vattention/pod_attn/ folder to run experiments as follows:
+
+```sh
+make figure1  # 2 minutes; sudo used by script
+make figure6  # 2 minutes
+make figure7  # 2 minutes
+make figure10 # 1 minute; sudo used by script
+make figure11 # 2 hours
+make figure12 # 9 hours
+make figure13 # 1 minute
+make figure14 # 1 minute
+make table6 # 4 hours
+```
+
+## Expected results
+The artifact scripts redirect the raw output numbers and logs to the output/ folder, while the plotted graphs can be found in the graphs/ folder. Tables are saved as CSVs in the same folder. Results may have minor runtime variations from those reported in in the paper, but general trends should hold.
 
 # Folder contents
 The various folders are as follows:
@@ -19,49 +77,3 @@ The various folders are as follows:
 	* pod_attn/fused_api.cpp --- Contains some preprocessing and parameter selection. Here, "mha_true_fused_fwd_kvcache" contains the code for limiting prefill splitting.
 * tests/ contains tests used during evaluation of POD-Attention.
 
-
-# Installation and dependencies
-Minimum NVIDIA Ampere GPU is needed to run this code.
-
-Python dependencies are listed in requirements.txt, they can be installed with:
-```sh
-pip install -r requirements.txt
-```
-To compile and build POD-Attention, run the following command:
-```sh
-python setup.py install
-```
-This may take around half an hour to compile for the first time.
-
-## Test configuration
-The code has been tested with CUDA 12.4 and Python 3.9 on an A100 GPU.
-
-# Running POD-Attention
-
-POD-Attention's API has been integrated into vAttention's fork of Sarathi-serve. You can run the associated backend by running sarathi-serve's benchmark runner with the attention backend `'FA_POD'` or `'FA_POD_MEGACACHE'`.
-
-### Motivational results (Figure 1)
-To replicate the results of figure 1, [NCU](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html) must be installed on your machine and your account should have sudo priviledges.
-
-Run:
-```sh
-bash tests/banner_fig.sh fa
-bash tests/banner_fig.sh pod
-bash tests/banner_fig.sh perf
-```
-The first command profiles FlashAttention kernels using NCU, the second profiles POD-Attention, while the third compares the performance of FlashAttention, FlashInfer and POD-Attention.
-Output is generated in the output/ folder.
-
-### Attention performance sweep (Figure 11)
-We include a [test file](pod_attn/tests/attn_sweep.py) to compare POD-Attention, [FlashAttention (FA)](https://github.com/Dao-AILab/flash-attention), [FlashInfer (FI)](https://github.com/flashinfer-ai/flashinfer/), and [HFuse with FlashAttention (FA_HFuse)](https://github.com/aoli-al/HFuse) across a variety of context lengths and models.
-
-Before running this test, make sure FlashInfer is installed and available.
-
-FA v2.6.1 and FA_HFuse are already included and installed by this repository and do not need to be separately installed.
-
-To run the test, run:
-
-```sh
-python  tests/attn_sweep.py
-```
-Output is in semicolon-separated format.
