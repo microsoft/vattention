@@ -70,11 +70,11 @@ run_figure12: start
 figure12: start
 	$(MAKE) run_figure12  # Makefile command for running figure12
 
-run_table5: start
-	bash scripts/run_table5.sh # --test
+run_table6: start
+	bash scripts/run_table6.sh # --test
 
-table5: start
-	$(MAKE) run_table5
+table6: start
+	$(MAKE) run_table6
 
 run_figure13: start
 	python tests/sens_cta.py > ${OUTPUT}/fig13.txt
