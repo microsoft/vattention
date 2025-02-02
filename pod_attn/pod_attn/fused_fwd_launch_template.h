@@ -69,6 +69,27 @@ __global__ void true_fused_tb_fwd_kernel(KERNEL_PARAM_MODIFIER const Flash_fwd_p
     #endif
 }
 
+template<typename Kernel_traits_prefill, typename Kernel_traits_decode, 
+    bool Is_dropout, bool Is_causal_p, bool Is_causal_d, bool Is_local_p, bool Is_local_d, 
+    bool Has_alibi, bool Is_even_MN_p, bool Is_even_K_p, bool Is_even_MN_d, bool Is_even_K_d, 
+    bool Is_softcap, bool Return_softmax, bool PrefillIsSplit, bool DecodeIsSplit, 
+    bool DecodeAppend_KV, int FusedOp, bool UseSplitPrefill, bool UseSplitDecode>
+__global__ void true_fused_pt_tb_fwd_kernel(KERNEL_PARAM_MODIFIER const Flash_fwd_params prefill_params, 
+    KERNEL_PARAM_MODIFIER const Flash_fwd_params decode_params, int *tbAssign) {
+    #if defined(ARCH_SUPPORTS_FLASH)
+        static_assert(!(Is_causal_p && Is_local_p)); // Enforce constraints
+        static_assert(!(Is_causal_d && Is_local_d)); // Enforce constraints
+        fused::compute_fused_pt_tb_attn<Kernel_traits_prefill, Kernel_traits_decode, 
+            Is_dropout, Is_causal_p, Is_causal_d, Is_local_p, Is_local_d, Has_alibi, 
+            Is_even_MN_p, Is_even_K_p, Is_even_MN_d, Is_even_K_d, Is_softcap, 
+            Return_softmax, PrefillIsSplit, DecodeIsSplit, DecodeAppend_KV, FusedOp,
+            UseSplitPrefill, UseSplitDecode>
+            (prefill_params, decode_params, tbAssign);
+    #else
+        FLASH_UNSUPPORTED_ARCH
+    #endif
+}
+
 DEFINE_FLASH_FORWARD_KERNEL(fused_fwd_kernel, bool Is_dropout, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Return_softmax) {
     #if defined(ARCH_SUPPORTS_FLASH)
         static_assert(!(Is_causal && Is_local)); // Enforce constraints
@@ -393,11 +414,25 @@ void run_true_fused_fwd(Flash_fwd_params &prefill_params, Flash_fwd_params &deco
                                     // Find the logical threadblocks per real threadblock
                                     static constexpr int blk_factor_p = num_threads / Kernel_traits_prefill::kNThreads;
                                     static constexpr int blk_factor_d = num_threads / Kernel_traits_decode::kNThreads;
-
-                                    dim3 grid = dim3((num_blocks_prefill + blk_factor_p - 1) / blk_factor_p + (num_blocks_decode + blk_factor_d - 1) / blk_factor_d, 1, 1);
-                                    size_t smem_size = max(Kernel_traits_prefill::kSmemSize * blk_factor_p, Kernel_traits_decode::kSmemSize * blk_factor_d);
-
-                                    //if constexpr(fused_op != 2) {
+                                    // Persistent threads
+                                    if constexpr(fused_op & 128) {
+                                        // 2 TB per SM
+                                        int grid = numSMs * (256 / num_threads);
+                                        size_t smem_size = max(Kernel_traits_prefill::kSmemSize * blk_factor_p, Kernel_traits_decode::kSmemSize * blk_factor_d);
+                                        auto kernel = &true_fused_pt_tb_fwd_kernel<Kernel_traits_prefill, Kernel_traits_decode, 
+                                            Is_dropout && !false, Is_causal_p, Is_causal_d, Is_local_p && !Is_causal_p, Is_local_d && !Is_causal_d, false, 
+                                            IsEvenMNConst_p && IsEvenKConst && !Is_local_p && !ReturnSoftmaxConst && Kernel_traits_prefill::kHeadDim <= 128, IsEvenKConst, 
+                                            IsEvenMNConst_d && !DecodeAppend_KV && IsEvenKConst && !Is_local_d && Kernel_traits_decode::kHeadDim <= 128, IsEvenKConst, 
+                                            false, ReturnSoftmaxConst && Is_dropout && !false, PrefillIsSplit, DecodeIsSplit, DecodeAppend_KV, fused_op, 
+                                            UseSplitPrefill, UseSplitDecode>;
+                                        if (smem_size >= 48 * 1024) {
+                                            C10_CUDA_CHECK(cudaFuncSetAttribute(
+                                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+                                        }
+                                        kernel<<<grid, num_threads, smem_size, stream>>>(prefill_params, decode_params, tbAssign);
+                                    } else {
+                                        dim3 grid = dim3((num_blocks_prefill + blk_factor_p - 1) / blk_factor_p + (num_blocks_decode + blk_factor_d - 1) / blk_factor_d, 1, 1);
+                                        size_t smem_size = max(Kernel_traits_prefill::kSmemSize * blk_factor_p, Kernel_traits_decode::kSmemSize * blk_factor_d);
                                         auto kernel = &true_fused_tb_fwd_kernel<Kernel_traits_prefill, Kernel_traits_decode, 
                                             Is_dropout && !false, Is_causal_p, Is_causal_d, Is_local_p && !Is_causal_p, Is_local_d && !Is_causal_d, false, 
                                             IsEvenMNConst_p && IsEvenKConst && !Is_local_p && !ReturnSoftmaxConst && Kernel_traits_prefill::kHeadDim <= 128, IsEvenKConst, 
@@ -409,7 +444,7 @@ void run_true_fused_fwd(Flash_fwd_params &prefill_params, Flash_fwd_params &deco
                                                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                                         }
                                         kernel<<<grid, num_threads, smem_size, stream>>>(prefill_params, decode_params, tbAssign);
-                                    //}
+                                    }
                                     C10_CUDA_KERNEL_LAUNCH_CHECK();
                                 //});
                                     });

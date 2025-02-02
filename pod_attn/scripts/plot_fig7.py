@@ -16,10 +16,10 @@ plt.rcParams.update({'font.size': 28})
 plt.rcParams.update({'font.family': 'Sans Serif'})
 
 #configs = ['serial', 'kernel(streams)', 'cta(sequential)', 'cta(interleaved)', 'warp', 'cta(sm-aware)']
-configs = ['serial', 'optimal', 'cta(sequential)', 'cta(sm-aware)', 'intra-thread']
+configs = ['serial', 'intra-thread', 'cta(sequential)', 'optimal', 'kernel(streams)', 'cta(sm-aware)']
 legends = {
     'serial': 'Serial',
-    'kernel(streams)': 'Streams',
+    'kernel(streams)': 'Kernel (streams)',
     'cta(sequential)': 'CTA',
     'warp': 'Warp',
     'intra-thread': 'Intra-thread',
@@ -104,7 +104,7 @@ Mb = df["Mb"].tolist()
 Cb = df["Cb"].tolist()
 opt = [max(i, j) for i,j in zip(Mb, Cb)]
 
-df2 = df.filter(regex='computeiters|serial|-barrier$')
+df2 = df.filter(regex='computeiters|serial|kernel.*|-barrier$')
 df2.columns = df2.columns.str.replace('-barrier$', '', regex=True)
 df2.insert(0, 'optimal', opt)
 
