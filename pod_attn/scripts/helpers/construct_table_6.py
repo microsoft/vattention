@@ -6,7 +6,7 @@ import pandas as pd
 
 helpers = os.path.dirname(os.path.abspath(__file__))
 root = os.path.dirname(helpers)
-logs = os.path.join(root, 'logs/table_5/')
+logs = os.path.join(root, 'logs/table_6/')
 
 num_requests = [2048]
 record = {}
@@ -121,7 +121,7 @@ df = pd.merge(df, df_tbt, on="QPS")
 df = pd.merge(df, df_tbt_stalls, on="QPS")
 
 # Save as CSV
-df.to_csv("Table-5.csv", index=False)
+df.to_csv("Table-6.csv", index=False)
 
 # Print the formatted DataFrame
 print(df)

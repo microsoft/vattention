@@ -32,9 +32,9 @@ run_experiments() {
             block_size=2097152
             model_qps="0.85 0.95"
             for qps in $model_qps; do
-                output_dir="$src/logs/table_5/model_${model}_attn_${file_name_}_qps_${qps}/"
+                output_dir="$src/logs/table_6/model_${model}_attn_${file_name_}_qps_${qps}/"
                 echo -e "\n========================================================================================================"
-                echo "[Table-5] Running Config ==> Model: $model Attention Backend: $attn_backend QPS: $qps Schedular: $schedular"
+                echo "[Table-6] Running Config ==> Model: $model Attention Backend: $attn_backend QPS: $qps Schedular: $schedular"
                 echo -e "==========================================================================================================\n"
                 #: '
                 python $benchmark $model_arg \
@@ -63,5 +63,5 @@ run_experiments() {
 }
 
 run_experiments
-python $src/helpers/construct_table_5.py
-mv $src/Table-5.csv $src/../graphs/.
+python $src/helpers/construct_table_6.py
+mv $src/Table-6.csv $src/../graphs/.
