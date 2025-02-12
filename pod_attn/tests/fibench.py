@@ -85,6 +85,50 @@ def do_flashinfer_prefill_ragged_input(q, k, v):
         return -1
 
 @torch.inference_mode
+def do_flashinfer_pod(q_p, k_p, v_p, bs, cl, num_heads, num_kv_heads, head_dim, use_tensor = True, block_size = 16):
+    try:
+        q_d = torch.randn(bs, num_heads, head_dim, dtype=utils.dtype, device=utils.device)
+        workspace_buffer = torch.empty(32 * 1024 * 1024, dtype=torch.int8, device=utils.device)
+        pod_wrapper = fi.PODWithPagedKVCacheWrapper(workspace_buffer, "NHD", use_tensor_cores=use_tensor)
+        num_pages_per_req = math.ceil(cl / block_size)
+        max_num_pages = num_pages_per_req * bs
+        kv_page_indices = torch.arange(max_num_pages).int().to(utils.device)
+        kv_page_indptr = torch.arange(0, bs + 1).int().to(utils.device) * num_pages_per_req
+        kv_last_page_len = torch.full((bs,), (cl  - 1) % block_size + 1, dtype=torch.int32).to(utils.device)
+        kv_data = torch.randn(max_num_pages, 2, block_size, num_kv_heads, head_dim, dtype=utils.dtype, device=utils.device)
+        pod_wrapper.begin_forward(
+            kv_page_indptr,
+            kv_page_indices,
+            kv_last_page_len,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            block_size,
+            logits_soft_cap=0.0,
+            pos_encoding_mode="NONE",
+            data_type=torch.float16,
+            q_data_type=torch.float16,
+        )
+        for _ in range(utils.warmup_steps):
+            pod_wrapper.run(q_p, k_p, v_p, q_d, kv_data, 
+                pos_encoding_mode_p="NONE",
+                logits_soft_cap_p=0.0,
+                causal_p = True)
+        utils.start.record()
+        for _ in range(utils.active_steps):
+            o_p, o_d = pod_wrapper.run(q_p, k_p, v_p, q_d, kv_data, 
+                pos_encoding_mode_p="NONE",
+                logits_soft_cap_p=0.0,
+                causal_p = True)
+        utils.end.record()
+        torch.cuda.synchronize()
+        latency = utils.calc_latency(utils.start, utils.end, utils.active_steps)
+        return o_p, o_d, latency
+    except Exception as e:
+        print(e)
+        return -1, -1, -1
+
+@torch.inference_mode
 def do_flashinfer_prefill_paged(bs, cl, cache_seqlen, num_heads, num_kv_heads, head_dim, block_size):
     try:
         assert block_size == 16, "block size must be 16 for flashinfer paged prefill"
@@ -156,7 +200,7 @@ def do_flashinfer_decode(bs, cl, num_heads, num_kv_heads, head_dim):
         return -1
 
 @torch.inference_mode
-def do_flashinfer_decode_paged(bs, cl, num_heads, num_kv_heads, head_dim, block_size):
+def do_flashinfer_decode_paged(bs, cl, num_heads, num_kv_heads, head_dim, block_size = 16):
     try:
         q = torch.randn(bs, num_heads, head_dim, dtype=utils.dtype, device=utils.device)
         workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8, device=utils.device)

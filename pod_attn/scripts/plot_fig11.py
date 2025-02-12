@@ -9,9 +9,9 @@ import argparse
 #args = parser.parse_args()
 sysname = 'POD' #if args.sysname == 'pod' else 'SANGAM'
 
-#model;cl;cs;kv_len;chunk_id;bs;fa_p;fa_d;fa_serial;fa_stream;fi_p;fi_d;fi_serial;fi_batched;HFuse;fa_fused;best_fused_op;speedup_fa_serial;
+#model;cl;cs;kv_len;chunk_id;bs;fa_p;fa_d;fa_serial;fa_stream;fi_p;fi_d;fi_serial;fi_batched;HFuse;fi_pod;fa_fused;best_fused_op;speedup_fa_serial;
 # Define the regex pattern for the header
-header_pattern = re.compile(r'.*;.*;.*;.*;.*;.*;(.*);(.*);(.*);(.*);.*;.*;(.*);(.*);(.*);(.*);.*;.*;')
+header_pattern = re.compile(r'.*;.*;.*;.*;.*;.*;(.*);(.*);(.*);(.*);.*;.*;(.*);(.*);(.*);(.*);(.*);.*;.*;')
 
 import sys
 csv_file_path = sys.argv[1]
@@ -23,6 +23,7 @@ fa_stream = []
 fi_serial = []
 fi_batched = []
 hfuse = []
+fi_pod = []
 fa_fused = []
 with open(csv_file_path, newline='') as csvfile:
     skip = 0
@@ -47,7 +48,8 @@ with open(csv_file_path, newline='') as csvfile:
             fi_serial.append(float(match.group(5)))
             fi_batched.append(float(match.group(6)))
             hfuse.append(float(match.group(7)))
-            fa_fused.append(float(match.group(8)))
+            fi_pod.append(float(match.group(8)))
+            fa_fused.append(float(match.group(9)))
 
 speedup = []
 #speedup.append([i / j for i, j in zip(fa_serial, peak)])
@@ -55,6 +57,7 @@ speedup.append([i / j for i, j in zip(fa_serial, fa_stream)])
 speedup.append([i / j for i, j in zip(fa_serial, fi_serial)])
 speedup.append([i / j for i, j in zip(fa_serial, fi_batched)])
 speedup.append([i / j for i, j in zip(fa_serial, hfuse)])
+speedup.append([i / j for i, j in zip(fa_serial, fi_pod)])
 speedup.append([i / j for i, j in zip(fa_serial, fa_fused)])
 
 schemes = [
@@ -62,6 +65,7 @@ schemes = [
     'fi_serial',
     'fi_fused',
     'Hfuse',
+    'fi_pod',
     'fa_fused',
 ]
 
@@ -70,6 +74,7 @@ colors = {
     'fi_serial': 'cadetblue',
     'fi_fused': 'tab:purple',
     'Hfuse': 'tab:red',
+    'fi_pod': 'springgreen',
     'fa_fused': 'tab:green'
 }
 
@@ -78,7 +83,8 @@ labels = {
     'fi_serial': 'FI_Serial',
     'fi_fused': 'FI_Batched',
     'Hfuse': 'FA_HFuse',
-    'fa_fused': sysname
+    'fi_pod': sysname + " (FI)",
+    'fa_fused': sysname + " (FA)"
 }
 
 
@@ -86,7 +92,7 @@ labels = {
 #values = np.transpose(data[1:])
 
 # Create the violin plot
-plt.figure(figsize=(18, 7))
+plt.figure(figsize=(20, 7))
 #fig, axs = plt.subplots(nrows=1, ncols=1, figsize=(10, 4))
 axs = ['a']
 axs[0] = plt.subplot(111)
