@@ -1,12 +1,13 @@
 # POD-Attention
 This repository contains the source code and profiling scripts for POD-Attention. POD-Attention fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously, critical for hybrid-batching-based LLM inference.
-POD-Attention is built on top of [FlashAttention](https://github.com/Dao-AILab/flash-attention/tree/main) kernels (v2.6.1) and is integrated with Sarathi-Serve - a state-of-the-art hybrid-batching-based LLM inference scheduler. This artifact contains the source code of POD-Attention, benchmarks used for evaluation, and all scripts needed to replicate results reported in the paper.
+Two alternative versions are available of POD-Attention, built on top of either (1) FlashAttention v2.6.1 [this repo] or (2) FlashInfer v0.2.0 [[available here](https://github.com/AKKamath/flashinfer/)]. It is integrated with Sarathi-Serve &mdash; a state-of-the-art hybrid-batching-based LLM inference scheduler. This repo contains the source code of POD-Attention, benchmarks for evaluation, and all scripts needed to replicate results reported in the paper.
 
-Full details of our implementation can be found in our paper:
+Full details of our implementation can be found in our [paper](https://arxiv.org/abs/2410.18038):
 <pre>
 <b>POD-Attention: Unlocking Full Prefill-Decode Overlap for Faster LLM Inference</b>
-[To appear in] <i>ACM 30th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), 2025</i>
-https://arxiv.org/abs/2410.18038
+Aditya K Kamath, Ramya Prabhu, Jayashree Mohan, Simon Peter, Ramachandran Ramjee, Ashish Panwar
+<i>[To appear in] ACM 30th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), 2025</i>
+DOI: https://doi.org/10.1145/3676641.3715996
 </pre>
 
 ## Performance
@@ -93,3 +94,19 @@ The various folders are as follows:
 	* pod_attn/fused_api.cpp --- Contains some preprocessing and parameter selection. Here, "mha_true_fused_fwd_kvcache" contains the code for limiting prefill splitting.
 * tests/ contains tests used during evaluation of POD-Attention.
 
+# Citation
+If you use our work, please consider citing our paper:
+```
+@inproceedings {POD:ASPLOS:2025, 
+	author = {Kamath, Aditya K and Prabhu, Ramya and Mohan, Jayashree and Peter, Simon and Ramjee, Ramachandran and Panwar, Ashish}, 
+	title = {POD-Attention: Unlocking Full Prefill-Decode Overlap for Faster LLM Inference}, 
+	year = {2025},
+	publisher = {Association for Computing Machinery}, 
+	address = {New York, NY, USA}, 
+	url = {https://doi.org/10.1145/3676641.3715996}, 
+	doi = {10.1145/3676641.3715996}, 
+	booktitle = {Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2}, 
+	location = {Rotterdam, The Netherlands}, 
+	series = {ASPLOS 2025}
+} 
+```
