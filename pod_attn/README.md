@@ -13,6 +13,7 @@ DOI: https://doi.org/10.1145/3676641.3715996
 ## Performance
 ![POD_attention_sweep](https://github.com/user-attachments/assets/f5d90c6f-4b73-435c-8be5-23dc3fbed7f1)
 To examine POD-Attention's broad applicability in LLM inference, we examined over a thousand different hybrid batch configurations, sweeping different context lengths, decode batch sizes, and LLM model configurations.
+We also compared existing GPU methodologies of combining complementary kernels (e.g., [CUDA streams](https://developer.nvidia.com/blog/gpu-pro-tip-cuda-7-streams-simplify-concurrency/))
 The above graph shows POD-Attention's performance on these, normalized to the current approach of serially executing FlashAttention-2's prefill and decode kernels. 
 
 POD-Attention outperforms this approach by up to <b>61% (average 33%)</b>.
