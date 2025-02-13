@@ -49,8 +49,9 @@ $ conda activate pod_attn
   conda-forge cuda-toolkit=12.4.0
 # Install dependencies
 (pod_attn)$ pip install -r requirements.txt
-(pod_attn)$ pip install flashinfer==0.1.5 \
-  -i https://flashinfer.ai/whl/cu124/torch2.4
+# Install FlashInfer
+(pod_attn)$ git clone https://github.com/AKKamath/flashinfer.git --recursive
+(pod_attn)$ pushd flashinfer; pip install -e . -v; popd
 # Install POD-Attention and vAttention
 (pod_attn)$ make install_all
 ```
