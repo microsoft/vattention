@@ -114,6 +114,11 @@ for ax in axs:
     ax.set_xticks([y + 1 for y in range(len(speedup))],
                   labels=[labels[i] for i in schemes],
                   fontsize=30)
+    xticks = ax.get_xticklabels()
+    # Set the first and third tick labels to bold
+    for i, tick in enumerate(xticks):
+        if sysname in tick.get_text():
+            tick.set_fontweight('bold')
     for line in lines:
         vp[line].set_color("black")
         vp[line].set_alpha(0.5)
@@ -128,11 +133,11 @@ for ax in axs:
                        fontsize=26)
     
     #ax.set_xlabel('')
-    ax.set_ylabel('Normalized speedup', fontsize=30, fontweight='bold')
+    ax.set_ylabel('Speedup over FlashAttention2', fontsize=30, fontweight='bold')
     for it, title in enumerate(schemes):
         vp['bodies'][it].set_facecolor(colors[title])
         vp['bodies'][it].set_alpha(0.75)
         #vp['bodies'][it].set_label(labels[title])
 # Show the plot
 #plt.show()
-plt.savefig(outfile, bbox_inches='tight', pad_inches=0) 
+plt.savefig(outfile, bbox_inches='tight', pad_inches=1) 
