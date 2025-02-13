@@ -1,6 +1,6 @@
 # POD-Attention
-This repository contains the source code and profiling scripts for POD-Attention. POD-Attention fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously, critical for hybrid-batching-based LLM inference.
-Two alternative versions are available of POD-Attention, built on top of either (1) FlashAttention v2.6.1 [this repo] or (2) FlashInfer v0.2.0 [[available here](https://github.com/AKKamath/flashinfer/)]. It is integrated with Sarathi-Serve &mdash; a state-of-the-art hybrid-batching-based LLM inference scheduler. This repo contains the source code of POD-Attention, benchmarks for evaluation, and all scripts needed to replicate results reported in the paper.
+This repository contains the source code and profiling scripts for POD-Attention. POD-Attention fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously &mdash; critical for hybrid-batching-based LLM inference.
+Two alternative versions are available of POD-Attention, built on top of either (1) FlashAttention v2.6.1 [this repo] or (2) FlashInfer v0.2.0 [[available here](https://github.com/AKKamath/flashinfer/)]. POD-Attention has been integrated with Sarathi-Serve &mdash; a state-of-the-art hybrid-batching-based LLM inference scheduler. This repo contains the source code of POD-Attention, benchmarks for evaluation, and all scripts needed to replicate results reported in the paper.
 
 Full details of our implementation can be found in our [paper](https://arxiv.org/abs/2410.18038):
 <pre>
@@ -12,18 +12,19 @@ DOI: https://doi.org/10.1145/3676641.3715996
 
 ## Performance
 ![POD_attention_sweep](https://github.com/user-attachments/assets/f5d90c6f-4b73-435c-8be5-23dc3fbed7f1)
-To examine POD-Attention's broad applicability in LLM inference, we examined over a thousand different hybrid batch configurations, sweeping different context lengths, decode batch sizes, and LLM model configurations.
-We also compared existing GPU methodologies of combining complementary kernels (e.g., [CUDA streams](https://developer.nvidia.com/blog/gpu-pro-tip-cuda-7-streams-simplify-concurrency/))
-The above graph shows POD-Attention's performance on these, normalized to the current approach of serially executing FlashAttention-2's prefill and decode kernels. 
+To examine POD-Attention's broad applicability in LLM inference, we evaluated over a thousand different hybrid-batch configurations, sweeping different context lengths, decode batch sizes, and LLM model configurations.
+We also compared against existing GPU methodologies of combining complementary kernels (e.g., [CUDA streams](https://developer.nvidia.com/blog/gpu-pro-tip-cuda-7-streams-simplify-concurrency/)).
+The above graph shows POD-Attention's speedup over the current approach of serially executing FlashAttention-2's prefill and decode kernels. 
 
 POD-Attention outperforms this approach by up to <b>61% (average 33%)</b>.
 
-FA_Stream: Executes [FlashAttention-2](https://github.com/Dao-AILab/flash-attention) with prefill and decode in separate streams.   
-FI_Serial: Executes [FlashInfer](https://github.com/flashinfer-ai/flashinfer) prefill and decode in serial.   
-FI_Batched: Combines prefill and decode inputs and execute using a single FlashInfer kernel.   
-FA_HFuse: Employs [HFuse](https://github.com/aoli-al/HFuse) to create a merged kernel for prefill and decode.   
-POD (FI): Our POD-Attention implementation fusing FlashInfer's prefill and decode kernels ([available here](https://github.com/AKKamath/flashinfer/)).   
-POD (FA): Our POD-Attention implementation fusing FlashAttention-2's prefill and decode kernels (this repository).   
+<u>Legend</u>
+* FA_Stream: Executes [FlashAttention-2](https://github.com/Dao-AILab/flash-attention) with prefill and decode in separate streams.   
+* FI_Serial: Executes [FlashInfer](https://github.com/flashinfer-ai/flashinfer) prefill and decode in serial.   
+* FI_Batched: Combines prefill and decode inputs and executes using a single FlashInfer kernel.   
+* FA_HFuse: Employs [HFuse](https://github.com/aoli-al/HFuse) to create a merged kernel for prefill and decode.   
+* POD (FI): Our POD-Attention implementation fusing FlashInfer's prefill and decode kernels ([available here](https://github.com/AKKamath/flashinfer/)).   
+* POD (FA): Our POD-Attention implementation fusing FlashAttention-2's prefill and decode kernels (this repository).   
 
 # Installation and dependencies
 Minimum NVIDIA Ampere GPU is needed to run this code. We tested using an A100 GPU on an x86 machine running Ubuntu 22.04.
