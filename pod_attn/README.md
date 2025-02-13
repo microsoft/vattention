@@ -1,12 +1,29 @@
 # POD-Attention
-This repository contains the source code and profiling scripts for POD-Attention. POD-Attention fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously.
-POD-Attention is built on top of [FlashAttention](https://github.com/Dao-AILab/flash-attention/tree/main) kernels (v2.6.1) and is integrated with Sarathi-Serve - a state-of-the-art hybrid batching based LLM inference scheduler. This artifact contains the source code of POD-Attention, benchmarks used for evaluation, and all scripts needed to replicate results reported in the paper.
+This repository contains the source code and profiling scripts for POD-Attention. POD-Attention fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously, critical for hybrid-batching-based LLM inference.
+Two alternative versions are available of POD-Attention, built on top of either (1) FlashAttention v2.6.1 [this repo] or (2) FlashInfer v0.2.0 [[available here](https://github.com/AKKamath/flashinfer/)]. It is integrated with Sarathi-Serve &mdash; a state-of-the-art hybrid-batching-based LLM inference scheduler. This repo contains the source code of POD-Attention, benchmarks for evaluation, and all scripts needed to replicate results reported in the paper.
 
-Full details of our implementation can be found in our paper:
+Full details of our implementation can be found in our [paper](https://arxiv.org/abs/2410.18038):
 <pre>
 <b>POD-Attention: Unlocking Full Prefill-Decode Overlap for Faster LLM Inference</b>
-https://arxiv.org/abs/2410.18038
+Aditya K Kamath, Ramya Prabhu, Jayashree Mohan, Simon Peter, Ramachandran Ramjee, Ashish Panwar
+<i>[To appear in] ACM 30th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), 2025</i>
+DOI: https://doi.org/10.1145/3676641.3715996
 </pre>
+
+## Performance
+![POD_attention_sweep](https://github.com/user-attachments/assets/f5d90c6f-4b73-435c-8be5-23dc3fbed7f1)
+To examine POD-Attention's broad applicability in LLM inference, we examined over a thousand different hybrid batch configurations, sweeping different context lengths, decode batch sizes, and LLM model configurations.
+We also compared existing GPU methodologies of combining complementary kernels (e.g., [CUDA streams](https://developer.nvidia.com/blog/gpu-pro-tip-cuda-7-streams-simplify-concurrency/))
+The above graph shows POD-Attention's performance on these, normalized to the current approach of serially executing FlashAttention-2's prefill and decode kernels. 
+
+POD-Attention outperforms this approach by up to <b>61% (average 33%)</b>.
+
+FA_Stream: Executes [FlashAttention-2](https://github.com/Dao-AILab/flash-attention) with prefill and decode in separate streams.   
+FI_Serial: Executes [FlashInfer](https://github.com/flashinfer-ai/flashinfer) prefill and decode in serial.   
+FI_Batched: Combines prefill and decode inputs and execute using a single FlashInfer kernel.   
+FA_HFuse: Employs [HFuse](https://github.com/aoli-al/HFuse) to create a merged kernel for prefill and decode.   
+POD (FI): Our POD-Attention implementation fusing FlashInfer's prefill and decode kernels ([available here](https://github.com/AKKamath/flashinfer/)).   
+POD (FA): Our POD-Attention implementation fusing FlashAttention-2's prefill and decode kernels (this repository).   
 
 # Installation and dependencies
 Minimum NVIDIA Ampere GPU is needed to run this code. We tested using an A100 GPU on an x86 machine running Ubuntu 22.04.
@@ -37,8 +54,9 @@ $ conda activate pod_attn
   conda-forge cuda-toolkit=12.4.0
 # Install dependencies
 (pod_attn)$ pip install -r requirements.txt
-(pod_attn)$ pip install flashinfer==0.1.5 \
-  -i https://flashinfer.ai/whl/cu124/torch2.4
+# Install FlashInfer
+(pod_attn)$ git clone https://github.com/AKKamath/flashinfer.git --recursive
+(pod_attn)$ pushd flashinfer; pip install -e . -v; popd
 # Install POD-Attention and vAttention
 (pod_attn)$ make install_all
 ```
@@ -77,3 +95,19 @@ The various folders are as follows:
 	* pod_attn/fused_api.cpp --- Contains some preprocessing and parameter selection. Here, "mha_true_fused_fwd_kvcache" contains the code for limiting prefill splitting.
 * tests/ contains tests used during evaluation of POD-Attention.
 
+# Citation
+If you use our work, please consider citing our paper:
+```
+@inproceedings {POD:ASPLOS:2025, 
+	author = {Kamath, Aditya K and Prabhu, Ramya and Mohan, Jayashree and Peter, Simon and Ramjee, Ramachandran and Panwar, Ashish}, 
+	title = {POD-Attention: Unlocking Full Prefill-Decode Overlap for Faster LLM Inference}, 
+	year = {2025},
+	publisher = {Association for Computing Machinery}, 
+	address = {New York, NY, USA}, 
+	url = {https://doi.org/10.1145/3676641.3715996}, 
+	doi = {10.1145/3676641.3715996}, 
+	booktitle = {Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2}, 
+	location = {Rotterdam, The Netherlands}, 
+	series = {ASPLOS 2025}
+} 
+```

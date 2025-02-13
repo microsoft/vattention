@@ -28,7 +28,7 @@ model_configs = {
 chunk_sizes = [512, 1024, 2048]
 print(f"model;cl;cs;kv_len;chunk_id;bs;fa_p;fa_d;fa_serial;fa_stream;" +
         f"fi_p;fi_d;fi_serial;fi_batched;HFuse;" +
-        f"fa_fused;best_fused_op;speedup_fa_serial;")
+        f"fi_pod;fa_fused;best_fused_op;speedup_fa_serial;")
 for model in model_configs:
     num_heads = model_configs[model]['num_heads']
     num_kv_heads = model_configs[model]['num_kv_heads']
@@ -68,6 +68,10 @@ for model in model_configs:
                         q_p.view(cs, num_heads, head_size), k_p.view(cache_seqlen, num_kv_heads, head_size), v_p.view(cache_seqlen, num_kv_heads, head_size))
                     fi_d_latency = fibench.do_flashinfer_decode_paged(bs, cl, num_heads, num_kv_heads, head_size, 16)
                     fi_fused_latency = fibench.do_flashinfer_fused_paged(cs, cache_seqlen, bs, cl, num_heads, num_kv_heads, head_size, 16)
+                    fi_p_pod, fi_d_pod, fi_pod_lat = fibench.do_flashinfer_pod( \
+                        q_p.view(cs, num_heads, head_size), k_p.view(cache_seqlen, num_kv_heads, head_size), \
+                        v_p.view(cache_seqlen, num_kv_heads, head_size), \
+                        bs, cl, num_heads, num_kv_heads, head_size, use_tensor = True, block_size = 16)
                     fa_fused_latency, best_fused_op = 99999, -1
                     for fused_op in [9, 11, 15]:
                         # Our shiny new FusedAttention operation
@@ -110,5 +114,5 @@ for model in model_configs:
                     '''
                     print(f"{model};{cl};{cs};{cache_seqlen};{chunk_idx};{bs};{fa_p_latency};{fa_d_latency};{fa_serial_latency};{fa_stream_latency};" +
                             f"{fi_p2_time};{fi_d_latency};{fi_serial_latency};{fi_fused_latency};{hfuse_latency};" +
-                          f"{fa_fused_latency};{best_fused_op};{speedup_fa_serial};")
+                          f"{fi_pod_lat};{fa_fused_latency};{best_fused_op};{speedup_fa_serial};")
         print()
