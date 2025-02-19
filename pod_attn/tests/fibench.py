@@ -104,21 +104,15 @@ def do_flashinfer_pod(q_p, k_p, v_p, bs, cl, num_heads, num_kv_heads, head_dim, 
             num_kv_heads,
             head_dim,
             block_size,
-            logits_soft_cap=0.0,
-            pos_encoding_mode="NONE",
             data_type=torch.float16,
             q_data_type=torch.float16,
         )
         for _ in range(utils.warmup_steps):
             pod_wrapper.run(q_p, k_p, v_p, q_d, kv_data, 
-                pos_encoding_mode_p="NONE",
-                logits_soft_cap_p=0.0,
                 causal_p = True)
         utils.start.record()
         for _ in range(utils.active_steps):
             o_p, o_d = pod_wrapper.run(q_p, k_p, v_p, q_d, kv_data, 
-                pos_encoding_mode_p="NONE",
-                logits_soft_cap_p=0.0,
                 causal_p = True)
         utils.end.record()
         torch.cuda.synchronize()
