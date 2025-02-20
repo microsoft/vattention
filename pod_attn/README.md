@@ -1,8 +1,9 @@
 <p align="center">
   <picture>
-    <img alt="POD-Attention" src="https://github.com/user-attachments/assets/040f6e28-0d84-484c-b900-06e366387b27" width=15%>
+    <img alt="POD-Attention" src="https://github.com/user-attachments/assets/61c10fd0-66fe-4cd7-8790-97f50fe5f2ad" width=15%>
   </picture>
 </p>
+
 <h1 align="center">
 POD-Attention: <br> Unlocking Full Prefill-Decode Overlap 
 	For Faster LLM Inference
