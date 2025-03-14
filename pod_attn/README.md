@@ -9,7 +9,8 @@ POD-Attention: <br> Unlocking Full Prefill-Decode Overlap
 	For Faster LLM Inference
 </h1>
 This repository contains the source code and profiling scripts for POD-Attention. POD-Attention fuses prefill and decode attention kernels into a single optimized kernel that aims to saturate both GPU compute and memory simultaneously &mdash; critical for hybrid-batching-based LLM inference.
-Two alternative versions are available of POD-Attention, built on top of either (1) FlashAttention v2.6.1 [this repo] or (2) default FlashInfer [[available here](https://github.com/flashinfer-ai/flashinfer)]. POD-Attention has been integrated with Sarathi-Serve &mdash; a state-of-the-art hybrid-batching-based LLM inference scheduler. This repo contains the source code of POD-Attention, benchmarks for evaluation, and all scripts needed to replicate results reported in the paper.
+Two alternative versions are available of POD-Attention, built on top of either (1) FlashAttention v2.6.1 [this repo] or (2) default FlashInfer
+(https://github.com/flashinfer-ai/flashinfer). POD-Attention has been integrated with Sarathi-Serve &mdash; a state-of-the-art hybrid-batching-based LLM inference scheduler. This repo contains the source code of POD-Attention, benchmarks for evaluation, and all scripts needed to replicate results reported in the paper.
 
 Full details of our implementation can be found in our [paper](https://arxiv.org/abs/2410.18038):
 <pre>
