@@ -76,6 +76,58 @@ $ conda activate pod_attn
 The code has been tested with CUDA 12.4 and Python 3.9 on an A100 GPU.
 
 # Running POD-Attention
+We shall now look at how you can use POD-Attention in your framework, as well as how to replicate our paper results.
+
+## API Usage
+We expose a Python function that can be called to use POD with the function parameters shown below.
+```python
+import pod_attn
+# POD function call
+out_p, out_d = pod_attn.true_fused_attn_with_kvcache(
+    q_p, k_cache_p, v_cache_p, q_d, k_cache_d, v_cache_d, k=None, v=None,
+    rotary_cos=None, rotary_sin=None, cache_seqlens_p: Optional[Union[(int, torch.Tensor)]] = None,
+    cache_seqlens_d: Optional[Union[(int, torch.Tensor)]] = None, cache_batch_idx: Optional[torch.Tensor] = None,
+    softmax_scale=None, causal=False, window_size=(-1, -1), rotary_interleaved=True, fused_params=15)
+"""
+Arguments:
+    q_p: (batch_size_p, seqlen_p, nheads, headdim). Prefill query tensor.
+    k_cache_p: (batch_size_p, seqlen_kv_p, nheads_k, headdim). Prefill key tensor.
+    v_cache_p: (batch_size_p, seqlen_kv_p, nheads_k, headdim). Prefill value tensor.
+    q_d: (batch_size_d, 1, nheads, headdim). Decode query tensor.
+    k_cache_d: (batch_size_d, seqlen_kv_d, nheads_k, headdim). Decode key tensor.
+    v_cache_d: (batch_size_d, seqlen_kv_d, nheads_k, headdim). Decode value tensor.
+    k [optional]: (batch_size_d, seqlen_new, nheads_k, headdim). If not None, we concatenate
+            k with k_cache_d, starting at the indices specified by cache_seqlens_d.
+    v [optional]: (batch_size_d, seqlen_new, nheads_k, headdim). Similar to k.
+    rotary_cos [optional]: (seqlen_ro, rotary_dim / 2). If not None, we apply rotary embedding
+            to k and q. Only applicable if k and v are passed in. rotary_dim must be divisible by 16.
+    rotary_sin [optional]: (seqlen_ro, rotary_dim / 2). Similar to rotary_cos.
+    cache_seqlens_p: int, or (batch_size,), dtype torch.int32. The sequence lengths of the
+            prefill KV cache.
+    cache_seqlens_d: int, or (batch_size,), dtype torch.int32. The sequence lengths of the
+            decode KV cache.
+    cache_batch_idx: (batch_size,), dtype torch.int32. The indices used to index into the decode KV cache.
+            If None, we assume that the batch indices are [0, 1, 2, ..., batch_size - 1].
+            If the indices are not distinct, and k and v are provided, the values updated in the cache
+                 might come from any of the duplicate indices.
+    softmax_scale: float. The scaling of QK^T before applying softmax.
+            Default to 1 / sqrt(headdim).
+    causal: bool. Whether to apply causal attention mask for prefill (decode cannot apply causal mask)
+            (e.g., for auto-regressive modeling).
+    window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+    rotary_interleaved: bool. Only applicable if rotary_cos and rotary_sin are passed in.
+            If True, rotary embedding will combine dimensions 0 & 1, 2 & 3, etc. If False,
+            rotary embedding will combine dimensions 0 & rotary_dim / 2, 1 & rotary_dim / 2 + 1
+            (i.e. GPT-NeoX style).
+    fused_params: int. Used to control POD-Attention configs. 9 = 2 CTAs per SM, 11 = 4 CTAs per SM, 
+            15 = automatically choose best option based on input parameters.
+Return:
+    out_p: Prefill output (batch_size, seqlen, nheads, headdim)
+    out_d: Decode output (batch_size, seqlen, nheads, headdim)
+"""
+```
+
+## Replicating paper results
 
 POD-Attention's API has been integrated into vAttention's fork of Sarathi-serve. You can run the associated backend by running sarathi-serve's benchmark runner with the attention backend `'FA_POD'` or `'FA_POD_MEGACACHE'`.
 
