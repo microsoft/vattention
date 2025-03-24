@@ -59,6 +59,7 @@ $ cd vattention/pod_attn/
 # Install miniconda; skip if already installed
 $ make install_miniconda
 $ bash # Refresh shell and activate
+$ conda create --name pod_attn python=3.12
 $ conda activate pod_attn
 # Install CUDA Toolkit
 (pod_attn)$ conda install -y -c \
