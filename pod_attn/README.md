@@ -12,11 +12,11 @@ This repository contains the source code and profiling scripts for POD-Attention
 Two alternative versions are available of POD-Attention, built on top of either (1) FlashAttention v2.6.1 [this repo] or (2) default FlashInfer
 (https://github.com/flashinfer-ai/flashinfer). POD-Attention has been integrated with Sarathi-Serve &mdash; a state-of-the-art hybrid-batching-based LLM inference scheduler. This repo contains the source code of POD-Attention, benchmarks for evaluation, and all scripts needed to replicate results reported in the paper.
 
-Full details of our implementation can be found in our [paper](https://arxiv.org/abs/2410.18038):
+Full details of our implementation can be found in our [paper](https://dl.acm.org/doi/10.1145/3676641.3715996):
 <pre>
 <b>POD-Attention: Unlocking Full Prefill-Decode Overlap for Faster LLM Inference</b>
 Aditya K Kamath, Ramya Prabhu, Jayashree Mohan, Simon Peter, Ramachandran Ramjee, Ashish Panwar
-<i>[To appear in] ACM 30th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), 2025</i>
+<i>ACM 30th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS), 2025</i>
 DOI: https://doi.org/10.1145/3676641.3715996
 </pre>
 
