@@ -1,0 +1,9 @@
+# ninja log v5
+0	16241	1771372312051396729	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/pos_encoding.o	cb3a4566ed85fcb7
+1	34636	1771372330445361379	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/pos_encoding_kernels.o	8601709585a61160
+4	16218	1771372347059233644	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/layernorm.o	38059355c65412d0
+4	34861	1771372365698213294	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/layernorm_kernels.o	157e5dc0661dc5dd
+3	17871	1771372383933172757	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/activation.o	b5e2d1b1c4084d00
+4	36589	1771372402649158570	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/activation_kernels.o	feca1a4935b1ff95
+4	17338	1771388377673376971	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/cache.o	38cc757638c85723
+4	39988	1771388400321612911	/workspace/sarathi-lean/build/temp.linux-x86_64-cpython-310/csrc/cache_kernels.o	36417d1070f7462d

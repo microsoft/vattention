@@ -1,10 +1,10 @@
 from typing import Dict, List, Tuple
 
-from sarathi.benchmark.types.request_generator_type import RequestGeneratorType
-from sarathi.benchmark.types.request_interval_generator_type import (
+from sarathi.benchmark.sarathi_types.request_generator_type import RequestGeneratorType
+from sarathi.benchmark.sarathi_types.request_interval_generator_type import (
     RequestIntervalGeneratorType,
 )
-from sarathi.benchmark.types.request_length_generator_type import (
+from sarathi.benchmark.sarathi_types.request_length_generator_type import (
     RequestLengthGeneratorType,
 )
 from sarathi.utils.base_int_enum import BaseIntEnum

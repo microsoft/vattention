@@ -8,3 +8,5 @@ vllm/*.pdf
 vattention/dist
 vattention/*egg-info
 sarathi-lean/*egg-info
+
+experiments/**

@@ -18,9 +18,13 @@ public:
         this->page_size = page_size_;
     }
 
-    c10::DataPtr allocate(size_t size) override
+    // ADDED 'const' back - This specific PyTorch build requires it for the override
+    c10::DataPtr allocate(size_t size) const override
     {
-        c10::DeviceIndex device = this->device_idx;
+        // Use a standard int to match the GetDevice signature expected by this build
+        int device;
+        C10_CUDA_CHECK(c10::cuda::GetDevice(&device));
+
         constexpr size_t one_exa_bytes = 1152921504606846976ULL;
         TORCH_CHECK_WITH(
             OutOfMemoryError,
@@ -30,7 +34,6 @@ public:
         if (size == 0)
             throw std::runtime_error("can't allocate 0 sized tensor...");
 
-        C10_CUDA_CHECK(c10::cuda::GetDevice(&device));
         CUdeviceptr ptr_gpu;
         if (!is_uvm_backend(this->page_size))
         {
@@ -42,24 +45,11 @@ public:
             C10_CUDA_CHECK(cudaMallocManaged(&ptr, size));
             ptr_gpu = (CUdeviceptr)ptr;
         }
-        return {reinterpret_cast<void *>(ptr_gpu), reinterpret_cast<void *>(ptr_gpu), &release, c10::Device(c10::DeviceType::CUDA, device)};
+        return {reinterpret_cast<void *>(ptr_gpu), reinterpret_cast<void *>(ptr_gpu), &release, c10::Device(c10::DeviceType::CUDA, static_cast<c10::DeviceIndex>(device))};
     }
 
-    /*
-    TODO (ashish): check when this gets triggered
-    */
-    void copy_data(void *dest, const void *src, std::size_t count) const override
-    {
-        /* no-op */
-    }
-
-    /*
-    TODO(ashish): add logic to release virtual memory
-    */
-    static void release(void *ptr)
-    {
-        /* no-op */
-    }
+    void copy_data(void *dest, const void *src, std::size_t count) const override { /* no-op */ }
+    static void release(void *ptr) { /* no-op */ }
 };
 
 template <typename T>
