@@ -45,6 +45,11 @@ class vATTNCacheEngine(BaseCacheEngine):
         return vattention.num_free_kvblocks()
 
     def allocate_gpu_cache(self) -> List[torch.Tensor]:
+        print(f"\n[PYTHON TRACE] Initializing KV Cache:")
+        print(f" > Layers: {self.num_layers}, Heads: {self.num_heads}, Head Size: {self.head_size}")
+        print(f" > Max Batch: {self.max_batch_size}, Max Seq: {self.max_model_seq_len}")
+        print(f" > MegaCache Enabled: {self.vattn_mega_cache}")
+        
         kv_cache = vattention.init_kvcache(
                                     self.num_layers,
                                     self.num_heads,
@@ -75,6 +80,9 @@ class vATTNCacheEngine(BaseCacheEngine):
                 assert v_cache[i].device == self.device, \
                             "v_cache device mismatch expected: {}, got: {}".format(self.device, self.v_cache[i].device)
             cache_list = list(zip(k_cache, v_cache))
+        vattention.reserve_physical_pages(self.cache_mem_size)
+        
+        print(f"[PYTHON TRACE] Reserving Physical Memory: {self.cache_mem_size / (1024**2):.2f} MB")
         vattention.reserve_physical_pages(self.cache_mem_size)
         return cache_list
 

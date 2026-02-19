@@ -1,7 +1,7 @@
-model: 01-ai/Yi-6B-200k
+model: meta-llama/Llama-2-13b-hf
 replica_id: 0
 replica_resource_mapping: []
-tokenizer: 01-ai/Yi-6B-200k
+tokenizer: meta-llama/Llama-2-13b-hf
 tokenizer_mode: auto
 trust_remote_code: true
 download_dir: null
@@ -14,7 +14,7 @@ block_size: 2097152
 gpu_memory_utilization: 0.8
 revision: null
 scheduler_type: vllm
-max_model_len: 32768
+max_model_len: 16384
 max_num_seqs: 128
 max_num_batched_tokens: null
 chunk_size: null

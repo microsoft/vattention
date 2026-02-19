@@ -19,8 +19,8 @@ metrics_store_wandb_sweep_id: ''
 model_attention_backend: fa_vattn
 model_block_size: 2097152
 model_load_format: auto
-model_max_model_len: 32768
-model_name: 01-ai/Yi-6B-200k
+model_max_model_len: 16384
+model_name: meta-llama/Llama-2-13b-hf
 model_pipeline_parallel_degree: 1
 model_tensor_parallel_degree: 4
 output_dir: ./benchmark_output//

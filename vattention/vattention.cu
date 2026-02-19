@@ -270,6 +270,11 @@ public:
         u64 req_offset;
         at::Storage k_storage, v_storage;
 
+        if (num_blocks > 0) {
+            printf("[vAttention ALLOC] reqId: %d | blocks: %llu | sync: %s\n", 
+               reqId, (unsigned long long)num_blocks, sync ? "true" : "false");
+        }
+
         if (num_blocks <= 0)
             return;
 
@@ -375,22 +380,65 @@ public:
     /* Map physical memory for the current iteration before returning control */
     void map_pages_for_curr_step(int reqId, u64 seq_len)
     {
+        if (seq_len == 0) return;
+
         u64 nr_required = tokens_to_pages(seq_len);
         u64 nr_mapped = get_req_pages(reqId);
+        
+        // --- START FRAGMENTATION LOGIC ---
+        
+        // 1. Calculate Physical Capacity
+        // 'tokens_per_page' is tokens per 2MB page for ONE tensor side (K or V).
+        u64 physical_token_capacity = nr_mapped * tokens_per_page;
+
+        // 2. Calculate "Resident" Useful Tokens
+        // We only count tokens actually residing in the currently mapped physical blocks.
+        u64 resident_useful_tokens = (seq_len < physical_token_capacity) ? seq_len : physical_token_capacity;
+
+        // 3. Convert to Bytes for Logging
+        // Logic: Layers * Heads * Dim * BytesPerElem
+        // (We don't * 2 here because we compare it to a physical size that also represents 
+        // one side of the total memory per block).
+        u64 bytes_per_token_per_side = num_layers * num_kv_heads * head_size * bytes_per_elem;
+        
+        u64 bytes_useful = resident_useful_tokens * bytes_per_token_per_side;
+        
+        // 4. Calculate total Physical Memory across all layers for ONE side
+        u64 total_physical_pages_per_side = nr_mapped;
+        if (!megacache_enabled) {
+            total_physical_pages_per_side = nr_mapped * num_layers;
+        }
+        u64 bytes_allocated = total_physical_pages_per_side * page_size;
+
+        if (nr_mapped > 0) {
+            double frag_percent = (bytes_allocated > 0) 
+                ? (1.0 - ((double)bytes_useful / bytes_allocated)) * 100.0 
+                : 0.0;
+
+            printf("[vAttention FRAG] Req: %d | TotalSeq: %llu | Mapped Blocks: %llu | Resident: %llu | Useful: %.2f MB | Physical: %.2f MB | Internal Frag: %.2f%%\n",
+                reqId, 
+                (unsigned long long)seq_len,
+                (unsigned long long)nr_mapped,
+                (unsigned long long)resident_useful_tokens,
+                (double)bytes_useful / (1024.0 * 1024.0),
+                (double)bytes_allocated / (1024.0 * 1024.0),
+                frag_percent);
+        }
+        // --- END FRAGMENTATION LOGIC ---
 
         if (nr_required <= nr_mapped)
             return;
 
-        nr_required -= nr_mapped;
-        if (!kvblocks_available(nr_required))
-            reclaim_kvblocks_on_demand(nr_required);
+        u64 nr_to_grow = nr_required - nr_mapped;
+        printf("[vAttention DEBUG] reqId: %d | Growing by %llu blocks\n", reqId, (unsigned long long)nr_to_grow);
 
-        /* this should not get triggered frequently with our optimizations */
-        log.log("[DEBUG] allocating " + std::to_string(nr_required) + " pages for reqId: " + std::to_string(reqId));
-        grow_kvcache_phys(reqId, nr_required, true);
+        if (!kvblocks_available(nr_to_grow))
+            reclaim_kvblocks_on_demand(nr_to_grow);
+
+        log.log("[DEBUG] allocating " + std::to_string(nr_to_grow) + " pages for reqId: " + std::to_string(reqId));
+        grow_kvcache_phys(reqId, nr_to_grow, true);
         set_req_seq_length(reqId, seq_len);
     }
-
     /* This is not meant for final use but to test vattention with sync allocation */
     void step_sync(std::vector<u64> seq_lens, bool eager_reclaim)
     {
