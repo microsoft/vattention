@@ -13,5 +13,5 @@ if ! container_running; then
     run_cmd docker start "${VATTN_CONTAINER_NAME}"
 fi
 
-run_cmd docker exec -it "${VATTN_CONTAINER_NAME}" bash
-
+readarray -t exec_args < <(docker_exec_args)
+run_cmd docker exec "${exec_args[@]}" "${VATTN_CONTAINER_NAME}" bash

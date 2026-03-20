@@ -30,6 +30,14 @@ run_cmd() {
     "$@"
 }
 
+docker_exec_args() {
+    if [[ -t 0 && -t 1 ]]; then
+        printf '%s\n' "-it"
+    else
+        printf '%s\n' "-i"
+    fi
+}
+
 require_path() {
     local path="$1"
     local description="$2"

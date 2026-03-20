@@ -66,6 +66,20 @@ scripts/docker/start-server.sh \
   --port 8000
 ```
 
+Or use the checked-in preset wrapper for the same Yi-6B configuration:
+
+```bash
+scripts/docker/start-server-yi6b.sh
+```
+
+By default, the server wrapper writes generated runtime files such as `config.yml` and `benchmark_config.yml` to a container-local directory under `/tmp/vattention/<container-name>` instead of modifying files in the repo checkout.
+
+To override that location explicitly:
+
+```bash
+VATTN_SERVER_OUTPUT_DIR=/tmp/vattention/custom-run scripts/docker/start-server-yi6b.sh
+```
+
 ## Rebuilding after code changes
 
 Python-only changes are picked up immediately because the repo is bind-mounted into `/workspace`.
