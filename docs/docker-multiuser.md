@@ -19,6 +19,30 @@ ls /opt/cuda-12.1
 ls /opt/libtorch
 ```
 
+## Clone the repository
+
+Each user should clone their own copy of the repository into their home directory. A simple location is `~/repos`.
+
+If you do not already have a `repos` folder, create it:
+
+```bash
+mkdir -p ~/repos
+cd ~/repos
+```
+
+Clone the repository with HTTPS:
+
+```bash
+git clone https://github.com/Anodyine/vattention.git
+cd vattention
+```
+
+To confirm that the clone worked, you should see files such as `README.md`, `docker/`, and `scripts/`:
+
+```bash
+ls
+```
+
 ## First-time setup for each user
 
 From the repository root:
@@ -29,11 +53,21 @@ scripts/docker/create-container.sh
 scripts/docker/bootstrap-workspace.sh
 ```
 
+The first image build can take a while and may print a lot of output. That is normal, especially on the first run.
+
 What each step does:
 
 - `build-image.sh` builds the shared base image from `docker/Dockerfile`
 - `create-container.sh` creates a per-user container named `vattn-$USER`
 - `bootstrap-workspace.sh` installs the repo's editable packages from the mounted workspace
+
+After setup finishes, a simple success check is:
+
+```bash
+docker ps -a | grep vattn-$USER
+```
+
+You should see your container listed.
 
 The image bakes in the verified dependency set from the working `vattn_research` container:
 
@@ -112,3 +146,8 @@ VATTN_WORKSPACE_HOST=$HOME/repos/vattention scripts/docker/create-container.sh
 - Containers are isolated per user; do not share one mutable container across multiple accounts.
 - `/opt/cuda-12.1` and `/opt/libtorch` stay on the host and are mounted read-only into each container.
 - `PYTHONPATH`, `LIBTORCH_PATH`, `PYTORCH_SKIP_VERSION_CHECK`, and ABI flags are set when the container is created so `docker exec` shells start with the expected environment.
+
+## Troubleshooting
+
+- If you see `command not found`, make sure you are in the repository root (`cd ~/repos/vattention`) and that you typed the script path exactly as shown.
+- If you see `permission denied`, you may not have permission to talk to Docker or execute the script in your current environment. Check with whoever manages the server setup.
