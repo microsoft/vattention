@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+build
+dist
+*.egg-info
+experiments
+sarathi-lean/build
+pod_attn/build
+vattention/build
+
