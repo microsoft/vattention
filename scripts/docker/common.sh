@@ -69,3 +69,20 @@ container_running() {
     fi
     [[ "$(docker inspect -f '{{.State.Running}}' "${VATTN_CONTAINER_NAME}" 2>/dev/null || true)" == "true" ]]
 }
+
+ensure_container_running() {
+    if ! container_exists; then
+        printf 'Container does not exist yet: %s\nRun scripts/docker/create-container.sh first.\n' "${VATTN_CONTAINER_NAME}" >&2
+        exit 1
+    fi
+
+    if ! container_running; then
+        run_cmd docker start "${VATTN_CONTAINER_NAME}"
+    fi
+}
+
+run_in_container() {
+    local script="$1"
+    readarray -t exec_args < <(docker_exec_args)
+    run_cmd docker exec "${exec_args[@]}" "${VATTN_CONTAINER_NAME}" bash -lc "${script}"
+}

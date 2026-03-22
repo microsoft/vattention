@@ -19,6 +19,32 @@ ls /opt/cuda-12.1
 ls /opt/libtorch
 ```
 
+Expected output:
+
+- `docker info | grep -i runtime`
+  You should see the NVIDIA runtime listed, and often a default runtime as well. For example:
+
+  ```text
+   Runtimes: io.containerd.runc.v2 nvidia runc
+   Default Runtime: runc
+  ```
+
+- `ls /opt/cuda-12.1`
+  You should see the CUDA toolkit directories. For example:
+
+  ```text
+  cuda  ld.so.conf.d  lib  profile.d  share
+  ```
+
+- `ls /opt/libtorch`
+  You should see the LibTorch install directories. For example:
+
+  ```text
+  bin  build-hash  build-version  include  lib  share
+  ```
+
+The exact order may vary slightly by host, but if `nvidia` is missing from the Docker runtimes or either `/opt` path does not exist, stop and fix the host setup before continuing.
+
 ## Clone the repository
 
 Each user should clone their own copy of the repository into their home directory. A simple location is `~/repos`.
@@ -59,7 +85,7 @@ What each step does:
 
 - `build-image.sh` builds the shared base image from `docker/Dockerfile`
 - `create-container.sh` creates a per-user container named `vattn-$USER`
-- `bootstrap-workspace.sh` installs the repo's editable packages from the mounted workspace
+- `bootstrap-workspace.sh` installs the repo's editable packages from the mounted workspace. This one will take a while.
 
 After setup finishes, a simple success check is:
 
@@ -118,13 +144,28 @@ VATTN_SERVER_OUTPUT_DIR=/tmp/vattention/custom-run scripts/docker/start-server-y
 
 Python-only changes are picked up immediately because the repo is bind-mounted into `/workspace`.
 
-If you change compiled code, rerun:
+If you change compiled code or package install metadata, rerun only the component you changed:
+
+```bash
+scripts/docker/bootstrap-sarathi.sh
+scripts/docker/bootstrap-pod-attn.sh
+scripts/docker/bootstrap-vattention.sh
+```
+
+Use the matching script as a rule of thumb:
+
+- Changed `sarathi-lean`: run `scripts/docker/bootstrap-sarathi.sh`
+- Changed `pod_attn`: run `scripts/docker/bootstrap-pod-attn.sh`
+- Changed `vattention` install-time code or packaging: run `scripts/docker/bootstrap-vattention.sh`
+- Changed multiple components or want a clean reset: run `scripts/docker/bootstrap-workspace.sh`
+
+The full bootstrap script is still available:
 
 ```bash
 scripts/docker/bootstrap-workspace.sh
 ```
 
-That rebuilds:
+That rebuilds everything:
 
 - `sarathi-lean`
 - `pod_attn`
