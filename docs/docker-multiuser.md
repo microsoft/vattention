@@ -106,13 +106,15 @@ The image bakes in the verified dependency set from the working `vattn_research`
 
 ## Normal daily workflow
 
-Enter the container:
+Use one of these workflows depending on what you want to do.
+
+Open an interactive shell inside the container for debugging, inspection, or manual commands:
 
 ```bash
 scripts/docker/enter-container.sh
 ```
 
-Start the API server:
+OR start the API server from the host shell:
 
 ```bash
 scripts/docker/start-server.sh \
@@ -126,11 +128,13 @@ scripts/docker/start-server.sh \
   --port 8000
 ```
 
-Or use the checked-in preset wrapper for the same Yi-6B configuration:
+Or start the same Yi-6B server with the checked-in preset wrapper, also from the host shell:
 
 ```bash
 scripts/docker/start-server-yi6b.sh
 ```
+
+Do not run `start-server.sh` or `start-server-yi6b.sh` from inside the container shell opened by `enter-container.sh`. Those wrapper scripts are intended to be launched from the host and will `docker exec` into the container for you.
 
 By default, the server wrapper writes generated runtime files such as `config.yml` and `benchmark_config.yml` to a container-local directory under `/tmp/vattention/<container-name>` instead of modifying files in the repo checkout.
 
