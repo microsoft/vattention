@@ -144,6 +144,23 @@ To override that location explicitly:
 VATTN_SERVER_OUTPUT_DIR=/tmp/vattention/custom-run scripts/docker/start-server-yi6b.sh
 ```
 
+Once the server is running, send a simple test prompt from another host shell:
+
+```bash
+curl http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "01-ai/Yi-6B-200k",
+    "prompt": "The primary advantage of using virtual memory for LLM KV-cache management is",
+    "max_tokens": 64,
+    "temperature": 0.3
+  }'
+```
+
+You should get back a JSON response with a `choices` array containing generated text.
+
+If you started the server on a different port, replace `8000` in the URL to match.
+
 ## Rebuilding after code changes
 
 Python-only changes are picked up immediately because the repo is bind-mounted into `/workspace`.
