@@ -161,6 +161,31 @@ class ModelConfig:
             raise ValueError("qk_rope_head_dim is not defined for this model")
         return qk_rope_head_dim
 
+    def get_cached_token_bytes_per_layer(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> int:
+        dtype_size = torch.tensor([], dtype=self.dtype).element_size()
+
+        if self.get_cache_architecture() == CacheArchitecture.MLA:
+            return dtype_size * (
+                self.get_mla_kv_lora_rank() + self.get_mla_qk_rope_head_dim()
+            )
+
+        num_kv_heads = self.get_num_kv_heads(parallel_config)
+        head_size = self.get_head_size()
+        # Dense KV caches store both K and V per token.
+        return dtype_size * (2 * num_kv_heads * head_size)
+
+    def get_cached_token_bytes_local(
+        self,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        del megacache  # Reserved for call-site clarity; resident bytes are unchanged.
+        num_layers = self.get_num_layers(parallel_config)
+        return num_layers * self.get_cached_token_bytes_per_layer(parallel_config)
+
     def get_head_size(self) -> int:
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
