@@ -1,4 +1,5 @@
 from abc import ABC
+from enum import Enum
 from typing import List, Optional, Tuple
 
 import torch
@@ -9,6 +10,11 @@ from sarathi.transformers_utils.config import get_config
 from sarathi.utils.base_int_enum import BaseIntEnum
 
 logger = init_logger(__name__)
+
+
+class CacheArchitecture(Enum):
+    DENSE_KV = "dense_kv"
+    MLA = "mla"
 
 
 class SchedulerType(BaseIntEnum):
@@ -131,6 +137,29 @@ class ModelConfig:
 
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
+
+    def is_mla_model(self) -> bool:
+        return (
+            getattr(self.hf_config, "kv_lora_rank", None) is not None
+            and getattr(self.hf_config, "qk_rope_head_dim", None) is not None
+        )
+
+    def get_cache_architecture(self) -> CacheArchitecture:
+        if self.is_mla_model():
+            return CacheArchitecture.MLA
+        return CacheArchitecture.DENSE_KV
+
+    def get_mla_kv_lora_rank(self) -> int:
+        kv_lora_rank = getattr(self.hf_config, "kv_lora_rank", None)
+        if kv_lora_rank is None:
+            raise ValueError("kv_lora_rank is not defined for this model")
+        return kv_lora_rank
+
+    def get_mla_qk_rope_head_dim(self) -> int:
+        qk_rope_head_dim = getattr(self.hf_config, "qk_rope_head_dim", None)
+        if qk_rope_head_dim is None:
+            raise ValueError("qk_rope_head_dim is not defined for this model")
+        return qk_rope_head_dim
 
     def get_head_size(self) -> int:
         # FIXME(woosuk): This may not be true for all models.
