@@ -186,6 +186,37 @@ class ModelConfig:
         num_layers = self.get_num_layers(parallel_config)
         return num_layers * self.get_cached_token_bytes_per_layer(parallel_config)
 
+    def get_page_buffer_token_bytes(
+        self,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        dtype_size = torch.tensor([], dtype=self.dtype).element_size()
+
+        if self.get_cache_architecture() == CacheArchitecture.MLA:
+            per_layer_bytes = self.get_cached_token_bytes_per_layer(parallel_config)
+            if megacache:
+                return self.get_num_layers(parallel_config) * per_layer_bytes
+            return per_layer_bytes
+
+        per_layer_per_side_bytes = (
+            self.get_num_kv_heads(parallel_config) * self.get_head_size() * dtype_size
+        )
+        if megacache:
+            return self.get_num_layers(parallel_config) * per_layer_per_side_bytes
+        return per_layer_per_side_bytes
+
+    def get_num_cached_tokens_per_page(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        return page_size // self.get_page_buffer_token_bytes(
+            parallel_config,
+            megacache=megacache,
+        )
+
     def get_head_size(self) -> int:
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads

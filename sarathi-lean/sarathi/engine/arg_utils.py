@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass
 from typing import List, Optional, Tuple
 from sarathi.model_executor.attention import AttentionBackend
 import yaml
-import torch
 
 from sarathi.config import (
     BaseSchedulerConfig,
@@ -142,32 +141,28 @@ class EngineArgs:
             max_model_len=self.max_model_len,
             attention_backend=self.attention_backend,
         )
-        elem_size = torch.tensor([1], dtype=model_config.hf_config.dtype).element_size()
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=self.pipeline_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+            replica_resource_mapping=self.replica_resource_mapping,
+        )
 
         # vattention uses page size as allocation granularity. convert this to block_size here.
         page_size = -1 if AttentionBackend.is_vLLM(self.attention_backend) else self.block_size
         block_size = self.block_size
         if AttentionBackend.is_vATTN(self.attention_backend):
-            # divide page size by number of kv heads per worker
-            block_size = page_size // (model_config.hf_config.num_key_value_heads // self.tensor_parallel_size)
-          
-            # now, divide block size by head_dim per kv head
-            block_size = block_size // (model_config.hf_config.hidden_size // model_config.hf_config.num_attention_heads)
-            # finally, divide by number of bytes per element
-            if "megacache" in self.attention_backend.lower():
-                block_size = block_size // (model_config.hf_config.num_hidden_layers // self.pipeline_parallel_size)
-            block_size = block_size // elem_size
+            megacache = "megacache" in self.attention_backend.lower()
+            block_size = model_config.get_num_cached_tokens_per_page(
+                page_size,
+                parallel_config,
+                megacache=megacache,
+            )
 
         cache_config = CacheConfig(
             block_size=block_size,
             page_size=page_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
             max_batch_size=self.max_num_seqs,
-        )
-        parallel_config = ParallelConfig(
-            pipeline_parallel_size=self.pipeline_parallel_size,
-            tensor_parallel_size=self.tensor_parallel_size,
-            replica_resource_mapping=self.replica_resource_mapping,
         )
         scheduler_config = self._get_scheduler_config(
             model_config=model_config, num_pipeline_stages=self.pipeline_parallel_size
