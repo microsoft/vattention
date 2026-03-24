@@ -766,11 +766,48 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
             self.smoke_module._load_model_via_model_loader = original
 
         self.assertEqual(result["mode"], "loader_compare")
+        self.assertEqual(result["runtime_mode"], "contiguous")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["checkpoint_format"], "safetensors")
         self.assertEqual(result["checkpoint_layout"], "hf_dir")
         self.assertEqual(result["query_mode"], "q_lora")
         self.assertEqual(result["mlp_mode"], "moe")
+        self.assertTrue(result["generated_tokens_match"])
+        self.assertTrue(result["final_logits_match"])
+        self.assertTrue(result["cache_token_counts_match"])
+
+    def test_compare_loader_scaffold_smoke_matches_direct_paged_generation(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        original = self.smoke_module._load_model_via_model_loader
+
+        def _fake_loader(checkpoint_path, config, dtype):
+            model = deepseek_module.DeepseekV2ForCausalLM(
+                config,
+                tensor_parallel_world_size=2,
+                pipeline_parallel_world_size=1,
+                pipeline_parallel_rank=0,
+            )
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model = model.to(device=device, dtype=dtype)
+            model.load_weights(checkpoint_path)
+            return model
+
+        try:
+            self.smoke_module._load_model_via_model_loader = _fake_loader
+            result = self.smoke_module.compare_loader_scaffold_smoke(
+                runtime_mode="paged",
+                prompt_token_ids=(1, 3),
+                max_new_tokens=3,
+                checkpoint_layout="hf_dir",
+                query_mode="q_lora",
+                mlp_mode="moe",
+            )
+        finally:
+            self.smoke_module._load_model_via_model_loader = original
+
+        self.assertEqual(result["mode"], "loader_compare")
+        self.assertEqual(result["runtime_mode"], "paged")
+        self.assertEqual(result["status"], "ok")
         self.assertTrue(result["generated_tokens_match"])
         self.assertTrue(result["final_logits_match"])
         self.assertTrue(result["cache_token_counts_match"])

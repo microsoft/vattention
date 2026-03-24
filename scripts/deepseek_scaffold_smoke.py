@@ -760,6 +760,7 @@ def compare_scaffold_smoke(
 
 
 def compare_loader_scaffold_smoke(
+    runtime_mode="contiguous",
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
     checkpoint_format="pt",
@@ -770,7 +771,7 @@ def compare_loader_scaffold_smoke(
 ):
     checkpoint_format = resolve_checkpoint_format(checkpoint_format, checkpoint_layout)
     direct_tokens, direct_logits, direct_caches, checkpoint_path = _run_scaffold_smoke_artifacts(
-        mode="contiguous",
+        mode=runtime_mode,
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
@@ -781,7 +782,7 @@ def compare_loader_scaffold_smoke(
         use_model_loader=False,
     )
     loader_tokens, loader_logits, loader_caches, _ = _run_scaffold_smoke_artifacts(
-        mode="contiguous",
+        mode=runtime_mode,
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
@@ -791,10 +792,17 @@ def compare_loader_scaffold_smoke(
         output_dir=output_dir,
         use_model_loader=True,
     )
-    direct_cache_counts = [cache.num_tokens for cache in direct_caches]
-    loader_cache_counts = [cache.num_tokens for cache in loader_caches]
+    direct_cache_counts = [
+        cache.num_tokens if hasattr(cache, "num_tokens") else cache.resident_cache.num_tokens
+        for cache in direct_caches
+    ]
+    loader_cache_counts = [
+        cache.num_tokens if hasattr(cache, "num_tokens") else cache.resident_cache.num_tokens
+        for cache in loader_caches
+    ]
     return {
         "mode": "loader_compare",
+        "runtime_mode": runtime_mode,
         "checkpoint_format": checkpoint_format,
         "checkpoint_layout": checkpoint_layout,
         "query_mode": query_mode,
@@ -880,6 +888,12 @@ def main():
         help="optional directory where the emitted scaffold checkpoint artifacts should be kept",
     )
     parser.add_argument(
+        "--loader-runtime-mode",
+        choices=("contiguous", "paged"),
+        default="contiguous",
+        help="runtime path to compare when using loader_compare mode",
+    )
+    parser.add_argument(
         "--require-match",
         action="store_true",
         help="fail with a non-zero exit code if compare mode detects a mismatch",
@@ -897,6 +911,7 @@ def main():
         )
     elif args.mode == "loader_compare":
         output = compare_loader_scaffold_smoke(
+            runtime_mode=args.loader_runtime_mode,
             max_new_tokens=args.max_new_tokens,
             checkpoint_format=args.checkpoint_format,
             query_mode=args.query_mode,
