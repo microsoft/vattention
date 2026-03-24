@@ -233,6 +233,140 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
         ATTENTION_WRAPPER.begin_calls.clear()
         ATTENTION_WRAPPER.end_call_count = 0
 
+    def _make_small_config(self):
+        return types.SimpleNamespace(
+            vocab_size=16,
+            hidden_size=6,
+            num_attention_heads=4,
+            num_hidden_layers=4,
+            q_lora_rank=None,
+            kv_lora_rank=3,
+            qk_nope_head_dim=2,
+            qk_rope_head_dim=1,
+            v_head_dim=2,
+        )
+
+    def _make_projection_weights(self, dims):
+        return deepseek_module.make_projection_weights(
+            q_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            kv_latent_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ),
+            k_rope_proj=torch.tensor(
+                [
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 0.0],
+                ]
+            ),
+            kv_up_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 10.0, 20.0, 2.0, 0.0, 30.0, 40.0],
+                    [0.0, 1.0, 11.0, 21.0, 0.0, 2.0, 31.0, 41.0],
+                    [1.0, 1.0, 12.0, 22.0, 2.0, 2.0, 32.0, 42.0],
+                ]
+            ),
+            o_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                    [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                ]
+            ),
+            mla_dims=dims,
+        )
+
+    def _make_mlp_weights(self, hidden_size):
+        return deepseek_module.make_mlp_weights(
+            gate_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0],
+                    [1.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.5, 1.0, 0.0],
+                    [0.5, 0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.5, 0.5],
+                ]
+            ),
+            up_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.5, 0.0],
+                    [0.0, 1.0, 0.0, 0.5],
+                    [0.5, 0.0, 1.0, 0.0],
+                    [0.0, 0.5, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 0.5],
+                    [0.0, 1.0, 0.5, 0.0],
+                ]
+            ),
+            down_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+                    [0.0, 1.0, 0.5, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
+                    [0.5, 0.0, 0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            hidden_size=hidden_size,
+        )
+
+    def _make_scaffold_state_dict(
+        self,
+        config,
+        projection_weights,
+        mlp_weights,
+        *,
+        use_global_layer_ids=False,
+        layer_offset=0,
+        include_embed=True,
+        include_lm_head=True,
+    ):
+        state_dict = {}
+        if include_embed:
+            state_dict["model.embed_tokens.weight"] = torch.arange(
+                config.vocab_size * config.hidden_size, dtype=torch.float32
+            ).view(config.vocab_size, config.hidden_size) / 1000.0
+        if include_lm_head:
+            state_dict["lm_head.weight"] = torch.arange(
+                config.vocab_size * config.hidden_size, dtype=torch.float32
+            ).view(config.vocab_size, config.hidden_size) / 1000.0
+        for layer_idx, layer_projection_weights in enumerate(projection_weights):
+            resolved_idx = layer_offset + layer_idx if use_global_layer_ids else layer_idx
+            prefix = f"model.layers.{resolved_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj
+            state_dict[f"{prefix}.kv_latent_proj.weight"] = (
+                layer_projection_weights.kv_latent_proj
+            )
+            state_dict[f"{prefix}.k_rope_proj.weight"] = layer_projection_weights.k_rope_proj
+            state_dict[f"{prefix}.kv_up_proj.weight"] = layer_projection_weights.kv_up_proj
+            state_dict[f"{prefix}.o_proj.weight"] = layer_projection_weights.o_proj
+        for layer_idx, layer_mlp_weights in enumerate(mlp_weights):
+            resolved_idx = layer_offset + layer_idx if use_global_layer_ids else layer_idx
+            prefix = f"model.layers.{resolved_idx}.mlp"
+            state_dict[f"{prefix}.gate_proj.weight"] = layer_mlp_weights.gate_proj
+            state_dict[f"{prefix}.up_proj.weight"] = layer_mlp_weights.up_proj
+            state_dict[f"{prefix}.down_proj.weight"] = layer_mlp_weights.down_proj
+        return state_dict
+
     def test_execute_model_uses_standard_path_without_projection_weights(self):
         runner = ModelRunner.__new__(ModelRunner)
         runner.model = _RecordingModel()
@@ -324,17 +458,7 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-        config = types.SimpleNamespace(
-            vocab_size=16,
-            hidden_size=6,
-            num_attention_heads=4,
-            num_hidden_layers=4,
-            q_lora_rank=None,
-            kv_lora_rank=3,
-            qk_nope_head_dim=2,
-            qk_rope_head_dim=1,
-            v_head_dim=2,
-        )
+        config = self._make_small_config()
         set_tensor_model_parallel_world_size(2)
         set_pipeline_model_parallel_world_size(1)
         set_pipeline_model_parallel_rank(0)
@@ -355,118 +479,17 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
             tensor_parallel_world_size=2,
         )
         projection_weights = tuple(
-            deepseek_module.make_projection_weights(
-                q_proj=torch.tensor(
-                    [
-                        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                        [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-                        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                        [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-                    ]
-                ),
-                kv_latent_proj=torch.tensor(
-                    [
-                        [1.0, 0.0, 0.0],
-                        [0.0, 1.0, 0.0],
-                        [0.0, 0.0, 1.0],
-                        [1.0, 0.0, 0.0],
-                        [0.0, 1.0, 0.0],
-                        [0.0, 0.0, 1.0],
-                    ]
-                ),
-                k_rope_proj=torch.tensor(
-                    [
-                        [1.0, 0.0],
-                        [0.0, 1.0],
-                        [0.0, 0.0],
-                        [1.0, 0.0],
-                        [0.0, 1.0],
-                        [0.0, 0.0],
-                    ]
-                ),
-                kv_up_proj=torch.tensor(
-                    [
-                        [1.0, 0.0, 10.0, 20.0, 2.0, 0.0, 30.0, 40.0],
-                        [0.0, 1.0, 11.0, 21.0, 0.0, 2.0, 31.0, 41.0],
-                        [1.0, 1.0, 12.0, 22.0, 2.0, 2.0, 32.0, 42.0],
-                    ]
-                ),
-                o_proj=torch.tensor(
-                    [
-                        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                        [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
-                        [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-                    ]
-                ),
-                mla_dims=dims,
-            )
-            for _ in range(runner.model.model.num_layers)
+            self._make_projection_weights(dims) for _ in range(runner.model.model.num_layers)
         )
         mlp_weights = tuple(
-            deepseek_module.make_mlp_weights(
-                gate_proj=torch.tensor(
-                    [
-                        [1.0, 0.0, 1.0, 0.0],
-                        [0.0, 1.0, 0.0, 1.0],
-                        [1.0, 1.0, 0.0, 0.0],
-                        [0.0, 0.5, 1.0, 0.0],
-                        [0.5, 0.0, 0.0, 1.0],
-                        [0.0, 1.0, 0.5, 0.5],
-                    ]
-                ),
-                up_proj=torch.tensor(
-                    [
-                        [1.0, 0.0, 0.5, 0.0],
-                        [0.0, 1.0, 0.0, 0.5],
-                        [0.5, 0.0, 1.0, 0.0],
-                        [0.0, 0.5, 0.0, 1.0],
-                        [1.0, 0.0, 0.0, 0.5],
-                        [0.0, 1.0, 0.5, 0.0],
-                    ]
-                ),
-                down_proj=torch.tensor(
-                    [
-                        [1.0, 0.0, 0.0, 0.5, 0.0, 0.0],
-                        [0.0, 1.0, 0.5, 0.0, 0.0, 0.0],
-                        [0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
-                        [0.5, 0.0, 0.0, 0.0, 0.0, 1.0],
-                    ]
-                ),
-                hidden_size=config.hidden_size,
-            )
+            self._make_mlp_weights(config.hidden_size)
             for _ in range(runner.model.model.num_layers)
         )
-        scaffold_state_dict = {
-            "model.embed_tokens.weight": torch.arange(
-                config.vocab_size * config.hidden_size, dtype=torch.float32
-            ).view(config.vocab_size, config.hidden_size)
-            / 1000.0,
-            "lm_head.weight": torch.arange(
-                config.vocab_size * config.hidden_size, dtype=torch.float32
-            ).view(config.vocab_size, config.hidden_size)
-            / 1000.0,
-        }
-        for layer_idx, layer_projection_weights in enumerate(projection_weights):
-            prefix = f"model.layers.{layer_idx}.self_attn"
-            scaffold_state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj
-            scaffold_state_dict[f"{prefix}.kv_latent_proj.weight"] = (
-                layer_projection_weights.kv_latent_proj
-            )
-            scaffold_state_dict[f"{prefix}.k_rope_proj.weight"] = (
-                layer_projection_weights.k_rope_proj
-            )
-            scaffold_state_dict[f"{prefix}.kv_up_proj.weight"] = (
-                layer_projection_weights.kv_up_proj
-            )
-            scaffold_state_dict[f"{prefix}.o_proj.weight"] = layer_projection_weights.o_proj
-        for layer_idx, layer_mlp_weights in enumerate(mlp_weights):
-            prefix = f"model.layers.{layer_idx}.mlp"
-            scaffold_state_dict[f"{prefix}.gate_proj.weight"] = layer_mlp_weights.gate_proj
-            scaffold_state_dict[f"{prefix}.up_proj.weight"] = layer_mlp_weights.up_proj
-            scaffold_state_dict[f"{prefix}.down_proj.weight"] = layer_mlp_weights.down_proj
+        scaffold_state_dict = self._make_scaffold_state_dict(
+            config,
+            projection_weights,
+            mlp_weights,
+        )
 
         runner.load_model_weights(scaffold_state_dict)
 
@@ -480,6 +503,80 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
         self.assertEqual(len(caches), runner.model.model.num_layers)
         self.assertEqual(len(ATTENTION_WRAPPER.begin_calls), 1)
         self.assertEqual(ATTENTION_WRAPPER.begin_calls[0], ["seq-md"])
+        self.assertEqual(ATTENTION_WRAPPER.end_call_count, 1)
+
+    def test_runner_can_execute_pipeline_last_stage_loaded_scaffold_with_global_layers(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        class _NullTimer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(2)
+        set_pipeline_model_parallel_rank(1)
+
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.model = deepseek_module.DeepseekV2ForCausalLM(config)
+        runner.sampler = None
+        runner._prepare_inputs_e2e_timer = _NullTimer()
+        runner._model_execution_e2e_timer = _NullTimer()
+        runner._sampler_e2e_timer = _NullTimer()
+        runner._prepare_inputs = lambda seq_metadata_list: (
+            torch.tensor(
+                [
+                    [0.1, 0.2, 0.3, 0.0, 0.1, 0.0],
+                    [0.0, 0.1, 0.0, 0.2, 0.0, 0.1],
+                ],
+                dtype=torch.float32,
+            ),
+            torch.tensor([0, 1], dtype=torch.long),
+        )
+
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(runner.model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size)
+            for _ in range(runner.model.model.num_layers)
+        )
+        scaffold_state_dict = self._make_scaffold_state_dict(
+            config,
+            projection_weights,
+            mlp_weights,
+            use_global_layer_ids=True,
+            layer_offset=runner.model.model.layer_offset,
+            include_embed=False,
+            include_lm_head=True,
+        )
+
+        runner.load_model_weights(scaffold_state_dict)
+
+        output, caches = runner.run(
+            seq_metadata_list=["seq-md-last-stage"],
+            gpu_cache=tuple(object() for _ in range(runner.model.model.num_layers)),
+            model_kwargs={"softmax_scale": 0.25},
+        )
+
+        self.assertEqual(runner.model.model.layer_offset, 2)
+        self.assertEqual(tuple(output.shape), (2, config.hidden_size))
+        self.assertEqual(len(caches), runner.model.model.num_layers)
+        self.assertIsNone(runner.model.model.embed_tokens)
+        self.assertIsNotNone(runner.model.lm_head)
+        self.assertEqual(len(ATTENTION_WRAPPER.begin_calls), 1)
+        self.assertEqual(ATTENTION_WRAPPER.begin_calls[0], ["seq-md-last-stage"])
         self.assertEqual(ATTENTION_WRAPPER.end_call_count, 1)
 
 
