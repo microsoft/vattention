@@ -11,10 +11,6 @@ from sarathi.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from sarathi.model_executor.weight_utils import (
-    convert_pyslice_to_tensor,
-    hf_model_weights_iterator,
-)
 
 
 @dataclass(frozen=True)
@@ -1905,6 +1901,11 @@ class DeepseekV2ForCausalLM(nn.Module):
         load_format: str = "auto",
         revision: Optional[str] = None,
     ) -> Mapping[str, torch.Tensor]:
+        from sarathi.model_executor.weight_utils import (
+            convert_pyslice_to_tensor,
+            hf_model_weights_iterator,
+        )
+
         if os.path.isdir(model_path):
             state_dict = {}
             for name, tensor in hf_model_weights_iterator(
