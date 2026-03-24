@@ -197,21 +197,26 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         max_seq_len = 3
         num_layers = 2
         kv_lora_rank = 3
-        num_heads = 2
+        num_q_heads_local = 2
         qk_rope_head_dim = 1
         kv_latent = torch.arange(
             batch_size * max_seq_len * num_layers * kv_lora_rank,
             dtype=torch.float32,
         ).view(batch_size, max_seq_len, num_layers, kv_lora_rank)
         k_rope = torch.arange(
-            batch_size * max_seq_len * num_layers * num_heads * qk_rope_head_dim,
+            batch_size * max_seq_len * num_layers * num_q_heads_local * qk_rope_head_dim,
             dtype=torch.float32,
-        ).view(batch_size, max_seq_len, num_layers, num_heads * qk_rope_head_dim)
+        ).view(
+            batch_size,
+            max_seq_len,
+            num_layers,
+            num_q_heads_local * qk_rope_head_dim,
+        )
 
         cache_spec = types.SimpleNamespace(
             architecture=CacheArchitecture.MLA,
             num_layers=num_layers,
-            num_heads=num_heads,
+            tp_attention=types.SimpleNamespace(num_q_heads_local=num_q_heads_local),
             mla_qk_rope_head_dim=qk_rope_head_dim,
         )
 
@@ -225,13 +230,18 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(tuple(caches[0].kv_latent.shape), (batch_size, max_seq_len, kv_lora_rank))
         self.assertEqual(
             tuple(caches[0].k_rope.shape),
-            (batch_size, max_seq_len, num_heads, qk_rope_head_dim),
+            (batch_size, max_seq_len, num_q_heads_local, qk_rope_head_dim),
         )
         self.assertTrue(torch.equal(caches[1].kv_latent, kv_latent[:, :, 1, :]))
         self.assertTrue(
             torch.equal(
                 caches[1].k_rope,
-                k_rope[:, :, 1, :].view(batch_size, max_seq_len, num_heads, qk_rope_head_dim),
+                k_rope[:, :, 1, :].view(
+                    batch_size,
+                    max_seq_len,
+                    num_q_heads_local,
+                    qk_rope_head_dim,
+                ),
             )
         )
 

@@ -567,13 +567,22 @@ def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
                 device, k_rope_cache.device
             )
         )
+        num_q_heads_local = getattr(
+            getattr(cache_spec, "tp_attention", None),
+            "num_q_heads_local",
+            getattr(cache_spec, "num_heads", None),
+        )
+        if num_q_heads_local is None:
+            raise AttributeError(
+                "MLA cache spec must expose tp_attention.num_q_heads_local or num_heads"
+            )
         return [
             DeepseekV2ComponentMLAKVCache(
                 kv_latent=kv_latent_cache[:, :, layer_idx, :],
                 k_rope=k_rope_cache[:, :, layer_idx, :].view(
                     kv_latent_cache.shape[0],
                     kv_latent_cache.shape[1],
-                    cache_spec.num_heads,
+                    num_q_heads_local,
                     cache_spec.mla_qk_rope_head_dim,
                 ),
             )
