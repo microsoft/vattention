@@ -68,6 +68,7 @@ CacheArchitecture = config_module.CacheArchitecture
 CacheLayout = config_module.CacheLayout
 ModelConfig = config_module.ModelConfig
 ParallelConfig = config_module.ParallelConfig
+VAttentionCacheSpec = config_module.VAttentionCacheSpec
 
 
 class ModelConfigCacheArchitectureTests(unittest.TestCase):
@@ -246,6 +247,38 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(layout.page_buffer_token_bytes, 2 * 4 * 128)
         self.assertEqual(layout.tokens_per_page, page_size // (2 * 4 * 128))
 
+    def test_dense_kv_vattention_cache_spec_contains_allocator_inputs(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+        page_size = 2 * 1024 * 1024
+
+        spec = model_config.get_vattention_cache_spec(page_size, parallel_config)
+
+        self.assertIsInstance(spec, VAttentionCacheSpec)
+        self.assertEqual(spec.architecture, CacheArchitecture.DENSE_KV)
+        self.assertFalse(spec.megacache)
+        self.assertEqual(spec.page_size, page_size)
+        self.assertEqual(spec.tokens_per_page, page_size // (2 * 4 * 128))
+        self.assertEqual(spec.cached_token_bytes_per_layer, 2 * (2 * 4 * 128))
+        self.assertEqual(spec.cached_token_bytes_local, 12 * (2 * 2 * 4 * 128))
+        self.assertEqual(spec.page_buffer_token_bytes, 2 * 4 * 128)
+        self.assertEqual(spec.dtype_size, 2)
+        self.assertEqual(spec.num_layers, 12)
+        self.assertEqual(spec.num_kv_heads, 4)
+        self.assertEqual(spec.head_size, 128)
+        self.assertIsNone(spec.mla_kv_lora_rank)
+        self.assertIsNone(spec.mla_qk_rope_head_dim)
+
     def test_mla_cached_bytes_per_layer_uses_resident_payload_only(self):
         hf_config = types.SimpleNamespace(
             model_type="deepseek_v2",
@@ -358,6 +391,44 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             layout.tokens_per_page,
             page_size // (20 * expected_per_layer),
         )
+
+    def test_mla_vattention_cache_spec_contains_allocator_inputs(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+        page_size = 2 * 1024 * 1024
+
+        spec = model_config.get_vattention_cache_spec(
+            page_size,
+            parallel_config,
+            megacache=True,
+        )
+
+        expected_per_layer = 2 * (512 + 64)
+        self.assertIsInstance(spec, VAttentionCacheSpec)
+        self.assertEqual(spec.architecture, CacheArchitecture.MLA)
+        self.assertTrue(spec.megacache)
+        self.assertEqual(spec.page_size, page_size)
+        self.assertEqual(spec.tokens_per_page, page_size // (20 * expected_per_layer))
+        self.assertEqual(spec.cached_token_bytes_per_layer, expected_per_layer)
+        self.assertEqual(spec.cached_token_bytes_local, 20 * expected_per_layer)
+        self.assertEqual(spec.page_buffer_token_bytes, 20 * expected_per_layer)
+        self.assertEqual(spec.dtype_size, 2)
+        self.assertEqual(spec.num_layers, 20)
+        self.assertEqual(spec.num_kv_heads, 32)
+        self.assertEqual(spec.head_size, 40)
+        self.assertEqual(spec.mla_kv_lora_rank, 512)
+        self.assertEqual(spec.mla_qk_rope_head_dim, 64)
 
 
 if __name__ == "__main__":

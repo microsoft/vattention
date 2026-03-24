@@ -39,6 +39,11 @@ class vATTNCacheEngine(BaseCacheEngine):
         self.vattn_async = True if mem_alloc_backend == "async" else False
         self.vattn_mega_cache = True if "megacache" in model_config.attention_backend.lower() else False
         self.cache_mem_size = cache_config.memory_for_gpu
+        self.cache_spec = model_config.get_vattention_cache_spec(
+            self.page_size,
+            parallel_config,
+            megacache=self.vattn_mega_cache,
+        )
         super().__init__(cache_config, model_config, parallel_config)
 
     def num_free_blocks(self) -> int:
@@ -46,9 +51,12 @@ class vATTNCacheEngine(BaseCacheEngine):
 
     def allocate_gpu_cache(self) -> List[torch.Tensor]:
         print(f"\n[PYTHON TRACE] Initializing KV Cache:")
+        print(f" > Architecture: {self.cache_spec.architecture.value}")
         print(f" > Layers: {self.num_layers}, Heads: {self.num_heads}, Head Size: {self.head_size}")
         print(f" > Max Batch: {self.max_batch_size}, Max Seq: {self.max_model_seq_len}")
         print(f" > MegaCache Enabled: {self.vattn_mega_cache}")
+        print(f" > Tokens Per Page: {self.cache_spec.tokens_per_page}")
+        print(f" > Page Buffer Token Bytes: {self.cache_spec.page_buffer_token_bytes}")
         
         kv_cache = vattention.init_kvcache(
                                     self.num_layers,

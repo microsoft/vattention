@@ -28,6 +28,23 @@ class CacheLayout:
     tokens_per_page: int
 
 
+@dataclass(frozen=True)
+class VAttentionCacheSpec:
+    architecture: CacheArchitecture
+    megacache: bool
+    page_size: int
+    tokens_per_page: int
+    cached_token_bytes_per_layer: int
+    cached_token_bytes_local: int
+    page_buffer_token_bytes: int
+    dtype_size: int
+    num_layers: int
+    num_kv_heads: int
+    head_size: int
+    mla_kv_lora_rank: Optional[int]
+    mla_qk_rope_head_dim: Optional[int]
+
+
 class SchedulerType(BaseIntEnum):
     VLLM = 1
     ORCA = 2
@@ -264,6 +281,35 @@ class ModelConfig:
                 parallel_config,
                 megacache=megacache,
             ),
+        )
+
+    def get_vattention_cache_spec(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> VAttentionCacheSpec:
+        layout = self.get_cache_layout(
+            page_size,
+            parallel_config,
+            megacache=megacache,
+        )
+        dtype_size = torch.tensor([], dtype=self.dtype).element_size()
+        is_mla = self.get_cache_architecture() == CacheArchitecture.MLA
+        return VAttentionCacheSpec(
+            architecture=layout.architecture,
+            megacache=layout.megacache,
+            page_size=page_size,
+            tokens_per_page=layout.tokens_per_page,
+            cached_token_bytes_per_layer=layout.cached_token_bytes_per_layer,
+            cached_token_bytes_local=layout.cached_token_bytes_local,
+            page_buffer_token_bytes=layout.page_buffer_token_bytes,
+            dtype_size=dtype_size,
+            num_layers=self.get_num_layers(parallel_config),
+            num_kv_heads=self.get_num_kv_heads(parallel_config),
+            head_size=self.get_head_size(),
+            mla_kv_lora_rank=self.get_mla_kv_lora_rank() if is_mla else None,
+            mla_qk_rope_head_dim=self.get_mla_qk_rope_head_dim() if is_mla else None,
         )
 
     def get_head_size(self) -> int:
