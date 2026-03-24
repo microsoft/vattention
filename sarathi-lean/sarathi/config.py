@@ -40,6 +40,28 @@ class MLAAttentionSpec:
 
 
 @dataclass(frozen=True)
+class TensorParallelAttentionSpec:
+    tensor_parallel_size: int
+    num_q_heads_global: int
+    num_q_heads_local: int
+    num_kv_heads_global: int
+    num_kv_heads_local: int
+    head_size: int
+
+
+@dataclass(frozen=True)
+class MLATensorParallelAttentionSpec:
+    tp_attention: TensorParallelAttentionSpec
+    q_lora_rank: Optional[int]
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    q_head_dim: int
+    resident_cache_dim: int
+
+
+@dataclass(frozen=True)
 class CacheComponentSpec:
     name: str
     token_dim: int
@@ -311,6 +333,29 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
 
+    def get_total_num_q_heads(self) -> int:
+        if getattr(self.hf_config, "num_attention_heads", None) is not None:
+            return self.hf_config.num_attention_heads
+        raise ValueError("num_attention_heads is not defined in the model config")
+
+    def get_total_num_kv_heads(self) -> int:
+        falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]
+        new_decoder_arch_falcon = (
+            self.hf_config.model_type in falcon_model_types
+            and getattr(self.hf_config, "new_decoder_architecture", False)
+        )
+        if not new_decoder_arch_falcon and getattr(
+            self.hf_config, "multi_query", False
+        ):
+            return 1
+        if getattr(self.hf_config, "n_head_kv", None) is not None:
+            return self.hf_config.n_head_kv
+        if getattr(self.hf_config, "num_kv_heads", None) is not None:
+            return self.hf_config.num_kv_heads
+        if getattr(self.hf_config, "num_key_value_heads", None) is not None:
+            return self.hf_config.num_key_value_heads
+        return self.get_total_num_q_heads()
+
     def is_mla_model(self) -> bool:
         return (
             getattr(self.hf_config, "kv_lora_rank", None) is not None
@@ -367,6 +412,38 @@ class ModelConfig:
             v_head_dim=self.get_mla_v_head_dim(),
             q_head_dim=self.get_mla_q_head_dim(),
             resident_cache_dim=self.get_mla_resident_cache_dim(),
+        )
+
+    def get_tensor_parallel_attention_spec(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> TensorParallelAttentionSpec:
+        return TensorParallelAttentionSpec(
+            tensor_parallel_size=parallel_config.tensor_parallel_size,
+            num_q_heads_global=self.get_total_num_q_heads(),
+            num_q_heads_local=self.get_num_q_heads(parallel_config),
+            num_kv_heads_global=self.get_total_num_kv_heads(),
+            num_kv_heads_local=self.get_num_kv_heads(parallel_config),
+            head_size=self.get_head_size(),
+        )
+
+    def get_mla_tensor_parallel_attention_spec(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> MLATensorParallelAttentionSpec:
+        if not self.is_mla_model():
+            raise ValueError("MLA tensor-parallel spec is only defined for MLA models")
+
+        mla_spec = self.get_mla_attention_spec()
+        return MLATensorParallelAttentionSpec(
+            tp_attention=self.get_tensor_parallel_attention_spec(parallel_config),
+            q_lora_rank=mla_spec.q_lora_rank,
+            kv_lora_rank=mla_spec.kv_lora_rank,
+            qk_nope_head_dim=mla_spec.qk_nope_head_dim,
+            qk_rope_head_dim=mla_spec.qk_rope_head_dim,
+            v_head_dim=mla_spec.v_head_dim,
+            q_head_dim=mla_spec.q_head_dim,
+            resident_cache_dim=mla_spec.resident_cache_dim,
         )
 
     def get_cache_component_specs(

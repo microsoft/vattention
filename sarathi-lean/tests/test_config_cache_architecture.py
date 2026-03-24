@@ -68,8 +68,10 @@ CacheArchitecture = config_module.CacheArchitecture
 CacheComponentSpec = config_module.CacheComponentSpec
 CacheLayout = config_module.CacheLayout
 MLAAttentionSpec = config_module.MLAAttentionSpec
+MLATensorParallelAttentionSpec = config_module.MLATensorParallelAttentionSpec
 ModelConfig = config_module.ModelConfig
 ParallelConfig = config_module.ParallelConfig
+TensorParallelAttentionSpec = config_module.TensorParallelAttentionSpec
 VAttentionCacheSpec = config_module.VAttentionCacheSpec
 VAttentionInitSpec = config_module.VAttentionInitSpec
 
@@ -183,6 +185,80 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             model_config.get_mla_attention_spec()
+
+    def test_dense_kv_tensor_parallel_attention_spec_exposes_local_and_global_heads(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+
+        tp_spec = model_config.get_tensor_parallel_attention_spec(parallel_config)
+
+        self.assertIsInstance(tp_spec, TensorParallelAttentionSpec)
+        self.assertEqual(tp_spec.tensor_parallel_size, 2)
+        self.assertEqual(tp_spec.num_q_heads_global, 32)
+        self.assertEqual(tp_spec.num_q_heads_local, 16)
+        self.assertEqual(tp_spec.num_kv_heads_global, 8)
+        self.assertEqual(tp_spec.num_kv_heads_local, 4)
+        self.assertEqual(tp_spec.head_size, 128)
+
+    def test_mla_tensor_parallel_attention_spec_exposes_local_and_global_heads(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+
+        tp_spec = model_config.get_mla_tensor_parallel_attention_spec(parallel_config)
+
+        self.assertIsInstance(tp_spec, MLATensorParallelAttentionSpec)
+        self.assertEqual(tp_spec.tp_attention.tensor_parallel_size, 4)
+        self.assertEqual(tp_spec.tp_attention.num_q_heads_global, 128)
+        self.assertEqual(tp_spec.tp_attention.num_q_heads_local, 32)
+        self.assertEqual(tp_spec.tp_attention.num_kv_heads_global, 128)
+        self.assertEqual(tp_spec.tp_attention.num_kv_heads_local, 32)
+        self.assertEqual(tp_spec.tp_attention.head_size, 40)
+        self.assertEqual(tp_spec.kv_lora_rank, 512)
+        self.assertEqual(tp_spec.qk_nope_head_dim, 128)
+        self.assertEqual(tp_spec.qk_rope_head_dim, 64)
+        self.assertEqual(tp_spec.v_head_dim, 128)
+        self.assertEqual(tp_spec.q_head_dim, 192)
+        self.assertEqual(tp_spec.resident_cache_dim, 576)
+
+    def test_dense_models_do_not_expose_mla_tensor_parallel_attention_spec(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=1,
+            tensor_parallel_size=2,
+        )
+
+        with self.assertRaises(ValueError):
+            model_config.get_mla_tensor_parallel_attention_spec(parallel_config)
 
     def test_dense_kv_cached_bytes_per_layer_uses_local_kv_heads(self):
         hf_config = types.SimpleNamespace(
