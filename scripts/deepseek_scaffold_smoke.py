@@ -173,7 +173,16 @@ def build_scaffold_state_dict(model, projection_weights, mlp_weights, *, device,
     return state_dict
 
 
-def write_scaffold_checkpoint(model, projection_weights, mlp_weights, *, device, dtype, output_dir):
+def write_scaffold_checkpoint(
+    model,
+    projection_weights,
+    mlp_weights,
+    *,
+    device,
+    dtype,
+    output_dir,
+    checkpoint_format="pt",
+):
     state_dict = build_scaffold_state_dict(
         model,
         projection_weights,
@@ -181,12 +190,29 @@ def write_scaffold_checkpoint(model, projection_weights, mlp_weights, *, device,
         device=device,
         dtype=dtype,
     )
-    checkpoint_path = f"{output_dir}/deepseek_scaffold.pt"
-    torch.save(state_dict, checkpoint_path)
-    return checkpoint_path
+    if checkpoint_format == "pt":
+        checkpoint_path = f"{output_dir}/deepseek_scaffold.pt"
+        torch.save(state_dict, checkpoint_path)
+        return checkpoint_path
+    if checkpoint_format == "safetensors":
+        from safetensors.torch import save_file
+
+        checkpoint_path = f"{output_dir}/deepseek_scaffold.safetensors"
+        cpu_state_dict = {
+            name: tensor.detach().to(device="cpu").contiguous()
+            for name, tensor in state_dict.items()
+        }
+        save_file(cpu_state_dict, checkpoint_path)
+        return checkpoint_path
+    raise ValueError(f"Unsupported checkpoint format: {checkpoint_format}")
 
 
-def _run_scaffold_smoke_artifacts(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
+def _run_scaffold_smoke_artifacts(
+    mode="contiguous",
+    prompt_token_ids=(1, 3),
+    max_new_tokens=3,
+    checkpoint_format="pt",
+):
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
         set_pipeline_model_parallel_world_size,
@@ -234,6 +260,7 @@ def _run_scaffold_smoke_artifacts(mode="contiguous", prompt_token_ids=(1, 3), ma
             device=device,
             dtype=dtype,
             output_dir=tmpdir,
+            checkpoint_format=checkpoint_format,
         )
         model.load_weights(checkpoint_path)
 
@@ -266,14 +293,21 @@ def _run_scaffold_smoke_artifacts(mode="contiguous", prompt_token_ids=(1, 3), ma
         return generated_token_ids, final_logits, final_caches
 
 
-def run_scaffold_smoke(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
+def run_scaffold_smoke(
+    mode="contiguous",
+    prompt_token_ids=(1, 3),
+    max_new_tokens=3,
+    checkpoint_format="pt",
+):
     generated_token_ids, final_logits, final_caches = _run_scaffold_smoke_artifacts(
         mode=mode,
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
+        checkpoint_format=checkpoint_format,
     )
     return {
         "mode": mode,
+        "checkpoint_format": checkpoint_format,
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": generated_token_ids.tolist(),
         "final_logits_shape": list(final_logits.shape),
@@ -284,21 +318,28 @@ def run_scaffold_smoke(mode="contiguous", prompt_token_ids=(1, 3), max_new_token
     }
 
 
-def compare_scaffold_smoke(prompt_token_ids=(1, 3), max_new_tokens=3):
+def compare_scaffold_smoke(
+    prompt_token_ids=(1, 3),
+    max_new_tokens=3,
+    checkpoint_format="pt",
+):
     contiguous_tokens, contiguous_logits, contiguous_caches = _run_scaffold_smoke_artifacts(
         mode="contiguous",
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
+        checkpoint_format=checkpoint_format,
     )
     try:
         paged_tokens, paged_logits, paged_caches = _run_scaffold_smoke_artifacts(
             mode="paged",
             prompt_token_ids=prompt_token_ids,
             max_new_tokens=max_new_tokens,
+            checkpoint_format=checkpoint_format,
         )
     except RuntimeError as exc:
         return {
             "mode": "compare",
+            "checkpoint_format": checkpoint_format,
             "status": "blocked",
             "prompt_token_ids": list(prompt_token_ids),
             "generated_token_ids": contiguous_tokens.tolist(),
@@ -309,6 +350,7 @@ def compare_scaffold_smoke(prompt_token_ids=(1, 3), max_new_tokens=3):
     paged_cache_counts = [cache.resident_cache.num_tokens for cache in paged_caches]
     return {
         "mode": "compare",
+        "checkpoint_format": checkpoint_format,
         "status": "ok",
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": contiguous_tokens.tolist(),
@@ -326,10 +368,15 @@ def compare_scaffold_smoke(prompt_token_ids=(1, 3), max_new_tokens=3):
     }
 
 
-def validate_scaffold_smoke_compare(prompt_token_ids=(1, 3), max_new_tokens=3):
+def validate_scaffold_smoke_compare(
+    prompt_token_ids=(1, 3),
+    max_new_tokens=3,
+    checkpoint_format="pt",
+):
     result = compare_scaffold_smoke(
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
+        checkpoint_format=checkpoint_format,
     )
     if result.get("status") == "blocked":
         raise RuntimeError(f"scaffold smoke compare blocked: {result['error']}")
@@ -351,6 +398,11 @@ def main():
     )
     parser.add_argument("--max-new-tokens", type=int, default=3)
     parser.add_argument(
+        "--checkpoint-format",
+        choices=("pt", "safetensors"),
+        default="pt",
+    )
+    parser.add_argument(
         "--require-match",
         action="store_true",
         help="fail with a non-zero exit code if compare mode detects a mismatch",
@@ -358,11 +410,15 @@ def main():
     args = parser.parse_args()
 
     if args.mode == "compare":
-        output = compare_scaffold_smoke(max_new_tokens=args.max_new_tokens)
+        output = compare_scaffold_smoke(
+            max_new_tokens=args.max_new_tokens,
+            checkpoint_format=args.checkpoint_format,
+        )
     else:
         output = run_scaffold_smoke(
             mode=args.mode,
             max_new_tokens=args.max_new_tokens,
+            checkpoint_format=args.checkpoint_format,
         )
     print(
         json.dumps(
