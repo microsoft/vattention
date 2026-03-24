@@ -9,14 +9,19 @@ from types import SimpleNamespace
 import torch
 
 
-def build_config():
+def build_config(query_mode="direct"):
+    q_lora_rank = None
+    if query_mode == "q_lora":
+        q_lora_rank = 2
+    elif query_mode != "direct":
+        raise ValueError(f"Unsupported query mode: {query_mode}")
     return SimpleNamespace(
         vocab_size=16,
         hidden_size=6,
         num_attention_heads=4,
         num_hidden_layers=4,
         rms_norm_eps=1e-6,
-        q_lora_rank=None,
+        q_lora_rank=q_lora_rank,
         kv_lora_rank=3,
         qk_nope_head_dim=2,
         qk_rope_head_dim=1,
@@ -24,9 +29,13 @@ def build_config():
     )
 
 
-def make_projection_weights(deepseek_module, dims, *, device, dtype):
-    return deepseek_module.make_projection_weights(
-        q_proj=torch.tensor(
+def make_projection_weights(deepseek_module, dims, *, device, dtype, query_mode="direct"):
+    q_proj = None
+    q_a_proj = None
+    q_a_layernorm_weight = None
+    q_b_proj = None
+    if query_mode == "direct":
+        q_proj = torch.tensor(
             [
                 [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
@@ -37,7 +46,36 @@ def make_projection_weights(deepseek_module, dims, *, device, dtype):
             ],
             device=device,
             dtype=dtype,
-        ),
+        )
+    elif query_mode == "q_lora":
+        q_a_proj = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0],
+            ],
+            device=device,
+            dtype=dtype,
+        )
+        q_a_layernorm_weight = torch.tensor([1.0, 2.0], device=device, dtype=dtype)
+        q_b_proj = torch.tensor(
+            [
+                [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            ],
+            device=device,
+            dtype=dtype,
+        )
+    else:
+        raise ValueError(f"Unsupported query mode: {query_mode}")
+    return deepseek_module.make_projection_weights(
+        q_proj=q_proj,
+        q_a_proj=q_a_proj,
+        q_a_layernorm_weight=q_a_layernorm_weight,
+        q_b_proj=q_b_proj,
         kv_latent_proj=torch.tensor(
             [
                 [1.0, 0.0, 0.0],
@@ -161,7 +199,14 @@ def build_scaffold_state_dict(model, projection_weights, mlp_weights, *, device,
             ],
             dim=1,
         )
-        state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj
+        if layer_projection_weights.q_proj is not None:
+            state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj
+        else:
+            state_dict[f"{prefix}.q_a_proj.weight"] = layer_projection_weights.q_a_proj
+            state_dict[f"{prefix}.q_a_layernorm.weight"] = (
+                layer_projection_weights.q_a_layernorm_weight
+            )
+            state_dict[f"{prefix}.q_b_proj.weight"] = layer_projection_weights.q_b_proj
         state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = kv_a_proj_with_mqa
         state_dict[f"{prefix}.kv_b_proj.weight"] = layer_projection_weights.kv_up_proj
         state_dict[f"{prefix}.o_proj.weight"] = layer_projection_weights.o_proj
@@ -212,6 +257,7 @@ def _run_scaffold_smoke_artifacts(
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
     checkpoint_format="pt",
+    query_mode="direct",
 ):
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
@@ -224,7 +270,7 @@ def _run_scaffold_smoke_artifacts(
     )
     import sarathi.model_executor.models.deepseek_v2 as deepseek_module
 
-    config = build_config()
+    config = build_config(query_mode=query_mode)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.float16 if device.type == "cuda" else torch.float32
     set_tensor_model_parallel_world_size(2)
@@ -240,7 +286,13 @@ def _run_scaffold_smoke_artifacts(
     model = model.to(device=device, dtype=dtype)
     dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
     projection_weights = tuple(
-        make_projection_weights(deepseek_module, dims, device=device, dtype=dtype)
+        make_projection_weights(
+            deepseek_module,
+            dims,
+            device=device,
+            dtype=dtype,
+            query_mode=query_mode,
+        )
         for _ in range(model.model.num_layers)
     )
     mlp_weights = tuple(
@@ -298,16 +350,19 @@ def run_scaffold_smoke(
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
     checkpoint_format="pt",
+    query_mode="direct",
 ):
     generated_token_ids, final_logits, final_caches = _run_scaffold_smoke_artifacts(
         mode=mode,
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
+        query_mode=query_mode,
     )
     return {
         "mode": mode,
         "checkpoint_format": checkpoint_format,
+        "query_mode": query_mode,
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": generated_token_ids.tolist(),
         "final_logits_shape": list(final_logits.shape),
@@ -322,12 +377,14 @@ def compare_scaffold_smoke(
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
     checkpoint_format="pt",
+    query_mode="direct",
 ):
     contiguous_tokens, contiguous_logits, contiguous_caches = _run_scaffold_smoke_artifacts(
         mode="contiguous",
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
+        query_mode=query_mode,
     )
     try:
         paged_tokens, paged_logits, paged_caches = _run_scaffold_smoke_artifacts(
@@ -335,11 +392,13 @@ def compare_scaffold_smoke(
             prompt_token_ids=prompt_token_ids,
             max_new_tokens=max_new_tokens,
             checkpoint_format=checkpoint_format,
+            query_mode=query_mode,
         )
     except RuntimeError as exc:
         return {
             "mode": "compare",
             "checkpoint_format": checkpoint_format,
+            "query_mode": query_mode,
             "status": "blocked",
             "prompt_token_ids": list(prompt_token_ids),
             "generated_token_ids": contiguous_tokens.tolist(),
@@ -351,6 +410,7 @@ def compare_scaffold_smoke(
     return {
         "mode": "compare",
         "checkpoint_format": checkpoint_format,
+        "query_mode": query_mode,
         "status": "ok",
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": contiguous_tokens.tolist(),
@@ -372,11 +432,13 @@ def validate_scaffold_smoke_compare(
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
     checkpoint_format="pt",
+    query_mode="direct",
 ):
     result = compare_scaffold_smoke(
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
+        query_mode=query_mode,
     )
     if result.get("status") == "blocked":
         raise RuntimeError(f"scaffold smoke compare blocked: {result['error']}")
@@ -403,6 +465,11 @@ def main():
         default="pt",
     )
     parser.add_argument(
+        "--query-mode",
+        choices=("direct", "q_lora"),
+        default="direct",
+    )
+    parser.add_argument(
         "--require-match",
         action="store_true",
         help="fail with a non-zero exit code if compare mode detects a mismatch",
@@ -413,12 +480,14 @@ def main():
         output = compare_scaffold_smoke(
             max_new_tokens=args.max_new_tokens,
             checkpoint_format=args.checkpoint_format,
+            query_mode=args.query_mode,
         )
     else:
         output = run_scaffold_smoke(
             mode=args.mode,
             max_new_tokens=args.max_new_tokens,
             checkpoint_format=args.checkpoint_format,
+            query_mode=args.query_mode,
         )
     print(
         json.dumps(
