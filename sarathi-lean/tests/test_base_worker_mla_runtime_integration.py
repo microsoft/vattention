@@ -1036,6 +1036,15 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(matrix_summary["max_largest_reclaim_bytes"], 128)
         self.assertEqual(matrix_summary["family_with_max_peak_bytes"], "overlap_matrix")
         self.assertEqual(matrix_summary["family_with_min_free_blocks"], "overlap_matrix")
+        validation = self.cache_engine_module.validate_vattention_cache_sweep_matrix(
+            matrix_summary,
+            max_peak_persistent_bytes=160,
+            min_free_blocks_overall=5,
+            max_largest_growth_bytes=96,
+            max_largest_reclaim_bytes=128,
+        )
+        self.assertTrue(validation["is_valid"])
+        self.assertEqual(validation["violations"], ())
 
 
 if __name__ == "__main__":

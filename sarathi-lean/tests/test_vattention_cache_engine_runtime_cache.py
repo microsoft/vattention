@@ -145,6 +145,9 @@ summarize_vattention_cache_sweep_family = (
 summarize_vattention_cache_sweep_matrix = (
     cache_engine_module.summarize_vattention_cache_sweep_matrix
 )
+validate_vattention_cache_sweep_matrix = (
+    cache_engine_module.validate_vattention_cache_sweep_matrix
+)
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -455,6 +458,42 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(matrix_summary["max_largest_reclaim_bytes"], 128)
         self.assertEqual(matrix_summary["family_with_max_peak_bytes"], "overlap_matrix")
         self.assertEqual(matrix_summary["family_with_min_free_blocks"], "overlap_matrix")
+
+    def test_cache_usage_sweep_matrix_validation_reports_pass_and_fail_cases(self):
+        matrix_summary = {
+            "max_peak_persistent_bytes": 160,
+            "min_free_blocks_overall": 5,
+            "max_largest_growth_bytes": 96,
+            "max_largest_reclaim_bytes": 128,
+        }
+
+        passing = validate_vattention_cache_sweep_matrix(
+            matrix_summary,
+            max_peak_persistent_bytes=160,
+            min_free_blocks_overall=5,
+            max_largest_growth_bytes=96,
+            max_largest_reclaim_bytes=128,
+        )
+        failing = validate_vattention_cache_sweep_matrix(
+            matrix_summary,
+            max_peak_persistent_bytes=128,
+            min_free_blocks_overall=6,
+            max_largest_growth_bytes=64,
+            max_largest_reclaim_bytes=96,
+        )
+
+        self.assertTrue(passing["is_valid"])
+        self.assertEqual(passing["violations"], ())
+        self.assertFalse(failing["is_valid"])
+        self.assertEqual(
+            tuple(violation["metric"] for violation in failing["violations"]),
+            (
+                "max_peak_persistent_bytes",
+                "max_largest_growth_bytes",
+                "max_largest_reclaim_bytes",
+                "min_free_blocks_overall",
+            ),
+        )
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(
