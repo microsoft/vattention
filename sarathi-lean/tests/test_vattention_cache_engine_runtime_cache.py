@@ -154,6 +154,9 @@ summarize_vattention_cache_validation_suite = (
 validate_vattention_cache_validation_suite = (
     cache_engine_module.validate_vattention_cache_validation_suite
 )
+compare_vattention_cache_validation_suite_to_profile = (
+    cache_engine_module.compare_vattention_cache_validation_suite_to_profile
+)
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -549,6 +552,54 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(suite_summary["matrix_with_min_free_blocks"], "overlap_matrix")
         self.assertTrue(passing["is_valid"])
         self.assertEqual(passing["violations"], ())
+        self.assertFalse(failing["is_valid"])
+        self.assertEqual(
+            tuple(violation["metric"] for violation in failing["violations"]),
+            (
+                "max_peak_persistent_bytes",
+                "max_largest_growth_bytes",
+                "max_largest_reclaim_bytes",
+                "min_free_blocks_overall",
+            ),
+        )
+
+    def test_cache_usage_validation_suite_can_be_compared_to_named_profile(self):
+        suite_summary = {
+            "num_matrices": 3,
+            "matrix_names": ("prompt_matrix", "overlap_matrix", "decode_pressure_matrix"),
+            "max_peak_persistent_bytes": 160,
+            "min_free_blocks_overall": 5,
+            "max_largest_growth_bytes": 128,
+            "max_largest_reclaim_bytes": 128,
+            "matrix_with_max_peak_bytes": "overlap_matrix",
+            "matrix_with_min_free_blocks": "overlap_matrix",
+        }
+
+        passing = compare_vattention_cache_validation_suite_to_profile(
+            suite_summary,
+            {
+                "profile_name": "bounded_mla_suite_v1",
+                "max_peak_persistent_bytes": 160,
+                "min_free_blocks_overall": 5,
+                "max_largest_growth_bytes": 128,
+                "max_largest_reclaim_bytes": 128,
+            },
+        )
+        failing = compare_vattention_cache_validation_suite_to_profile(
+            suite_summary,
+            {
+                "profile_name": "bounded_mla_suite_tight",
+                "max_peak_persistent_bytes": 128,
+                "min_free_blocks_overall": 6,
+                "max_largest_growth_bytes": 96,
+                "max_largest_reclaim_bytes": 96,
+            },
+        )
+
+        self.assertEqual(passing["profile_name"], "bounded_mla_suite_v1")
+        self.assertTrue(passing["is_valid"])
+        self.assertEqual(passing["violations"], ())
+        self.assertEqual(failing["profile_name"], "bounded_mla_suite_tight")
         self.assertFalse(failing["is_valid"])
         self.assertEqual(
             tuple(violation["metric"] for violation in failing["violations"]),

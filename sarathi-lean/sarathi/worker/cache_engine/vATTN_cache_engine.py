@@ -415,6 +415,27 @@ def validate_vattention_cache_validation_suite(
     }
 
 
+def compare_vattention_cache_validation_suite_to_profile(
+    suite_summary,
+    expected_profile,
+):
+    expected_profile = dict(expected_profile)
+    validation = validate_vattention_cache_validation_suite(
+        suite_summary,
+        max_peak_persistent_bytes=expected_profile.get("max_peak_persistent_bytes"),
+        min_free_blocks_overall=expected_profile.get("min_free_blocks_overall"),
+        max_largest_growth_bytes=expected_profile.get("max_largest_growth_bytes"),
+        max_largest_reclaim_bytes=expected_profile.get("max_largest_reclaim_bytes"),
+    )
+    return {
+        "profile_name": expected_profile.get("profile_name"),
+        "suite_summary": suite_summary,
+        "expected_profile": expected_profile,
+        "is_valid": validation["is_valid"],
+        "violations": validation["violations"],
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (

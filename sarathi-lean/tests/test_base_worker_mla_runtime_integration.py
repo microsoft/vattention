@@ -1095,6 +1095,19 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(suite_summary["matrix_with_min_free_blocks"], "overlap_matrix")
         self.assertTrue(validation["is_valid"])
         self.assertEqual(validation["violations"], ())
+        profile_report = self.cache_engine_module.compare_vattention_cache_validation_suite_to_profile(
+            suite_summary,
+            {
+                "profile_name": "bounded_mla_suite_v1",
+                "max_peak_persistent_bytes": 160,
+                "min_free_blocks_overall": 5,
+                "max_largest_growth_bytes": 128,
+                "max_largest_reclaim_bytes": 128,
+            },
+        )
+        self.assertEqual(profile_report["profile_name"], "bounded_mla_suite_v1")
+        self.assertTrue(profile_report["is_valid"])
+        self.assertEqual(profile_report["violations"], ())
 
 
 if __name__ == "__main__":
