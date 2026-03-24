@@ -45,6 +45,28 @@ class VAttentionCacheSpec:
     mla_qk_rope_head_dim: Optional[int]
 
 
+@dataclass(frozen=True)
+class VAttentionInitSpec:
+    cache_spec: VAttentionCacheSpec
+    max_batch_size: int
+    max_context_length: int
+    device_idx: int
+    dtype: torch.dtype
+
+    def to_legacy_init_kvcache_args(self) -> Tuple[int, int, int, int, int, int, torch.dtype, int, bool]:
+        return (
+            self.cache_spec.num_layers,
+            self.cache_spec.num_kv_heads,
+            self.cache_spec.head_size,
+            self.max_batch_size,
+            self.max_context_length,
+            self.device_idx,
+            self.dtype,
+            self.cache_spec.page_size,
+            self.cache_spec.megacache,
+        )
+
+
 class SchedulerType(BaseIntEnum):
     VLLM = 1
     ORCA = 2
@@ -310,6 +332,28 @@ class ModelConfig:
             head_size=self.get_head_size(),
             mla_kv_lora_rank=self.get_mla_kv_lora_rank() if is_mla else None,
             mla_qk_rope_head_dim=self.get_mla_qk_rope_head_dim() if is_mla else None,
+        )
+
+    def get_vattention_init_spec(
+        self,
+        *,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool,
+        max_batch_size: int,
+        max_context_length: int,
+        device_idx: int,
+    ) -> VAttentionInitSpec:
+        return VAttentionInitSpec(
+            cache_spec=self.get_vattention_cache_spec(
+                page_size,
+                parallel_config,
+                megacache=megacache,
+            ),
+            max_batch_size=max_batch_size,
+            max_context_length=max_context_length,
+            device_idx=device_idx,
+            dtype=self.dtype,
         )
 
     def get_head_size(self) -> int:

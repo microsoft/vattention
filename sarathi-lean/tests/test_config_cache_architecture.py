@@ -69,6 +69,7 @@ CacheLayout = config_module.CacheLayout
 ModelConfig = config_module.ModelConfig
 ParallelConfig = config_module.ParallelConfig
 VAttentionCacheSpec = config_module.VAttentionCacheSpec
+VAttentionInitSpec = config_module.VAttentionInitSpec
 
 
 class ModelConfigCacheArchitectureTests(unittest.TestCase):
@@ -279,6 +280,39 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertIsNone(spec.mla_kv_lora_rank)
         self.assertIsNone(spec.mla_qk_rope_head_dim)
 
+    def test_dense_kv_vattention_init_spec_projects_to_legacy_args(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+
+        init_spec = model_config.get_vattention_init_spec(
+            page_size=2 * 1024 * 1024,
+            parallel_config=parallel_config,
+            megacache=False,
+            max_batch_size=128,
+            max_context_length=8192,
+            device_idx=0,
+        )
+
+        self.assertIsInstance(init_spec, VAttentionInitSpec)
+        self.assertEqual(init_spec.max_batch_size, 128)
+        self.assertEqual(init_spec.max_context_length, 8192)
+        self.assertEqual(init_spec.device_idx, 0)
+        self.assertEqual(init_spec.dtype, torch.float16)
+        self.assertEqual(
+            init_spec.to_legacy_init_kvcache_args(),
+            (12, 4, 128, 128, 8192, 0, torch.float16, 2 * 1024 * 1024, False),
+        )
+
     def test_mla_cached_bytes_per_layer_uses_resident_payload_only(self):
         hf_config = types.SimpleNamespace(
             model_type="deepseek_v2",
@@ -429,6 +463,40 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(spec.head_size, 40)
         self.assertEqual(spec.mla_kv_lora_rank, 512)
         self.assertEqual(spec.mla_qk_rope_head_dim, 64)
+
+    def test_mla_vattention_init_spec_projects_to_legacy_args(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+
+        init_spec = model_config.get_vattention_init_spec(
+            page_size=2 * 1024 * 1024,
+            parallel_config=parallel_config,
+            megacache=True,
+            max_batch_size=64,
+            max_context_length=16384,
+            device_idx=2,
+        )
+
+        self.assertIsInstance(init_spec, VAttentionInitSpec)
+        self.assertEqual(init_spec.max_batch_size, 64)
+        self.assertEqual(init_spec.max_context_length, 16384)
+        self.assertEqual(init_spec.device_idx, 2)
+        self.assertEqual(init_spec.dtype, torch.float16)
+        self.assertEqual(
+            init_spec.to_legacy_init_kvcache_args(),
+            (20, 32, 40, 64, 16384, 2, torch.float16, 2 * 1024 * 1024, True),
+        )
 
 
 if __name__ == "__main__":

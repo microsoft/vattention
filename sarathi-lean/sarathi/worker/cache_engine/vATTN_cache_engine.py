@@ -39,11 +39,15 @@ class vATTNCacheEngine(BaseCacheEngine):
         self.vattn_async = True if mem_alloc_backend == "async" else False
         self.vattn_mega_cache = True if "megacache" in model_config.attention_backend.lower() else False
         self.cache_mem_size = cache_config.memory_for_gpu
-        self.cache_spec = model_config.get_vattention_cache_spec(
-            self.page_size,
-            parallel_config,
+        self.init_spec = model_config.get_vattention_init_spec(
+            page_size=self.page_size,
+            parallel_config=parallel_config,
             megacache=self.vattn_mega_cache,
+            max_batch_size=self.max_batch_size,
+            max_context_length=self.max_model_seq_len,
+            device_idx=self.device_idx,
         )
+        self.cache_spec = self.init_spec.cache_spec
         super().__init__(cache_config, model_config, parallel_config)
 
     def num_free_blocks(self) -> int:
@@ -59,15 +63,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         print(f" > Page Buffer Token Bytes: {self.cache_spec.page_buffer_token_bytes}")
         
         kv_cache = vattention.init_kvcache(
-                                    self.num_layers,
-                                    self.num_heads,
-                                    self.head_size,
-                                    self.max_batch_size,
-                                    self.max_model_seq_len,
-                                    self.device_idx,
-                                    self.dtype,
-                                    self.page_size,
-                                    self.vattn_mega_cache)
+                                    *self.init_spec.to_legacy_init_kvcache_args())
         if self.vattn_mega_cache:
             k_cache = kv_cache[0]
             v_cache = kv_cache[1]
