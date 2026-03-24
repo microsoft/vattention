@@ -157,6 +157,37 @@ def reconstruct_dense_kv(
     return key, value
 
 
+def contiguous_mla_attention_forward(
+    query_states: torch.Tensor,
+    new_kv_latent: torch.Tensor,
+    new_k_rope: torch.Tensor,
+    kv_up_proj_weight: torch.Tensor,
+    mla_dims: DeepseekV2MLADims,
+    cache: Optional[DeepseekV2MLAResidentCache] = None,
+    softmax_scale: Optional[float] = None,
+) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+    q_nope, q_rope = split_query_projection(query_states, mla_dims)
+    new_cache = make_resident_cache(new_kv_latent, new_k_rope, mla_dims)
+    full_cache = append_resident_cache(cache, new_cache)
+    key, value = reconstruct_dense_kv(full_cache, kv_up_proj_weight, mla_dims)
+    query = torch.cat([q_nope, q_rope], dim=-1)
+
+    if softmax_scale is None:
+        softmax_scale = mla_dims.q_head_dim ** -0.5
+
+    past_len = 0 if cache is None else cache.num_tokens
+    scores = torch.einsum("thd,shd->hts", query, key) * softmax_scale
+
+    source_positions = torch.arange(key.shape[0], device=query.device)
+    target_positions = past_len + torch.arange(query.shape[0], device=query.device)
+    causal_mask = source_positions.unsqueeze(0) <= target_positions.unsqueeze(1)
+    scores = scores.masked_fill(~causal_mask.unsqueeze(0), float("-inf"))
+
+    attn_weights = torch.softmax(scores, dim=-1)
+    output = torch.einsum("hts,shv->thv", attn_weights, value)
+    return output.reshape(query.shape[0], -1), full_cache
+
+
 class DeepseekV2MLAAttention(nn.Module):
 
     def __init__(
@@ -196,6 +227,25 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_up_proj_weight: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return reconstruct_dense_kv(cache, kv_up_proj_weight, self.mla_dims)
+
+    def forward_contiguous(
+        self,
+        query_states: torch.Tensor,
+        new_kv_latent: torch.Tensor,
+        new_k_rope: torch.Tensor,
+        kv_up_proj_weight: torch.Tensor,
+        cache: Optional[DeepseekV2MLAResidentCache] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        return contiguous_mla_attention_forward(
+            query_states=query_states,
+            new_kv_latent=new_kv_latent,
+            new_k_rope=new_k_rope,
+            kv_up_proj_weight=kv_up_proj_weight,
+            mla_dims=self.mla_dims,
+            cache=cache,
+            softmax_scale=softmax_scale,
+        )
 
 
 class DeepseekV2DecoderLayer(nn.Module):
