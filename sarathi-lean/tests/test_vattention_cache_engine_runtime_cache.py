@@ -137,6 +137,7 @@ summarize_vattention_cache_usage = cache_engine_module.summarize_vattention_cach
 summarize_vattention_cache_transition = (
     cache_engine_module.summarize_vattention_cache_transition
 )
+summarize_vattention_cache_history = cache_engine_module.summarize_vattention_cache_history
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -304,6 +305,49 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(transition["active_request_delta"], -1)
         self.assertEqual(transition["from_seq_to_batch_idx"], {10: 0})
         self.assertEqual(transition["to_seq_to_batch_idx"], {})
+
+    def test_cache_usage_history_summary_reports_peak_growth_and_reclaim(self):
+        history = (
+            {
+                "event": "step",
+                "persistent_tokens": 2,
+                "persistent_bytes": 64,
+                "free_blocks": 8,
+                "active_request_count": 1,
+            },
+            {
+                "event": "step",
+                "persistent_tokens": 5,
+                "persistent_bytes": 160,
+                "free_blocks": 6,
+                "active_request_count": 2,
+            },
+            {
+                "event": "free_request",
+                "persistent_tokens": 1,
+                "persistent_bytes": 32,
+                "free_blocks": 9,
+                "active_request_count": 1,
+            },
+        )
+        transitions = (
+            summarize_vattention_cache_transition(history[0], history[1]),
+            summarize_vattention_cache_transition(history[1], history[2]),
+        )
+
+        summary = summarize_vattention_cache_history(history, transitions)
+
+        self.assertEqual(summary["num_snapshots"], 3)
+        self.assertEqual(summary["num_transitions"], 2)
+        self.assertEqual(summary["peak_persistent_tokens"], 5)
+        self.assertEqual(summary["peak_persistent_bytes"], 160)
+        self.assertEqual(summary["final_persistent_tokens"], 1)
+        self.assertEqual(summary["final_persistent_bytes"], 32)
+        self.assertEqual(summary["min_free_blocks"], 6)
+        self.assertEqual(summary["max_active_request_count"], 2)
+        self.assertEqual(summary["largest_growth_bytes"], 96)
+        self.assertEqual(summary["largest_reclaim_bytes"], 128)
+        self.assertEqual(summary["events"], ("step", "step", "free_request"))
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(
@@ -525,6 +569,7 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(transitions[0]["persistent_byte_delta"], -64)
         self.assertEqual(transitions[0]["free_block_delta"], -1)
         self.assertEqual(transitions[0]["active_request_delta"], -1)
+        self.assertEqual(engine.get_cache_usage_summary()["largest_reclaim_bytes"], 64)
         self.assertEqual(freed_batch_indices, [0])
 
 

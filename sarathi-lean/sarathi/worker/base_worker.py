@@ -182,6 +182,12 @@ class BaseWorker:
             return ()
         return self.cache_engine.get_cache_usage_transitions()
 
+    @synchronized
+    def get_cache_usage_summary(self):
+        if self.cache_engine is None or not hasattr(self.cache_engine, "get_cache_usage_summary"):
+            return None
+        return self.cache_engine.get_cache_usage_summary()
+
     def on_step_completed(
         self, scheduler_outputs: SchedulerOutputs, sampler_outputs: SamplerOutputs
     ) -> None:

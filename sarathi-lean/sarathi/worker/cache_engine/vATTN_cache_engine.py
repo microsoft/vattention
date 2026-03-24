@@ -88,6 +88,63 @@ def summarize_vattention_cache_transition(previous_usage, current_usage) -> dict
     }
 
 
+def summarize_vattention_cache_history(history, transitions=None) -> dict:
+    history = tuple(history)
+    if transitions is None:
+        transitions = tuple(
+            summarize_vattention_cache_transition(previous_usage, current_usage)
+            for previous_usage, current_usage in zip(history, history[1:])
+        )
+    else:
+        transitions = tuple(transitions)
+
+    if not history:
+        return {
+            "num_snapshots": 0,
+            "num_transitions": 0,
+            "peak_persistent_tokens": 0,
+            "peak_persistent_bytes": 0,
+            "final_persistent_tokens": 0,
+            "final_persistent_bytes": 0,
+            "min_free_blocks": None,
+            "max_active_request_count": 0,
+            "largest_growth_bytes": 0,
+            "largest_reclaim_bytes": 0,
+            "events": (),
+        }
+
+    persistent_tokens = [snapshot["persistent_tokens"] for snapshot in history]
+    persistent_bytes = [snapshot["persistent_bytes"] for snapshot in history]
+    free_blocks = [
+        snapshot["free_blocks"]
+        for snapshot in history
+        if snapshot.get("free_blocks") is not None
+    ]
+    active_request_counts = [
+        snapshot["active_request_count"] for snapshot in history
+    ]
+    byte_deltas = [
+        transition["persistent_byte_delta"]
+        for transition in transitions
+        if transition.get("persistent_byte_delta") is not None
+    ]
+    growth_deltas = [delta for delta in byte_deltas if delta > 0]
+    reclaim_deltas = [-delta for delta in byte_deltas if delta < 0]
+    return {
+        "num_snapshots": len(history),
+        "num_transitions": len(transitions),
+        "peak_persistent_tokens": max(persistent_tokens),
+        "peak_persistent_bytes": max(persistent_bytes),
+        "final_persistent_tokens": persistent_tokens[-1],
+        "final_persistent_bytes": persistent_bytes[-1],
+        "min_free_blocks": min(free_blocks) if free_blocks else None,
+        "max_active_request_count": max(active_request_counts),
+        "largest_growth_bytes": max(growth_deltas) if growth_deltas else 0,
+        "largest_reclaim_bytes": max(reclaim_deltas) if reclaim_deltas else 0,
+        "events": tuple(snapshot.get("event") for snapshot in history),
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (
@@ -331,6 +388,11 @@ class vATTNCacheEngine(BaseCacheEngine):
             summarize_vattention_cache_transition(previous_usage, current_usage)
             for previous_usage, current_usage in zip(history, history[1:])
         )
+
+    def get_cache_usage_summary(self):
+        history = self.get_cache_usage_history()
+        transitions = self.get_cache_usage_transitions()
+        return summarize_vattention_cache_history(history, transitions)
 
     @staticmethod
     def get_cache_block_size(

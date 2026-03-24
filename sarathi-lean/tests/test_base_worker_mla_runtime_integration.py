@@ -314,6 +314,9 @@ class _FakeCacheEngine:
     def get_cache_usage_transitions(self):
         return ()
 
+    def get_cache_usage_summary(self):
+        return None
+
 
 class _SequencedFakeCacheEngine(_FakeCacheEngine):
     def __init__(self, cache_usage_history):
@@ -372,6 +375,30 @@ class _SequencedFakeCacheEngine(_FakeCacheEngine):
             }
             for index in range(len(history) - 1)
         )
+
+    def get_cache_usage_summary(self):
+        history = self.get_cache_usage_history()
+        transitions = self.get_cache_usage_transitions()
+        if not history:
+            return None
+        byte_deltas = [transition["persistent_byte_delta"] for transition in transitions]
+        growth_deltas = [delta for delta in byte_deltas if delta > 0]
+        reclaim_deltas = [-delta for delta in byte_deltas if delta < 0]
+        return {
+            "num_snapshots": len(history),
+            "num_transitions": len(transitions),
+            "peak_persistent_tokens": max(snapshot["persistent_tokens"] for snapshot in history),
+            "peak_persistent_bytes": max(snapshot["persistent_bytes"] for snapshot in history),
+            "final_persistent_tokens": history[-1]["persistent_tokens"],
+            "final_persistent_bytes": history[-1]["persistent_bytes"],
+            "min_free_blocks": min(snapshot["free_blocks"] for snapshot in history),
+            "max_active_request_count": max(
+                snapshot["active_request_count"] for snapshot in history
+            ),
+            "largest_growth_bytes": max(growth_deltas) if growth_deltas else 0,
+            "largest_reclaim_bytes": max(reclaim_deltas) if reclaim_deltas else 0,
+            "events": tuple(snapshot["event"] for snapshot in history),
+        }
 
 
 class _FakeMetricsStore:
@@ -718,6 +745,22 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(history_view[-1]["persistent_bytes"], 0)
         self.assertEqual(history_view[-1]["free_blocks"], 9)
         self.assertEqual(history_view[-1]["seq_to_batch_idx"], {})
+        self.assertEqual(
+            worker.get_cache_usage_summary(),
+            {
+                "num_snapshots": 3,
+                "num_transitions": 2,
+                "peak_persistent_tokens": 3,
+                "peak_persistent_bytes": 96,
+                "final_persistent_tokens": 0,
+                "final_persistent_bytes": 0,
+                "min_free_blocks": 7,
+                "max_active_request_count": 1,
+                "largest_growth_bytes": 32,
+                "largest_reclaim_bytes": 96,
+                "events": ("step", "step", "free_request"),
+            },
+        )
 
 
 if __name__ == "__main__":
