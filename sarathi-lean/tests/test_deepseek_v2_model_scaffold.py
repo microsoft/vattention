@@ -54,6 +54,7 @@ DeepseekV2MLADims = deepseek_module.DeepseekV2MLADims
 DeepseekV2MLAAttention = deepseek_module.DeepseekV2MLAAttention
 DeepseekV2Model = deepseek_module.DeepseekV2Model
 DeepseekV2ForCausalLM = deepseek_module.DeepseekV2ForCausalLM
+make_mlp_weights = deepseek_module.make_mlp_weights
 
 
 class DeepseekV2ModelScaffoldTests(unittest.TestCase):
@@ -146,6 +147,17 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         self.assertEqual(model.mla_dims.num_heads, 128)
         self.assertEqual(model.model.num_layers, 60)
         self.assertIsNone(model.lm_head)
+
+    def test_make_mlp_weights_rejects_invalid_down_projection_shape(self):
+        hidden_size = 8
+
+        with self.assertRaises(ValueError):
+            make_mlp_weights(
+                gate_proj=torch.zeros(hidden_size, 4),
+                up_proj=torch.zeros(hidden_size, 4),
+                down_proj=torch.zeros(5, hidden_size),
+                hidden_size=hidden_size,
+            )
 
 
 if __name__ == "__main__":
