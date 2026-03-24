@@ -134,6 +134,9 @@ def _load_cache_engine_module():
 cache_engine_module, CacheArchitecture, DEEPSEEK_STUB = _load_cache_engine_module()
 format_vattention_gpu_cache = cache_engine_module.format_vattention_gpu_cache
 summarize_vattention_cache_usage = cache_engine_module.summarize_vattention_cache_usage
+summarize_vattention_cache_transition = (
+    cache_engine_module.summarize_vattention_cache_transition
+)
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -270,6 +273,37 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertIsNone(usage["scheduled_batch_indices"])
         self.assertIsNone(usage["scheduled_prompt_batch_indices"])
         self.assertIsNone(usage["scheduled_decode_batch_indices"])
+
+    def test_cache_usage_transition_summarizes_runtime_deltas(self):
+        transition = summarize_vattention_cache_transition(
+            {
+                "event": "step",
+                "persistent_tokens": 2,
+                "persistent_bytes": 64,
+                "free_blocks": 8,
+                "active_request_count": 1,
+                "seq_to_batch_idx": {10: 0},
+                "active_batch_indices": (0,),
+            },
+            {
+                "event": "free_request",
+                "persistent_tokens": 0,
+                "persistent_bytes": 0,
+                "free_blocks": 9,
+                "active_request_count": 0,
+                "seq_to_batch_idx": {},
+                "active_batch_indices": (),
+            },
+        )
+
+        self.assertEqual(transition["from_event"], "step")
+        self.assertEqual(transition["to_event"], "free_request")
+        self.assertEqual(transition["persistent_token_delta"], -2)
+        self.assertEqual(transition["persistent_byte_delta"], -64)
+        self.assertEqual(transition["free_block_delta"], 1)
+        self.assertEqual(transition["active_request_delta"], -1)
+        self.assertEqual(transition["from_seq_to_batch_idx"], {10: 0})
+        self.assertEqual(transition["to_seq_to_batch_idx"], {})
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(
@@ -478,6 +512,7 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         engine.free_request(301)
 
         history = engine.get_cache_usage_history()
+        transitions = engine.get_cache_usage_transitions()
 
         self.assertEqual([snapshot["event"] for snapshot in history], ["step", "free_request"])
         self.assertEqual(history[0]["persistent_tokens"], 2)
@@ -485,6 +520,11 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(history[1]["persistent_tokens"], 0)
         self.assertEqual(history[1]["free_blocks"], 7)
         self.assertEqual(history[1]["seq_to_batch_idx"], {})
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(transitions[0]["persistent_token_delta"], -2)
+        self.assertEqual(transitions[0]["persistent_byte_delta"], -64)
+        self.assertEqual(transitions[0]["free_block_delta"], -1)
+        self.assertEqual(transitions[0]["active_request_delta"], -1)
         self.assertEqual(freed_batch_indices, [0])
 
 

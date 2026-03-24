@@ -63,6 +63,31 @@ def summarize_vattention_cache_usage(
     }
 
 
+def summarize_vattention_cache_transition(previous_usage, current_usage) -> dict:
+    if previous_usage is None or current_usage is None:
+        raise ValueError("previous_usage and current_usage must both be provided")
+
+    def _delta(key):
+        previous_value = previous_usage.get(key)
+        current_value = current_usage.get(key)
+        if previous_value is None or current_value is None:
+            return None
+        return current_value - previous_value
+
+    return {
+        "from_event": previous_usage.get("event"),
+        "to_event": current_usage.get("event"),
+        "persistent_token_delta": _delta("persistent_tokens"),
+        "persistent_byte_delta": _delta("persistent_bytes"),
+        "free_block_delta": _delta("free_blocks"),
+        "active_request_delta": _delta("active_request_count"),
+        "from_seq_to_batch_idx": previous_usage.get("seq_to_batch_idx"),
+        "to_seq_to_batch_idx": current_usage.get("seq_to_batch_idx"),
+        "from_active_batch_indices": previous_usage.get("active_batch_indices"),
+        "to_active_batch_indices": current_usage.get("active_batch_indices"),
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (
@@ -299,6 +324,13 @@ class vATTNCacheEngine(BaseCacheEngine):
 
     def get_cache_usage_history(self):
         return tuple(getattr(self, "cache_usage_history", ()))
+
+    def get_cache_usage_transitions(self):
+        history = self.get_cache_usage_history()
+        return tuple(
+            summarize_vattention_cache_transition(previous_usage, current_usage)
+            for previous_usage, current_usage in zip(history, history[1:])
+        )
 
     @staticmethod
     def get_cache_block_size(

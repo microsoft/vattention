@@ -311,6 +311,9 @@ class _FakeCacheEngine:
     def get_cache_usage_history(self):
         return ()
 
+    def get_cache_usage_transitions(self):
+        return ()
+
 
 class _SequencedFakeCacheEngine(_FakeCacheEngine):
     def __init__(self, cache_usage_history):
@@ -338,6 +341,37 @@ class _SequencedFakeCacheEngine(_FakeCacheEngine):
         if self.history_index < 0:
             return ()
         return tuple(self.cache_usage_history[: self.history_index + 1])
+
+    def get_cache_usage_transitions(self):
+        history = self.get_cache_usage_history()
+        return tuple(
+            self.cache_usage_history[index + 1]
+            | {
+                "from_event": self.cache_usage_history[index]["event"],
+                "to_event": self.cache_usage_history[index + 1]["event"],
+                "persistent_token_delta": (
+                    self.cache_usage_history[index + 1]["persistent_tokens"]
+                    - self.cache_usage_history[index]["persistent_tokens"]
+                ),
+                "persistent_byte_delta": (
+                    self.cache_usage_history[index + 1]["persistent_bytes"]
+                    - self.cache_usage_history[index]["persistent_bytes"]
+                ),
+                "free_block_delta": (
+                    self.cache_usage_history[index + 1]["free_blocks"]
+                    - self.cache_usage_history[index]["free_blocks"]
+                ),
+                "active_request_delta": (
+                    self.cache_usage_history[index + 1]["active_request_count"]
+                    - self.cache_usage_history[index]["active_request_count"]
+                ),
+                "from_seq_to_batch_idx": self.cache_usage_history[index]["seq_to_batch_idx"],
+                "to_seq_to_batch_idx": self.cache_usage_history[index + 1]["seq_to_batch_idx"],
+                "from_active_batch_indices": self.cache_usage_history[index]["active_batch_indices"],
+                "to_active_batch_indices": self.cache_usage_history[index + 1]["active_batch_indices"],
+            }
+            for index in range(len(history) - 1)
+        )
 
 
 class _FakeMetricsStore:
@@ -666,6 +700,7 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             preempted_seq=[types.SimpleNamespace(seq_id=10)],
         )
         history_view = worker.get_cache_usage_history()
+        transitions = worker.get_cache_usage_transitions()
 
         self.assertEqual(first_stats["persistent_bytes"], 64)
         self.assertEqual(first_stats["scheduled_prompt_batch_indices"], (0,))
@@ -673,6 +708,13 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(second_stats["scheduled_decode_batch_indices"], (0,))
         self.assertEqual(cache_engine.preempted, [(10,)])
         self.assertEqual([snapshot["event"] for snapshot in history_view], ["step", "step", "free_request"])
+        self.assertEqual(len(transitions), 2)
+        self.assertEqual(transitions[0]["persistent_token_delta"], 1)
+        self.assertEqual(transitions[0]["persistent_byte_delta"], 32)
+        self.assertEqual(transitions[0]["free_block_delta"], -1)
+        self.assertEqual(transitions[1]["persistent_token_delta"], -3)
+        self.assertEqual(transitions[1]["persistent_byte_delta"], -96)
+        self.assertEqual(transitions[1]["free_block_delta"], 2)
         self.assertEqual(history_view[-1]["persistent_bytes"], 0)
         self.assertEqual(history_view[-1]["free_blocks"], 9)
         self.assertEqual(history_view[-1]["seq_to_batch_idx"], {})
