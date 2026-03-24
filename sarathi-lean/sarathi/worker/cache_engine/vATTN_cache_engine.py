@@ -12,9 +12,60 @@ from sarathi.worker.cache_engine.base_cache_engine import BaseCacheEngine
 from sarathi.worker.cache_engine.vattention_init import dispatch_init_kvcache
 import vattention
 from sarathi.model_executor.attention import get_attention_wrapper
+from sarathi.config import CacheArchitecture
 logger = init_logger(__name__)
 
 KVCache = Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
+    if cache_spec.architecture == CacheArchitecture.MLA:
+        from sarathi.model_executor.models.deepseek_v2 import (
+            DeepseekV2ComponentMLAKVCache,
+        )
+
+        kv_latent_cache, k_rope_cache = kv_cache
+        assert kv_latent_cache.device == device, (
+            "kv_latent cache device mismatch. expected: {}, got: {}".format(
+                device, kv_latent_cache.device
+            )
+        )
+        assert k_rope_cache.device == device, (
+            "k_rope cache device mismatch expected: {}, got: {}".format(
+                device, k_rope_cache.device
+            )
+        )
+        return [
+            DeepseekV2ComponentMLAKVCache(
+                kv_latent=kv_latent_cache[:, :, layer_idx, :],
+                k_rope=k_rope_cache[:, :, layer_idx, :].view(
+                    kv_latent_cache.shape[0],
+                    kv_latent_cache.shape[1],
+                    cache_spec.num_heads,
+                    cache_spec.mla_qk_rope_head_dim,
+                ),
+            )
+            for layer_idx in range(cache_spec.num_layers)
+        ]
+
+    if cache_spec.megacache:
+        k_cache = kv_cache[0]
+        v_cache = kv_cache[1]
+        assert k_cache.device == device, \
+                    "k_cache device mismatch. expected: {}, got: {}".format(device, k_cache.device)
+        assert v_cache.device == device, \
+                    "v_cache device mismatch expected: {}, got: {}".format(device, v_cache.device)
+
+        return [(k_cache[:, :, i], v_cache[:, :, i]) for i in range(cache_spec.num_layers)]
+
+    k_cache = kv_cache[:cache_spec.num_layers]
+    v_cache = kv_cache[cache_spec.num_layers:]
+    for i in range(cache_spec.num_layers):
+        assert k_cache[i].device == device, \
+                    "k_cache device mismatch. expected: {}, got: {}".format(device, k_cache[i].device)
+        assert v_cache[i].device == device, \
+                    "v_cache device mismatch expected: {}, got: {}".format(device, v_cache[i].device)
+    return list(zip(k_cache, v_cache))
 
 class vATTNCacheEngine(BaseCacheEngine):
     """Manages the KV cache.
@@ -70,26 +121,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         print(f" > Page Buffer Token Bytes: {self.cache_spec.page_buffer_token_bytes}")
         
         kv_cache = self._init_kvcache_from_spec()
-        if self.vattn_mega_cache:
-            k_cache = kv_cache[0]
-            v_cache = kv_cache[1]
-            assert k_cache.device == self.device, \
-                        "k_cache device mismatch. expected: {}, got: {}".format(self.device, self.k_cache.device)
-            assert v_cache.device == self.device, \
-                        "v_cache device mismatch expected: {}, got: {}".format(self.device, self.v_cache.device) 
-
-            cache_list = []
-            for i in range(self.num_layers):
-                cache_list.append((k_cache[:,:,i], v_cache[:,:,i]))
-        else:
-            k_cache = kv_cache[:self.num_layers]
-            v_cache = kv_cache[self.num_layers:]
-            for i in range(self.num_layers):
-                assert k_cache[i].device == self.device, \
-                            "k_cache device mismatch. expected: {}, got: {}".format(self.device, self.k_cache[i].device)
-                assert v_cache[i].device == self.device, \
-                            "v_cache device mismatch expected: {}, got: {}".format(self.device, self.v_cache[i].device)
-            cache_list = list(zip(k_cache, v_cache))
+        cache_list = format_vattention_gpu_cache(self.cache_spec, kv_cache, self.device)
         vattention.reserve_physical_pages(self.cache_mem_size)
         
         print(f"[PYTHON TRACE] Reserving Physical Memory: {self.cache_mem_size / (1024**2):.2f} MB")
