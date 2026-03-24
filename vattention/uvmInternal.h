@@ -225,10 +225,10 @@ u64 do_cuda_uvm_init(int device, u64 page_size)
     return page_size;
 }
 
-u64 reserve_uvm_pages(u64 num_layers, u64 free_memory, u64 page_size)
+u64 reserve_uvm_pages(u64 free_memory, u64 page_size)
 {
     Log log;
-    u64 num_phys_blocks = get_num_phys_blocks(num_layers, free_memory, page_size);
+    u64 num_phys_blocks = get_num_phys_blocks(free_memory, page_size);
     log.log("Reserving " + std::to_string(num_phys_blocks) + " pages " + std::to_string(page_size) + " ...");
 
     while (uvm_pages.size() < num_phys_blocks)
@@ -255,10 +255,9 @@ inline void map_uvm_pages(int reqId,
 
 /* NOTE: This function must be called after wait_kvcache_manager_sync */
 void do_uvm_kvcache_cleanup() {
-    u64 nelements = (max_batch_size * max_context_length * num_kv_heads * head_size);
     for(int j = 0; j < k_tensors.size(); j++) {
-        CHECK_VATTN(vattn_free_reserved_address((void*)(k_tensors[j].data_ptr()), k_tensors[j].element_size() * nelements));
-        CHECK_VATTN(vattn_free_reserved_address((void*)(v_tensors[j].data_ptr()), v_tensors[j].element_size() * nelements));
+        CHECK_VATTN(vattn_free_reserved_address((void*)(k_tensors[j].data_ptr()), k_tensors[j].nbytes()));
+        CHECK_VATTN(vattn_free_reserved_address((void*)(v_tensors[j].data_ptr()), v_tensors[j].nbytes()));
     }
 
     for(int i = 0; i < uvm_pages.size(); i++)

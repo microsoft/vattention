@@ -85,10 +85,7 @@ public:
     {
         std::stringstream ss;
         u64 nr_pages = !is_uvm_backend(page_size) ? cuda_pages.size() : uvm_pages.size();
-        if (megacache_enabled)
-            log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(nr_pages)) + " KV blocks");
-        else
-            log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS(nr_pages)) + " KV blocks");
+        log.log("Free pool: " + std::to_string(pages_to_kvblocks(nr_pages)) + " KV blocks");
 
         log.log("reqId : seqlen: mapped: required");
         for (int i = 0; i < max_batch_size; i++)
@@ -126,10 +123,12 @@ public:
         scalar_type = torch::python::detail::py_object_to_dtype(dtype_);
         page_size = page_size_;
         megacache_enabled = megacache;
+        megacache_enabled_global = megacache;
         bytes_per_elem = dtype.attr("itemsize").cast<int>();
         page_buffer_token_bytes = megacache_enabled
             ? (u64)num_kv_heads * head_size * bytes_per_elem * num_layers
             : (u64)num_kv_heads * head_size * bytes_per_elem;
+        cached_token_bytes_local = (u64)num_layers * 2 * num_kv_heads * head_size * bytes_per_elem;
         component_spec_enabled = false;
         cache_component_token_dims = {
             num_kv_heads * head_size,
@@ -165,11 +164,13 @@ public:
         device = payload["device_idx"].cast<int>();
         page_size = cache_spec["page_size"].cast<u64>();
         megacache_enabled = cache_spec["megacache"].cast<bool>();
+        megacache_enabled_global = megacache_enabled;
         num_layers = cache_spec["num_layers"].cast<int>();
         num_kv_heads = cache_spec["num_kv_heads"].cast<int>();
         head_size = cache_spec["head_size"].cast<int>();
         tokens_per_page = cache_spec["tokens_per_page"].cast<u64>();
         page_buffer_token_bytes = cache_spec["page_buffer_token_bytes"].cast<u64>();
+        cached_token_bytes_local = cache_spec["cached_token_bytes_local"].cast<u64>();
         bytes_per_elem = cache_spec["dtype_size"].cast<int>();
         scalar_type = parse_scalar_type(payload["dtype"].cast<std::string>());
         component_spec_enabled = true;
@@ -293,17 +294,13 @@ public:
 
     u64 reserve_physical_pages(u64 free_memory)
     {
-        return reserve_gpu_pages(num_layers, free_memory, page_size);
+        return reserve_gpu_pages(free_memory, page_size);
     }
 
     inline u64 get_num_free_kvblocks()
     {
         u64 free_kvblocks;
-
-        if (megacache_enabled)
-            free_kvblocks = PAGES_TO_KVBLOCKS_MEGACACHE(get_num_free_pages(page_size));
-        else
-            free_kvblocks = PAGES_TO_KVBLOCKS(get_num_free_pages(page_size));
+        free_kvblocks = pages_to_kvblocks(get_num_free_pages(page_size));
 
         return free_kvblocks + get_num_overcommitted_kvblocks();
     }
@@ -316,9 +313,7 @@ public:
 
     inline bool kvblocks_available(u64 num_kvblocks)
     {
-        if (megacache_enabled)
-            return PAGES_TO_KVBLOCKS_MEGACACHE(get_num_free_pages(page_size)) >= num_kvblocks ? true : false;
-        return PAGES_TO_KVBLOCKS(get_num_free_pages(page_size)) >= num_kvblocks ? true : false;
+        return pages_to_kvblocks(get_num_free_pages(page_size)) >= num_kvblocks ? true : false;
     }
 
     inline void unmap_req_page_one(int reqId)
@@ -393,12 +388,12 @@ public:
             verbose = true;
             if (megacache_enabled)
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             else
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             show_allocator_state();
@@ -446,12 +441,12 @@ public:
         {
             if (megacache_enabled)
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             else
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             throw std::runtime_error("***** OOM on demand: not enough free pages to continue *****");
@@ -492,28 +487,18 @@ public:
         
         // --- START FRAGMENTATION LOGIC ---
         
-        // 1. Calculate Physical Capacity
-        // 'tokens_per_page' is tokens per 2MB page for ONE tensor side (K or V).
+        // 1. Calculate physical token capacity in currently mapped logical kvblocks.
         u64 physical_token_capacity = nr_mapped * tokens_per_page;
 
         // 2. Calculate "Resident" Useful Tokens
         // We only count tokens actually residing in the currently mapped physical blocks.
         u64 resident_useful_tokens = (seq_len < physical_token_capacity) ? seq_len : physical_token_capacity;
 
-        // 3. Convert to Bytes for Logging
-        // Logic: Layers * Heads * Dim * BytesPerElem
-        // (We don't * 2 here because we compare it to a physical size that also represents 
-        // one side of the total memory per block).
-        u64 bytes_per_token_per_side = num_layers * num_kv_heads * head_size * bytes_per_elem;
-        
-        u64 bytes_useful = resident_useful_tokens * bytes_per_token_per_side;
-        
-        // 4. Calculate total Physical Memory across all layers for ONE side
-        u64 total_physical_pages_per_side = nr_mapped;
-        if (!megacache_enabled) {
-            total_physical_pages_per_side = nr_mapped * num_layers;
-        }
-        u64 bytes_allocated = total_physical_pages_per_side * page_size;
+        // 3. Convert to bytes for the full resident payload tracked by the allocator.
+        u64 bytes_useful = resident_useful_tokens * cached_token_bytes_local;
+
+        // 4. Calculate total physical memory mapped for the full logical kvblocks.
+        u64 bytes_allocated = nr_mapped * get_pages_per_kvblock() * page_size;
 
         if (nr_mapped > 0) {
             double frag_percent = (bytes_allocated > 0) 
@@ -751,6 +736,25 @@ public:
         deferred_reclaim = val;
     }
 
+    py::dict get_allocator_debug_info()
+    {
+        py::dict info;
+        info["tokens_per_page"] = py::int_(tokens_per_page);
+        info["page_buffer_token_bytes"] = py::int_(page_buffer_token_bytes);
+        info["cached_token_bytes_local"] = py::int_(cached_token_bytes_local);
+        info["pages_per_kvblock"] = py::int_(get_pages_per_kvblock());
+        info["component_spec_enabled"] = py::bool_(component_spec_enabled);
+        info["megacache_enabled"] = py::bool_(megacache_enabled);
+        info["num_layers"] = py::int_(num_layers);
+        info["num_cache_components"] = py::int_(get_num_cache_components());
+        return info;
+    }
+
+    u64 debug_tokens_to_pages(u64 num_tokens)
+    {
+        return tokens_to_pages(num_tokens);
+    }
+
     /* TODO(ashish): check if this is compatible with PyTorch destructor */
     void cleanup()
     {
@@ -760,6 +764,10 @@ public:
         v_tensors.clear();
         cache_component_token_dims.clear();
         component_spec_enabled = false;
+        megacache_enabled_global = false;
+        tokens_per_page = 0;
+        page_buffer_token_bytes = 0;
+        cached_token_bytes_local = 0;
         log.log("released memory and cleaned up vattention ...");
     }
 };
@@ -779,6 +787,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     /* Tunables and other helper APIs */
     m.def("set_verbose", &set_verbose, "to enable/disable printing logs...");
     m.def("set_deferred_reclamation", &set_deferred_reclamation, "enable/disable deferred freeing...");
+    m.def("get_allocator_debug_info", &get_allocator_debug_info, "return allocator sizing metadata...");
+    m.def("debug_tokens_to_pages", &debug_tokens_to_pages, "convert token count to logical kvblocks...");
     /* Testing APIs */
     m.def("show_kvcache_config", &show_kvcache_config, "show kv cache configuration...");
     m.def("show_allocator_state", &show_allocator_state, "show free pool of physical memory blocks...");

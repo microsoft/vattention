@@ -65,16 +65,17 @@ at::Tensor _alloc_vtensor(
     at::detail::check_size_nonnegative(shape);
     raise_warning_for_complex_half(scalar_type);
     caffe2::TypeMeta dtype = scalarTypeToTypeMeta(scalar_type);
+    size_t request_alignment = page_size * shape[0];
     auto size_bytes = at::detail::computeStorageNbytesContiguous(shape, dtype.itemsize());
-    size_bytes = ROUND_UP(size_bytes, page_size);
+    size_bytes = ROUND_UP(size_bytes, request_alignment);
     /*
      * ensure that each request's buffer is at least as big as the page size
      * first element of shape should always be batch size
      */
-    if (size_bytes < page_size * shape[0])
-        size_bytes = page_size * shape[0];
+    if (size_bytes < request_alignment)
+        size_bytes = request_alignment;
 
-    if (size_bytes % (page_size * shape[0]) != 0)
+    if (size_bytes % request_alignment != 0)
         throw std::runtime_error("size_bytes is not a multiple of page_size * shape[0]");
 
     auto storage_impl = c10::make_intrusive<c10::StorageImpl>(

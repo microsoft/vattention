@@ -53,6 +53,14 @@ void set_deferred_reclamation(bool val) {
     vattn.set_deferred_reclamation(val);
 }
 
+py::dict get_allocator_debug_info() {
+    return vattn.get_allocator_debug_info();
+}
+
+u64 debug_tokens_to_pages(unsigned long num_tokens) {
+    return vattn.debug_tokens_to_pages(num_tokens);
+}
+
 void map_common_pages(u64 num_tokens) {
     vattn.map_common_pages_in_batch(num_tokens);
 }

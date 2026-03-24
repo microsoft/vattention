@@ -5,11 +5,9 @@
 #define MAX(a, b) ((a) < (b) ? (b) : (a))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-#define KVBLOCKS_TO_PAGES(kvblocks) ((kvblocks) * (2) * (num_layers))
-#define PAGES_TO_KVBLOCKS(pages) ((pages) / (2 * (num_layers)))
 #define ROUND_UP(x, y) ((((x) + (y) - 1) / (y)) * (y))
-#define PAGES_TO_KVBLOCKS_MEGACACHE(pages) ((pages) / 2)
 bool verbose = false;
+bool megacache_enabled_global = false;
 
 typedef long long unsigned int NvU64;
 typedef unsigned long u64;
@@ -51,6 +49,7 @@ py::object dtype;
 at::ScalarType scalar_type;
 bool component_spec_enabled = false;
 u64 page_buffer_token_bytes = 0;
+u64 cached_token_bytes_local = 0;
 
 /* framework specific params */
 int max_batch_size;
@@ -207,6 +206,31 @@ inline u64 get_req_current_unmap_offset(int reqId)
     return get_req_begin_offset_virt(reqId) + block_offset_within_req;
 }
 
+inline u64 get_num_cache_components()
+{
+    if (!cache_component_token_dims.empty())
+        return cache_component_token_dims.size();
+    return 2;
+}
+
+inline u64 get_pages_per_kvblock()
+{
+    if (megacache_enabled_global)
+        return get_num_cache_components();
+    return get_num_cache_components() * num_layers;
+}
+
+inline u64 kvblocks_to_pages(u64 kvblocks)
+{
+    return kvblocks * get_pages_per_kvblock();
+}
+
+inline u64 pages_to_kvblocks(u64 pages)
+{
+    u64 pages_per_kvblock = get_pages_per_kvblock();
+    return pages / pages_per_kvblock;
+}
+
 u64 need_new_page_async(int reqId, int eager_step_count)
 {
     if (!is_active_req(reqId))
@@ -222,12 +246,12 @@ u64 need_new_page_async(int reqId, int eager_step_count)
     return nr_required <= nr_mapped ? 0 : nr_required - nr_mapped;
 }
 
-u64 get_num_phys_blocks(u64 num_layers, u64 free_memory, u64 page_size)
+u64 get_num_phys_blocks(u64 free_memory, u64 page_size)
 {
     u64 num_phys_blocks;
-    /* do not allocate if we can't use a page. we need multiples of 2 * num_layers */
+    /* do not allocate unusable slack; physical pages must align to whole logical kvblocks */
     num_phys_blocks = free_memory / page_size;
-    num_phys_blocks -= num_phys_blocks % (2 * num_layers);
+    num_phys_blocks -= num_phys_blocks % get_pages_per_kvblock();
     return num_phys_blocks;
 }
 
