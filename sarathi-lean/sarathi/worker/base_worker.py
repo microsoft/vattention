@@ -175,6 +175,7 @@ class BaseWorker:
         self,
         scheduler_outputs: SchedulerOutputs,
         preempted_seq: Optional[List] = None,
+        model_runner_kwargs: Optional[dict] = None,
     ) -> Optional[SamplerOutputs]:
         
         batch_stage_start_time = time.monotonic()
@@ -188,6 +189,7 @@ class BaseWorker:
         sampler_outputs = self.model_runner.run(
             seq_metadata_list,
             self.gpu_cache,
+            model_kwargs=model_runner_kwargs,
         )
 
         self.on_step_completed(scheduler_outputs, sampler_outputs)
