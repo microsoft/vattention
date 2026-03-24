@@ -153,6 +153,15 @@ class VAttentionInitSpec:
             return "component_spec"
         return "legacy_dense_kv"
 
+    def get_extension_init_request(self) -> Dict[str, Any]:
+        mode = self.get_extension_init_mode()
+        request: Dict[str, Any] = {"init_mode": mode}
+        if mode == "legacy_dense_kv":
+            request["legacy_args"] = self.to_legacy_init_kvcache_args()
+        else:
+            request["payload"] = self.to_extension_dict()
+        return request
+
     def to_legacy_init_kvcache_args(self) -> Tuple[int, int, int, int, int, int, torch.dtype, int, bool]:
         if self.get_extension_init_mode() != "legacy_dense_kv":
             raise ValueError(

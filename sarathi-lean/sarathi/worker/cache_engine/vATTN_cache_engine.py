@@ -54,11 +54,10 @@ class vATTNCacheEngine(BaseCacheEngine):
         return vattention.num_free_kvblocks()
 
     def _init_kvcache_from_spec(self):
-        init_mode = self.init_spec.get_extension_init_mode()
+        init_request = self.init_spec.get_extension_init_request()
+        init_mode = init_request["init_mode"]
         if init_mode == "legacy_dense_kv":
-            return vattention.init_kvcache(
-                *self.init_spec.to_legacy_init_kvcache_args()
-            )
+            return vattention.init_kvcache(*init_request["legacy_args"])
         raise NotImplementedError(
             f"vAttention extension init mode '{init_mode}' is not wired yet"
         )

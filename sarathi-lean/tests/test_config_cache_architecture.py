@@ -491,6 +491,47 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(payload["dtype"], "float16")
         self.assertEqual(payload["cache_spec"]["architecture"], "dense_kv")
 
+    def test_dense_kv_vattention_init_spec_builds_legacy_init_request(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+
+        init_spec = model_config.get_vattention_init_spec(
+            page_size=2 * 1024 * 1024,
+            parallel_config=parallel_config,
+            megacache=False,
+            max_batch_size=128,
+            max_context_length=8192,
+            device_idx=0,
+        )
+
+        self.assertEqual(
+            init_spec.get_extension_init_request(),
+            {
+                "init_mode": "legacy_dense_kv",
+                "legacy_args": (
+                    12,
+                    4,
+                    128,
+                    128,
+                    8192,
+                    0,
+                    torch.float16,
+                    2 * 1024 * 1024,
+                    False,
+                ),
+            },
+        )
+
     def test_mla_cached_bytes_per_layer_uses_resident_payload_only(self):
         hf_config = types.SimpleNamespace(
             model_type="deepseek_v2",
@@ -781,6 +822,39 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(payload["cache_spec"]["architecture"], "mla")
         self.assertEqual(payload["cache_spec"]["mla_kv_lora_rank"], 512)
         self.assertEqual(payload["cache_spec"]["mla_qk_rope_head_dim"], 64)
+
+    def test_mla_vattention_init_spec_builds_component_init_request(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+
+        init_spec = model_config.get_vattention_init_spec(
+            page_size=2 * 1024 * 1024,
+            parallel_config=parallel_config,
+            megacache=True,
+            max_batch_size=64,
+            max_context_length=16384,
+            device_idx=2,
+        )
+
+        request = init_spec.get_extension_init_request()
+        self.assertEqual(request["init_mode"], "component_spec")
+        self.assertEqual(request["payload"]["init_mode"], "component_spec")
+        self.assertEqual(request["payload"]["cache_spec"]["architecture"], "mla")
+        self.assertEqual(request["payload"]["cache_spec"]["cache_components"][0]["name"], "kv_latent")
 
     def test_cache_component_spec_rejects_non_positive_dim(self):
         with self.assertRaises(ValueError):
