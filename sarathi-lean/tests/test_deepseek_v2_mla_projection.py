@@ -76,6 +76,17 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
             tensor_parallel_world_size=2,
         )
 
+    def _make_q_lora_config(self):
+        config = self._make_config()
+        config.q_lora_rank = 2
+        return config
+
+    def _make_q_lora_dims(self):
+        return DeepseekV2MLADims.from_config(
+            self._make_q_lora_config(),
+            tensor_parallel_world_size=2,
+        )
+
     def _make_projection_weights(self, dims):
         return make_projection_weights(
             q_proj=torch.tensor(
@@ -142,6 +153,109 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
                 o_proj=torch.zeros(dims.o_proj_input_dim_local, dims.hidden_size),
                 mla_dims=dims,
             )
+
+    def test_make_projection_weights_accepts_q_lora_query_path(self):
+        dims = self._make_q_lora_dims()
+
+        projection_weights = make_projection_weights(
+            q_proj=None,
+            q_a_proj=torch.zeros(dims.hidden_size, dims.q_lora_rank),
+            q_a_layernorm_weight=torch.ones(dims.q_lora_rank),
+            q_b_proj=torch.zeros(dims.q_lora_rank, dims.q_proj_output_dim_local),
+            kv_latent_proj=torch.zeros(dims.hidden_size, dims.kv_lora_rank),
+            k_rope_proj=torch.zeros(
+                dims.hidden_size, dims.num_heads * dims.qk_rope_head_dim
+            ),
+            kv_up_proj=torch.zeros(
+                dims.kv_lora_rank, dims.kv_up_proj_output_dim_local
+            ),
+            o_proj=torch.zeros(dims.o_proj_input_dim_local, dims.hidden_size),
+            mla_dims=dims,
+        )
+
+        self.assertIsNone(projection_weights.q_proj)
+        self.assertEqual(tuple(projection_weights.q_a_proj.shape), (dims.hidden_size, 2))
+
+    def test_project_from_hidden_states_supports_q_lora_query_path(self):
+        dims = self._make_q_lora_dims()
+        hidden_states = torch.tensor(
+            [
+                [1.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        projection_weights = make_projection_weights(
+            q_proj=None,
+            q_a_proj=torch.tensor(
+                [
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [1.0, 1.0],
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                    [0.0, 0.0],
+                ]
+            ),
+            q_a_layernorm_weight=torch.tensor([1.0, 2.0]),
+            q_b_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+                ]
+            ),
+            kv_latent_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ),
+            k_rope_proj=torch.tensor(
+                [
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 0.0],
+                ]
+            ),
+            kv_up_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 10.0, 20.0, 2.0, 0.0, 30.0, 40.0],
+                    [0.0, 1.0, 11.0, 21.0, 0.0, 2.0, 31.0, 41.0],
+                    [1.0, 1.0, 12.0, 22.0, 2.0, 2.0, 32.0, 42.0],
+                ]
+            ),
+            o_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                    [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                ]
+            ),
+            mla_dims=dims,
+        )
+
+        query_states, cache = project_mla_from_hidden_states(
+            hidden_states,
+            projection_weights,
+            dims,
+        )
+
+        q_latent = hidden_states @ projection_weights.q_a_proj
+        variance = q_latent.pow(2).mean(dim=-1, keepdim=True)
+        expected_query_states = (
+            q_latent
+            * torch.rsqrt(variance + 1e-6)
+            * projection_weights.q_a_layernorm_weight
+        ) @ projection_weights.q_b_proj
+        self.assertTrue(torch.allclose(query_states, expected_query_states))
+        self.assertEqual(tuple(cache.kv_latent.shape), (2, dims.kv_lora_rank))
 
     def test_project_from_hidden_states_returns_query_and_resident_cache(self):
         dims = self._make_dims()

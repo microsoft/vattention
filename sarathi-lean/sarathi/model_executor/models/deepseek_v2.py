@@ -91,7 +91,10 @@ class DeepseekV2MLAResidentCache:
 
 @dataclass(frozen=True)
 class DeepseekV2MLAProjectionWeights:
-    q_proj: torch.Tensor
+    q_proj: Optional[torch.Tensor]
+    q_a_proj: Optional[torch.Tensor]
+    q_a_layernorm_weight: Optional[torch.Tensor]
+    q_b_proj: Optional[torch.Tensor]
     kv_latent_proj: torch.Tensor
     k_rope_proj: torch.Tensor
     kv_up_proj: torch.Tensor
@@ -221,7 +224,11 @@ def reconstruct_dense_kv(
 
 
 def make_projection_weights(
-    q_proj: torch.Tensor,
+    *,
+    q_proj: Optional[torch.Tensor] = None,
+    q_a_proj: Optional[torch.Tensor] = None,
+    q_a_layernorm_weight: Optional[torch.Tensor] = None,
+    q_b_proj: Optional[torch.Tensor] = None,
     kv_latent_proj: torch.Tensor,
     k_rope_proj: torch.Tensor,
     kv_up_proj: torch.Tensor,
@@ -229,6 +236,14 @@ def make_projection_weights(
     mla_dims: DeepseekV2MLADims,
 ) -> DeepseekV2MLAProjectionWeights:
     expected_q_proj = (mla_dims.hidden_size, mla_dims.q_proj_output_dim_local)
+    if mla_dims.q_lora_rank is not None:
+        expected_q_a_proj = (mla_dims.hidden_size, mla_dims.q_lora_rank)
+        expected_q_a_layernorm_weight = (mla_dims.q_lora_rank,)
+        expected_q_b_proj = (mla_dims.q_lora_rank, mla_dims.q_proj_output_dim_local)
+    else:
+        expected_q_a_proj = None
+        expected_q_a_layernorm_weight = None
+        expected_q_b_proj = None
     expected_kv_latent_proj = (mla_dims.hidden_size, mla_dims.kv_lora_rank)
     expected_k_rope_proj = (
         mla_dims.hidden_size,
@@ -239,8 +254,25 @@ def make_projection_weights(
         mla_dims.kv_up_proj_output_dim_local,
     )
     expected_o_proj = (mla_dims.o_proj_input_dim_local, mla_dims.hidden_size)
-    if tuple(q_proj.shape) != expected_q_proj:
-        raise ValueError("q_proj shape does not match local MLA query projection size")
+    if q_proj is not None:
+        if tuple(q_proj.shape) != expected_q_proj:
+            raise ValueError("q_proj shape does not match local MLA query projection size")
+    else:
+        if mla_dims.q_lora_rank is None:
+            raise ValueError("q_proj is required when q_lora_rank is not configured")
+        if q_a_proj is None or q_a_layernorm_weight is None or q_b_proj is None:
+            raise ValueError(
+                "q_a_proj, q_a_layernorm_weight, and q_b_proj are required when q_proj is absent"
+            )
+    if q_a_proj is not None and tuple(q_a_proj.shape) != expected_q_a_proj:
+        raise ValueError("q_a_proj shape does not match local MLA query latent size")
+    if (
+        q_a_layernorm_weight is not None
+        and tuple(q_a_layernorm_weight.shape) != expected_q_a_layernorm_weight
+    ):
+        raise ValueError("q_a_layernorm_weight shape does not match q_lora_rank")
+    if q_b_proj is not None and tuple(q_b_proj.shape) != expected_q_b_proj:
+        raise ValueError("q_b_proj shape does not match local MLA query projection size")
     if tuple(kv_latent_proj.shape) != expected_kv_latent_proj:
         raise ValueError("kv_latent_proj shape does not match local MLA latent projection size")
     if tuple(k_rope_proj.shape) != expected_k_rope_proj:
@@ -251,6 +283,9 @@ def make_projection_weights(
         raise ValueError("o_proj shape does not match local MLA output projection size")
     return DeepseekV2MLAProjectionWeights(
         q_proj=q_proj,
+        q_a_proj=q_a_proj,
+        q_a_layernorm_weight=q_a_layernorm_weight,
+        q_b_proj=q_b_proj,
         kv_latent_proj=kv_latent_proj,
         k_rope_proj=k_rope_proj,
         kv_up_proj=kv_up_proj,
@@ -408,7 +443,14 @@ def project_mla_from_hidden_states(
     if hidden_states.ndim != 2 or hidden_states.shape[1] != mla_dims.hidden_size:
         raise ValueError("hidden_states must have shape [tokens, hidden_size]")
 
-    query_states = hidden_states @ projection_weights.q_proj
+    if projection_weights.q_proj is not None:
+        query_states = hidden_states @ projection_weights.q_proj
+    else:
+        q_latent = hidden_states @ projection_weights.q_a_proj
+        variance = q_latent.pow(2).mean(dim=-1, keepdim=True)
+        q_latent = q_latent * torch.rsqrt(variance + 1e-6)
+        q_latent = q_latent * projection_weights.q_a_layernorm_weight
+        query_states = q_latent @ projection_weights.q_b_proj
     kv_latent = hidden_states @ projection_weights.kv_latent_proj
     k_rope = hidden_states @ projection_weights.k_rope_proj
     k_rope = k_rope.view(-1, mla_dims.num_heads, mla_dims.qk_rope_head_dim)
@@ -694,7 +736,11 @@ class DeepseekV2MLAAttention(nn.Module):
 
     def make_projection_weights(
         self,
-        q_proj: torch.Tensor,
+        *,
+        q_proj: Optional[torch.Tensor] = None,
+        q_a_proj: Optional[torch.Tensor] = None,
+        q_a_layernorm_weight: Optional[torch.Tensor] = None,
+        q_b_proj: Optional[torch.Tensor] = None,
         kv_latent_proj: torch.Tensor,
         k_rope_proj: torch.Tensor,
         kv_up_proj: torch.Tensor,
@@ -702,6 +748,9 @@ class DeepseekV2MLAAttention(nn.Module):
     ) -> DeepseekV2MLAProjectionWeights:
         return make_projection_weights(
             q_proj=q_proj,
+            q_a_proj=q_a_proj,
+            q_a_layernorm_weight=q_a_layernorm_weight,
+            q_b_proj=q_b_proj,
             kv_latent_proj=kv_latent_proj,
             k_rope_proj=k_rope_proj,
             kv_up_proj=kv_up_proj,
@@ -1290,6 +1339,18 @@ class DeepseekV2ForCausalLM(nn.Module):
                     state_dict,
                     *(f"{prefix}.q_proj.weight" for prefix in projection_prefixes),
                 ),
+                "q_a_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.q_a_proj.weight" for prefix in projection_prefixes),
+                ),
+                "q_a_layernorm_weight": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.q_a_layernorm.weight" for prefix in projection_prefixes),
+                ),
+                "q_b_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.q_b_proj.weight" for prefix in projection_prefixes),
+                ),
                 "kv_latent_proj": self._get_scaffold_tensor(
                     state_dict,
                     *(f"{prefix}.kv_latent_proj.weight" for prefix in projection_prefixes),
@@ -1341,8 +1402,23 @@ class DeepseekV2ForCausalLM(nn.Module):
             )
             if projection_tensors["kv_up_proj"] is None and kv_b_proj is not None:
                 projection_tensors["kv_up_proj"] = kv_b_proj
+            query_uses_q_lora = projection_tensors["q_proj"] is None and any(
+                projection_tensors[name] is not None
+                for name in ("q_a_proj", "q_a_layernorm_weight", "q_b_proj")
+            )
+            required_query_keys = (
+                ("q_a_proj", "q_a_layernorm_weight", "q_b_proj")
+                if query_uses_q_lora
+                else ("q_proj",)
+            )
+            required_projection_keys = required_query_keys + (
+                "kv_latent_proj",
+                "k_rope_proj",
+                "kv_up_proj",
+                "o_proj",
+            )
             missing_projection_keys = [
-                name for name, tensor in projection_tensors.items() if tensor is None
+                name for name in required_projection_keys if projection_tensors[name] is None
             ]
             if missing_projection_keys:
                 raise KeyError(
@@ -1360,6 +1436,9 @@ class DeepseekV2ForCausalLM(nn.Module):
             local_projection_weights.append(
                 make_projection_weights(
                     q_proj=projection_tensors["q_proj"],
+                    q_a_proj=projection_tensors["q_a_proj"],
+                    q_a_layernorm_weight=projection_tensors["q_a_layernorm_weight"],
+                    q_b_proj=projection_tensors["q_b_proj"],
                     kv_latent_proj=projection_tensors["kv_latent_proj"],
                     k_rope_proj=projection_tensors["k_rope_proj"],
                     kv_up_proj=projection_tensors["kv_up_proj"],

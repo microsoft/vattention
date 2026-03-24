@@ -547,6 +547,61 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             )
         )
 
+    def test_causal_lm_scaffold_loader_accepts_q_lora_query_aliases(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        config.q_lora_rank = 2
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        base_projection_weights = self._make_projection_weights(dims)
+        q_a_proj = torch.full((config.hidden_size, config.q_lora_rank), 1.0)
+        q_a_layernorm_weight = torch.tensor([1.0, 2.0])
+        q_b_proj = torch.full((config.q_lora_rank, dims.q_proj_output_dim_local), 0.5)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for layer_idx in range(model.model.num_layers):
+            prefix = f"layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_a_proj.weight"] = q_a_proj + layer_idx
+            state_dict[f"{prefix}.q_a_layernorm.weight"] = q_a_layernorm_weight + layer_idx
+            state_dict[f"{prefix}.q_b_proj.weight"] = q_b_proj + layer_idx
+            state_dict[f"{prefix}.kv_latent_proj.weight"] = (
+                base_projection_weights.kv_latent_proj + layer_idx
+            )
+            state_dict[f"{prefix}.k_rope_proj.weight"] = (
+                base_projection_weights.k_rope_proj + layer_idx
+            )
+            state_dict[f"{prefix}.kv_up_proj.weight"] = (
+                base_projection_weights.kv_up_proj + layer_idx
+            )
+            state_dict[f"{prefix}.o_proj.weight"] = base_projection_weights.o_proj + layer_idx
+
+        model.load_weights(state_dict)
+
+        self.assertIsNone(model.model.layer_projection_weights[0].q_proj)
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].q_a_proj,
+                q_a_proj,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[1].q_b_proj,
+                q_b_proj + 1,
+            )
+        )
+
     def test_causal_lm_scaffold_loader_accepts_local_checkpoint_directory(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
             set_pipeline_model_parallel_rank,
