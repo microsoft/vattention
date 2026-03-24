@@ -383,6 +383,42 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertIsNone(spec.mla_kv_lora_rank)
         self.assertIsNone(spec.mla_qk_rope_head_dim)
 
+    def test_dense_kv_vattention_cache_spec_exports_structured_payload(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+        page_size = 2 * 1024 * 1024
+
+        spec = model_config.get_vattention_cache_spec(page_size, parallel_config)
+
+        self.assertEqual(
+            spec.to_extension_dict(),
+            {
+                "architecture": "dense_kv",
+                "megacache": False,
+                "page_size": page_size,
+                "tokens_per_page": page_size // (2 * 4 * 128),
+                "cached_token_bytes_per_layer": 2 * (2 * 4 * 128),
+                "cached_token_bytes_local": 12 * (2 * 2 * 4 * 128),
+                "page_buffer_token_bytes": 2 * 4 * 128,
+                "dtype_size": 2,
+                "num_layers": 12,
+                "num_kv_heads": 4,
+                "head_size": 128,
+                "mla_kv_lora_rank": None,
+                "mla_qk_rope_head_dim": None,
+            },
+        )
+
     def test_dense_kv_vattention_init_spec_projects_to_legacy_args(self):
         hf_config = types.SimpleNamespace(
             model_type="llama",
@@ -415,6 +451,36 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             init_spec.to_legacy_init_kvcache_args(),
             (12, 4, 128, 128, 8192, 0, torch.float16, 2 * 1024 * 1024, False),
         )
+
+    def test_dense_kv_vattention_init_spec_exports_structured_payload(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+
+        init_spec = model_config.get_vattention_init_spec(
+            page_size=2 * 1024 * 1024,
+            parallel_config=parallel_config,
+            megacache=False,
+            max_batch_size=128,
+            max_context_length=8192,
+            device_idx=0,
+        )
+
+        payload = init_spec.to_extension_dict()
+        self.assertEqual(payload["max_batch_size"], 128)
+        self.assertEqual(payload["max_context_length"], 8192)
+        self.assertEqual(payload["device_idx"], 0)
+        self.assertEqual(payload["dtype"], "float16")
+        self.assertEqual(payload["cache_spec"]["architecture"], "dense_kv")
 
     def test_mla_cached_bytes_per_layer_uses_resident_payload_only(self):
         hf_config = types.SimpleNamespace(
@@ -582,6 +648,51 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(spec.mla_kv_lora_rank, 512)
         self.assertEqual(spec.mla_qk_rope_head_dim, 64)
 
+    def test_mla_vattention_cache_spec_exports_structured_payload(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+        page_size = 2 * 1024 * 1024
+
+        spec = model_config.get_vattention_cache_spec(
+            page_size,
+            parallel_config,
+            megacache=True,
+        )
+
+        expected_per_layer = 2 * (512 + 64)
+        self.assertEqual(
+            spec.to_extension_dict(),
+            {
+                "architecture": "mla",
+                "megacache": True,
+                "page_size": page_size,
+                "tokens_per_page": page_size // (20 * expected_per_layer),
+                "cached_token_bytes_per_layer": expected_per_layer,
+                "cached_token_bytes_local": 20 * expected_per_layer,
+                "page_buffer_token_bytes": 20 * expected_per_layer,
+                "dtype_size": 2,
+                "num_layers": 20,
+                "num_kv_heads": 32,
+                "head_size": 40,
+                "mla_kv_lora_rank": 512,
+                "mla_qk_rope_head_dim": 64,
+            },
+        )
+
     def test_mla_vattention_init_spec_projects_to_legacy_args(self):
         hf_config = types.SimpleNamespace(
             model_type="deepseek_v2",
@@ -618,6 +729,42 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             init_spec.to_legacy_init_kvcache_args(),
             (20, 32, 40, 64, 16384, 2, torch.float16, 2 * 1024 * 1024, True),
         )
+
+    def test_mla_vattention_init_spec_exports_structured_payload(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+
+        init_spec = model_config.get_vattention_init_spec(
+            page_size=2 * 1024 * 1024,
+            parallel_config=parallel_config,
+            megacache=True,
+            max_batch_size=64,
+            max_context_length=16384,
+            device_idx=2,
+        )
+
+        payload = init_spec.to_extension_dict()
+        self.assertEqual(payload["max_batch_size"], 64)
+        self.assertEqual(payload["max_context_length"], 16384)
+        self.assertEqual(payload["device_idx"], 2)
+        self.assertEqual(payload["dtype"], "float16")
+        self.assertEqual(payload["cache_spec"]["architecture"], "mla")
+        self.assertEqual(payload["cache_spec"]["mla_kv_lora_rank"], 512)
+        self.assertEqual(payload["cache_spec"]["mla_qk_rope_head_dim"], 64)
 
 
 if __name__ == "__main__":

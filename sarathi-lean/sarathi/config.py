@@ -1,7 +1,7 @@
 from abc import ABC
 from enum import Enum
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from transformers import PretrainedConfig
@@ -61,6 +61,23 @@ class VAttentionCacheSpec:
     mla_kv_lora_rank: Optional[int]
     mla_qk_rope_head_dim: Optional[int]
 
+    def to_extension_dict(self) -> Dict[str, Any]:
+        return {
+            "architecture": self.architecture.value,
+            "megacache": self.megacache,
+            "page_size": self.page_size,
+            "tokens_per_page": self.tokens_per_page,
+            "cached_token_bytes_per_layer": self.cached_token_bytes_per_layer,
+            "cached_token_bytes_local": self.cached_token_bytes_local,
+            "page_buffer_token_bytes": self.page_buffer_token_bytes,
+            "dtype_size": self.dtype_size,
+            "num_layers": self.num_layers,
+            "num_kv_heads": self.num_kv_heads,
+            "head_size": self.head_size,
+            "mla_kv_lora_rank": self.mla_kv_lora_rank,
+            "mla_qk_rope_head_dim": self.mla_qk_rope_head_dim,
+        }
+
 
 @dataclass(frozen=True)
 class VAttentionInitSpec:
@@ -82,6 +99,15 @@ class VAttentionInitSpec:
             self.cache_spec.page_size,
             self.cache_spec.megacache,
         )
+
+    def to_extension_dict(self) -> Dict[str, Any]:
+        return {
+            "cache_spec": self.cache_spec.to_extension_dict(),
+            "max_batch_size": self.max_batch_size,
+            "max_context_length": self.max_context_length,
+            "device_idx": self.device_idx,
+            "dtype": str(self.dtype).replace("torch.", ""),
+        }
 
 
 class SchedulerType(BaseIntEnum):
