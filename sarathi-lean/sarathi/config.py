@@ -40,6 +40,12 @@ class MLAAttentionSpec:
 
 
 @dataclass(frozen=True)
+class CacheComponentSpec:
+    name: str
+    token_dim: int
+
+
+@dataclass(frozen=True)
 class VAttentionCacheSpec:
     architecture: CacheArchitecture
     megacache: bool
@@ -257,19 +263,44 @@ class ModelConfig:
             resident_cache_dim=self.get_mla_resident_cache_dim(),
         )
 
+    def get_cache_component_specs(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> Tuple[CacheComponentSpec, ...]:
+        if self.get_cache_architecture() == CacheArchitecture.MLA:
+            mla_spec = self.get_mla_attention_spec()
+            return (
+                CacheComponentSpec(
+                    name="kv_latent",
+                    token_dim=mla_spec.kv_lora_rank,
+                ),
+                CacheComponentSpec(
+                    name="k_rope",
+                    token_dim=mla_spec.qk_rope_head_dim,
+                ),
+            )
+
+        dense_token_dim = self.get_num_kv_heads(parallel_config) * self.get_head_size()
+        return (
+            CacheComponentSpec(name="k", token_dim=dense_token_dim),
+            CacheComponentSpec(name="v", token_dim=dense_token_dim),
+        )
+
+    def get_resident_cache_token_dim(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> int:
+        return sum(
+            component.token_dim
+            for component in self.get_cache_component_specs(parallel_config)
+        )
+
     def get_cached_token_bytes_per_layer(
         self,
         parallel_config: "ParallelConfig",
     ) -> int:
         dtype_size = torch.tensor([], dtype=self.dtype).element_size()
-
-        if self.get_cache_architecture() == CacheArchitecture.MLA:
-            return dtype_size * self.get_mla_resident_cache_dim()
-
-        num_kv_heads = self.get_num_kv_heads(parallel_config)
-        head_size = self.get_head_size()
-        # Dense KV caches store both K and V per token.
-        return dtype_size * (2 * num_kv_heads * head_size)
+        return dtype_size * self.get_resident_cache_token_dim(parallel_config)
 
     def get_cached_token_bytes_local(
         self,

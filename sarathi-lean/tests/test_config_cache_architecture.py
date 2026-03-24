@@ -65,6 +65,7 @@ def _load_config_module():
 
 config_module = _load_config_module()
 CacheArchitecture = config_module.CacheArchitecture
+CacheComponentSpec = config_module.CacheComponentSpec
 CacheLayout = config_module.CacheLayout
 MLAAttentionSpec = config_module.MLAAttentionSpec
 ModelConfig = config_module.ModelConfig
@@ -141,6 +142,36 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(spec.q_head_dim, 192)
         self.assertEqual(spec.resident_cache_dim, 576)
 
+    def test_mla_cache_component_specs_are_latent_and_rope(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+
+        components = model_config.get_cache_component_specs(parallel_config)
+
+        self.assertEqual(len(components), 2)
+        self.assertIsInstance(components[0], CacheComponentSpec)
+        self.assertEqual(components[0].name, "kv_latent")
+        self.assertEqual(components[1].name, "k_rope")
+        self.assertEqual(components[0].token_dim, 512)
+        self.assertEqual(components[1].token_dim, 64)
+        self.assertEqual(
+            model_config.get_resident_cache_token_dim(parallel_config),
+            576,
+        )
+
     def test_dense_models_do_not_expose_mla_attention_spec(self):
         hf_config = types.SimpleNamespace(
             model_type="llama",
@@ -171,6 +202,33 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(
             model_config.get_cached_token_bytes_per_layer(parallel_config),
             expected,
+        )
+
+    def test_dense_kv_cache_component_specs_are_k_and_v(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+
+        components = model_config.get_cache_component_specs(parallel_config)
+
+        self.assertEqual(len(components), 2)
+        self.assertIsInstance(components[0], CacheComponentSpec)
+        self.assertEqual(components[0].name, "k")
+        self.assertEqual(components[1].name, "v")
+        self.assertEqual(components[0].token_dim, 4 * 128)
+        self.assertEqual(components[1].token_dim, 4 * 128)
+        self.assertEqual(
+            model_config.get_resident_cache_token_dim(parallel_config),
+            1024,
         )
 
     def test_dense_kv_cached_bytes_local_multiplies_by_local_layers(self):
