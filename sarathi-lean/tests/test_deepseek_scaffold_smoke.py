@@ -328,9 +328,11 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
 
         self.assertIn("model.embed_tokens.weight", state_dict)
         self.assertIn("model.norm.weight", state_dict)
+        self.assertIn("lm_head.weight", state_dict)
         self.assertIn("model.layers.0.self_attn.kv_a_proj_with_mqa.weight", state_dict)
         self.assertIn("model.layers.0.mlp.gate_proj.weight", state_dict)
         self.assertNotIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", state_dict)
+        self.assertNotIn("model.lm_head.weight", state_dict)
 
     def test_build_scaffold_state_dict_emits_bounded_moe_weights(self):
         deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]

@@ -126,6 +126,12 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         or name.startswith("model.norm.")
         for name in names
     )
+    if _has_name(names, "lm_head.weight"):
+        lm_head_key_style = "top_level"
+    elif _has_name(names, "model.lm_head.weight"):
+        lm_head_key_style = "model_prefixed"
+    else:
+        lm_head_key_style = "missing"
 
     status = "supported_non_moe_surface"
     blockers = []
@@ -231,6 +237,7 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         "observed_q_lora_rank": observed_q_lora_rank,
         "observed_n_routed_experts": observed_n_routed_experts,
         "uses_hf_namespace": uses_hf_namespace,
+        "lm_head_key_style": lm_head_key_style,
         "has_q_proj": has_q_proj,
         "has_q_lora": has_q_lora,
         "has_combined_kv": has_combined_kv,

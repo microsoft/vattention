@@ -246,7 +246,7 @@ def build_scaffold_state_dict(
         raise ValueError(f"Unsupported scaffold namespace: {namespace}")
 
     embed_key = "model.embed_tokens.weight" if namespace == "hf" else "embed_tokens.weight"
-    lm_head_key = "model.lm_head.weight" if namespace == "hf" else "lm_head.weight"
+    lm_head_key = "lm_head.weight"
     norm_key = "model.norm.weight" if namespace == "hf" else "norm.weight"
 
     config = model.config

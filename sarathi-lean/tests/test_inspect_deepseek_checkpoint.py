@@ -148,6 +148,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertEqual(result["config_num_hidden_layers"], 4)
         self.assertEqual(result["observed_num_hidden_layers"], 4)
         self.assertTrue(result["uses_hf_namespace"])
+        self.assertEqual(result["lm_head_key_style"], "top_level")
         self.assertTrue(result["loadable_scaffold_surface"])
         self.assertIsNone(result["load_error"])
 
