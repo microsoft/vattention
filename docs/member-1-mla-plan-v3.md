@@ -63,6 +63,62 @@ The core design constraints remain:
 4. Keep reconstructed dense K/V transient.
 5. Use the shared spec layer as the boundary between Python and CUDA.
 
+## Tensor Parallelism Requirement
+
+`DeepSeek-V2-Lite` is a good fit for the available `4 x RTX 3090` hardware only if the MLA path works correctly under tensor parallelism.
+
+The repo already supports tensor parallelism for existing models. That means we do not need to re-implement tensor parallelism as a general system feature.
+
+However, MLA does not automatically inherit correct tensor-parallel behavior from dense-KV model paths. We still need to implement MLA-specific compatibility with the existing tensor-parallel framework.
+
+This means:
+
+- reuse the repo’s existing tensor-parallel primitives
+- do not rebuild tensor parallelism from scratch
+- explicitly define MLA cache, shape, and wrapper behavior in per-rank terms
+
+The main rule is:
+
+- all MLA cache specs, cache components, allocator sizing, and runtime tensor shapes must be defined correctly for each tensor-parallel worker
+
+## What Tensor-Parallel MLA Support Actually Requires
+
+The new MLA-specific tensor-parallel work should include:
+
+1. DeepSeek-V2-Lite projection compatibility with the existing tensor-parallel layers.
+
+- The MLA query and KV projection paths must shard correctly across ranks.
+- Local tensor shapes must match the expectations of the repo’s existing parallel linear layers.
+
+2. Explicit local-vs-global definitions for MLA dimensions.
+
+- Be clear about which values are global and which are local per worker:
+  - attention heads
+  - KV heads
+  - latent KV rank
+  - RoPE-related key dimensions
+  - value-head dimensions
+
+3. Per-rank resident cache specification.
+
+- The resident cache components stored on each worker must reflect the local rank’s state.
+- Cache specs must not silently assume global tensor shapes.
+
+4. Per-rank allocator sizing and page-capacity calculations.
+
+- Tokens per page, bytes per token, and cache block size must be correct on each tensor-parallel rank.
+
+5. Tensor-parallel MLA wrapper correctness.
+
+- The wrapper must reconstruct dense K/V from the local rank’s resident cache components and local projection weights in a tensor-parallel-consistent way.
+
+6. Tensor-parallel validation for both contiguous and paged MLA execution.
+
+- We need explicit correctness checks for:
+  - `tp=1`
+  - `tp>1`
+- The goal is not just single-rank correctness, but deployable multi-GPU correctness on the target hardware.
+
 ## Work Plan V3
 
 ### Phase 1: Finish the Python-to-CUDA cache/init boundary
@@ -142,6 +198,8 @@ Why this is required:
 - Add a new model module under `sarathi-lean/sarathi/model_executor/models`
 - Register it in the model loader
 - Keep the first version attention-first if necessary
+- Reuse the repo’s existing tensor-parallel infrastructure instead of creating a separate MLA-specific parallel stack
+- Make the model implementation explicitly tensor-parallel compatible
 
 Why this is required:
 
@@ -169,6 +227,7 @@ Why this is required:
   - dense value
   from resident cache components and current-step projections
 - Keep all dense K/V reconstruction transient
+- Make sure the projection and reconstruction logic are correct for local tensor-parallel rank shapes
 
 Why this is required:
 
@@ -186,6 +245,8 @@ Why this is required:
   - decode
   - multi-step cache reuse
   - mixed-length batches
+  - tensor-parallel shape correctness
+  - at least one `tp>1` validation path
 
 Why this is required:
 
@@ -220,6 +281,7 @@ Why this is required:
   - reads resident componentized cache state from paged cache
   - reconstructs dense K/V right before FlashAttention
   - writes only resident MLA components back to cache
+- ensure reconstruction logic is correct per tensor-parallel rank
 
 Why this is required:
 
@@ -228,6 +290,7 @@ Why this is required:
 13. Wire the DeepSeek-V2-Lite model path to use the MLA wrapper.
 
 - Ensure the model runner, attention backend selection, and cache engine work together for MLA execution.
+- Ensure this wiring is correct for tensor-parallel execution, not just `tp=1`
 
 Why this is required:
 
@@ -252,6 +315,9 @@ Why this is required:
 - Validate output parity between:
   - contiguous MLA path
   - paged MLA path
+- run this comparison for both:
+  - `tp=1`
+  - intended multi-GPU tensor-parallel settings
 
 Why this is required:
 
@@ -274,6 +340,7 @@ Why this is required:
   - expected page growth
   - expected tokens-per-page behavior
   - expected fragmentation accounting
+- confirm that per-rank allocator sizing remains correct under tensor parallelism
 
 Why this is required:
 
@@ -287,6 +354,7 @@ Why this is required:
 - add expert parameter loading
 - add MoE execution path
 - integrate with tensor/pipeline-parallel expectations in this repo
+- validate that the MoE path is compatible with the same tensor-parallel configuration needed for `4 x RTX 3090`
 
 Why this is required:
 
@@ -335,8 +403,8 @@ The plan should be treated as a sequence of concrete bring-up milestones:
 2. contiguous MLA attention works
 3. contiguous DeepSeek-V2-Lite executes
 4. paged MLA attention works
-5. paged DeepSeek-V2-Lite executes
-6. full DeepSeek-V2-Lite with MoE executes
+5. paged DeepSeek-V2-Lite executes with tensor parallelism
+6. full DeepSeek-V2-Lite with MoE executes with tensor parallelism
 
 Only milestone 6 means we can truly say:
 
