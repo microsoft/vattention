@@ -120,6 +120,12 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         observed_n_routed_experts = max(
             max(expert_indices) + 1 for expert_indices in expert_indices_by_layer.values()
         )
+    uses_hf_namespace = any(
+        name.startswith("model.embed_tokens.")
+        or name.startswith("model.layers.")
+        or name.startswith("model.norm.")
+        for name in names
+    )
 
     status = "supported_non_moe_surface"
     blockers = []
@@ -224,6 +230,7 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         "observed_num_hidden_layers": observed_num_hidden_layers,
         "observed_q_lora_rank": observed_q_lora_rank,
         "observed_n_routed_experts": observed_n_routed_experts,
+        "uses_hf_namespace": uses_hf_namespace,
         "has_q_proj": has_q_proj,
         "has_q_lora": has_q_lora,
         "has_combined_kv": has_combined_kv,

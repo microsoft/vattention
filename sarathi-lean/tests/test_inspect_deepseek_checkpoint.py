@@ -147,6 +147,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertEqual(result["config_tensor_parallel_world_size"], 2)
         self.assertEqual(result["config_num_hidden_layers"], 4)
         self.assertEqual(result["observed_num_hidden_layers"], 4)
+        self.assertTrue(result["uses_hf_namespace"])
         self.assertTrue(result["loadable_scaffold_surface"])
         self.assertIsNone(result["load_error"])
 
@@ -218,12 +219,12 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
             from safetensors.torch import load_file, save_file
 
             shard_state = load_file(shard_path)
-            del shard_state["layers.1.mlp.experts.0.down_proj.weight"]
+            del shard_state["model.layers.1.mlp.experts.0.down_proj.weight"]
             save_file(shard_state, shard_path)
 
             index_path = Path(checkpoint_dir) / "model.safetensors.index.json"
             index = json.loads(index_path.read_text())
-            del index["weight_map"]["layers.1.mlp.experts.0.down_proj.weight"]
+            del index["weight_map"]["model.layers.1.mlp.experts.0.down_proj.weight"]
             index_path.write_text(json.dumps(index, indent=2, sort_keys=True))
 
             result = self.inspect_module.inspect_deepseek_checkpoint(checkpoint_dir)

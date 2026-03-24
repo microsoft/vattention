@@ -285,6 +285,53 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertIn("layers.0.self_attn.q_b_proj.weight", state_dict)
         self.assertNotIn("layers.0.self_attn.q_proj.weight", state_dict)
 
+    def test_build_scaffold_state_dict_supports_hf_namespace(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config()
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self.smoke_module.make_mlp_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+
+        state_dict = self.smoke_module.build_scaffold_state_dict(
+            model,
+            projection_weights,
+            mlp_weights,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            namespace="hf",
+        )
+
+        self.assertIn("model.embed_tokens.weight", state_dict)
+        self.assertIn("model.norm.weight", state_dict)
+        self.assertIn("model.layers.0.self_attn.kv_a_proj_with_mqa.weight", state_dict)
+        self.assertIn("model.layers.0.mlp.gate_proj.weight", state_dict)
+        self.assertNotIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", state_dict)
+
     def test_build_scaffold_state_dict_emits_bounded_moe_weights(self):
         deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
         config = self.smoke_module.build_config(mlp_mode="moe")
@@ -493,9 +540,9 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
             self.assertTrue((Path(checkpoint_dir) / "config.json").exists())
             self.assertTrue((Path(checkpoint_dir) / "model-00001-of-00002.safetensors").exists())
             self.assertTrue((Path(checkpoint_dir) / "model-00002-of-00002.safetensors").exists())
-            self.assertIn("embed_tokens.weight", index["weight_map"])
-            self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", index["weight_map"])
-            self.assertIn("layers.0.self_attn.kv_a_layernorm.weight", index["weight_map"])
+            self.assertIn("model.embed_tokens.weight", index["weight_map"])
+            self.assertIn("model.layers.0.self_attn.kv_a_proj_with_mqa.weight", index["weight_map"])
+            self.assertIn("model.layers.0.self_attn.kv_a_layernorm.weight", index["weight_map"])
             self.assertEqual(config_json["tensor_parallel_world_size"], 2)
             self.assertEqual(config_json["intermediate_size"], 4)
             self.assertEqual(config_json["moe_intermediate_size"], 4)

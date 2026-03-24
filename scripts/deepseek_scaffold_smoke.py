@@ -240,35 +240,46 @@ def build_scaffold_state_dict(
     device,
     dtype,
     moe_weights=None,
+    namespace="local",
 ):
+    if namespace not in ("local", "hf"):
+        raise ValueError(f"Unsupported scaffold namespace: {namespace}")
+
+    embed_key = "model.embed_tokens.weight" if namespace == "hf" else "embed_tokens.weight"
+    lm_head_key = "model.lm_head.weight" if namespace == "hf" else "lm_head.weight"
+    norm_key = "model.norm.weight" if namespace == "hf" else "norm.weight"
+
     config = model.config
     state_dict = {
-        "embed_tokens.weight": torch.arange(
+        embed_key: torch.arange(
             config.vocab_size * config.hidden_size,
             dtype=dtype,
             device=device,
         ).view(config.vocab_size, config.hidden_size)
         / 1000.0,
-        "lm_head.weight": torch.arange(
+        lm_head_key: torch.arange(
             config.vocab_size * config.hidden_size,
             dtype=dtype,
             device=device,
         ).view(config.vocab_size, config.hidden_size)
         / 1000.0,
-        "norm.weight": torch.ones(config.hidden_size, device=device, dtype=dtype),
+        norm_key: torch.ones(config.hidden_size, device=device, dtype=dtype),
     }
     for layer_idx, layer_projection_weights in enumerate(projection_weights):
-        state_dict[f"layers.{layer_idx}.input_layernorm.weight"] = torch.ones(
+        layer_prefix = (
+            f"model.layers.{layer_idx}" if namespace == "hf" else f"layers.{layer_idx}"
+        )
+        state_dict[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
             config.hidden_size,
             device=device,
             dtype=dtype,
         )
-        state_dict[f"layers.{layer_idx}.post_attention_layernorm.weight"] = torch.ones(
+        state_dict[f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
             config.hidden_size,
             device=device,
             dtype=dtype,
         )
-        prefix = f"layers.{layer_idx}.self_attn"
+        prefix = f"{layer_prefix}.self_attn"
         kv_a_proj_with_mqa = torch.cat(
             [
                 layer_projection_weights.kv_latent_proj,
@@ -296,7 +307,10 @@ def build_scaffold_state_dict(
     for layer_idx, (layer_mlp_weights, layer_moe_weights) in enumerate(
         zip(mlp_weights, moe_weights)
     ):
-        prefix = f"layers.{layer_idx}.mlp"
+        layer_prefix = (
+            f"model.layers.{layer_idx}" if namespace == "hf" else f"layers.{layer_idx}"
+        )
+        prefix = f"{layer_prefix}.mlp"
         if layer_mlp_weights is not None:
             state_dict[f"{prefix}.gate_proj.weight"] = layer_mlp_weights.gate_proj
             state_dict[f"{prefix}.up_proj.weight"] = layer_mlp_weights.up_proj
@@ -344,6 +358,7 @@ def write_scaffold_checkpoint(
         device=device,
         dtype=dtype,
         moe_weights=moe_weights,
+        namespace="local",
     )
     if checkpoint_format == "pt":
         checkpoint_path = f"{output_dir}/deepseek_scaffold.pt"
@@ -381,6 +396,7 @@ def write_scaffold_hf_directory(
         device=device,
         dtype=dtype,
         moe_weights=moe_weights,
+        namespace="hf",
     )
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
