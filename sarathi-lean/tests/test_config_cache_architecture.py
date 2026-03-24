@@ -456,6 +456,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(spec.num_layers, 12)
         self.assertEqual(spec.num_kv_heads, 4)
         self.assertEqual(spec.head_size, 128)
+        self.assertEqual(spec.tp_attention.tensor_parallel_size, 2)
+        self.assertEqual(spec.tp_attention.num_q_heads_global, 32)
+        self.assertEqual(spec.tp_attention.num_q_heads_local, 16)
+        self.assertEqual(spec.tp_attention.num_kv_heads_global, 8)
+        self.assertEqual(spec.tp_attention.num_kv_heads_local, 4)
         self.assertEqual(len(spec.cache_components), 2)
         self.assertEqual(spec.cache_components[0].name, "k")
         self.assertEqual(spec.cache_components[1].name, "v")
@@ -493,6 +498,14 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
                 "num_layers": 12,
                 "num_kv_heads": 4,
                 "head_size": 128,
+                "tp_attention": {
+                    "tensor_parallel_size": 2,
+                    "num_q_heads_global": 32,
+                    "num_q_heads_local": 16,
+                    "num_kv_heads_global": 8,
+                    "num_kv_heads_local": 4,
+                    "head_size": 128,
+                },
                 "cache_components": [
                     {"name": "k", "token_dim": 4 * 128},
                     {"name": "v", "token_dim": 4 * 128},
@@ -771,6 +784,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(spec.num_layers, 20)
         self.assertEqual(spec.num_kv_heads, 32)
         self.assertEqual(spec.head_size, 40)
+        self.assertEqual(spec.tp_attention.tensor_parallel_size, 4)
+        self.assertEqual(spec.tp_attention.num_q_heads_global, 128)
+        self.assertEqual(spec.tp_attention.num_q_heads_local, 32)
+        self.assertEqual(spec.tp_attention.num_kv_heads_global, 128)
+        self.assertEqual(spec.tp_attention.num_kv_heads_local, 32)
         self.assertEqual(len(spec.cache_components), 2)
         self.assertEqual(spec.cache_components[0].name, "kv_latent")
         self.assertEqual(spec.cache_components[1].name, "k_rope")
@@ -817,6 +835,14 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
                 "num_layers": 20,
                 "num_kv_heads": 32,
                 "head_size": 40,
+                "tp_attention": {
+                    "tensor_parallel_size": 4,
+                    "num_q_heads_global": 128,
+                    "num_q_heads_local": 32,
+                    "num_kv_heads_global": 128,
+                    "num_kv_heads_local": 32,
+                    "head_size": 40,
+                },
                 "cache_components": [
                     {"name": "kv_latent", "token_dim": 512},
                     {"name": "k_rope", "token_dim": 64},
@@ -950,6 +976,14 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
                 num_layers=20,
                 num_kv_heads=32,
                 head_size=40,
+                tp_attention=TensorParallelAttentionSpec(
+                    tensor_parallel_size=4,
+                    num_q_heads_global=128,
+                    num_q_heads_local=32,
+                    num_kv_heads_global=128,
+                    num_kv_heads_local=32,
+                    head_size=40,
+                ),
                 cache_components=(
                     CacheComponentSpec(name="kv_latent", token_dim=32),
                     CacheComponentSpec(name="k_rope", token_dim=16),
@@ -972,6 +1006,14 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
                 num_layers=12,
                 num_kv_heads=4,
                 head_size=128,
+                tp_attention=TensorParallelAttentionSpec(
+                    tensor_parallel_size=2,
+                    num_q_heads_global=32,
+                    num_q_heads_local=16,
+                    num_kv_heads_global=8,
+                    num_kv_heads_local=4,
+                    head_size=128,
+                ),
                 cache_components=(
                     CacheComponentSpec(name="k", token_dim=512),
                     CacheComponentSpec(name="v", token_dim=512),
@@ -993,6 +1035,14 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             num_layers=12,
             num_kv_heads=4,
             head_size=128,
+            tp_attention=TensorParallelAttentionSpec(
+                tensor_parallel_size=2,
+                num_q_heads_global=32,
+                num_q_heads_local=16,
+                num_kv_heads_global=8,
+                num_kv_heads_local=4,
+                head_size=128,
+            ),
             cache_components=(
                 CacheComponentSpec(name="k", token_dim=512),
                 CacheComponentSpec(name="v", token_dim=512),
