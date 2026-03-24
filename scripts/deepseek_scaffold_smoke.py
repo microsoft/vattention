@@ -127,7 +127,7 @@ def make_mlp_weights(deepseek_module, hidden_size, *, device, dtype):
 def build_scaffold_state_dict(model, projection_weights, mlp_weights, *, device, dtype):
     config = model.config
     state_dict = {
-        "model.embed_tokens.weight": torch.arange(
+        "embed_tokens.weight": torch.arange(
             config.vocab_size * config.hidden_size,
             dtype=dtype,
             device=device,
@@ -139,25 +139,33 @@ def build_scaffold_state_dict(model, projection_weights, mlp_weights, *, device,
             device=device,
         ).view(config.vocab_size, config.hidden_size)
         / 1000.0,
-        "model.norm.weight": torch.ones(config.hidden_size, device=device, dtype=dtype),
+        "norm.weight": torch.ones(config.hidden_size, device=device, dtype=dtype),
     }
     for layer_idx, layer_projection_weights in enumerate(projection_weights):
-        state_dict[f"model.layers.{layer_idx}.input_layernorm.weight"] = torch.ones(
+        state_dict[f"layers.{layer_idx}.input_layernorm.weight"] = torch.ones(
             config.hidden_size,
             device=device,
             dtype=dtype,
         )
-        state_dict[
-            f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-        ] = torch.ones(config.hidden_size, device=device, dtype=dtype)
-        prefix = f"model.layers.{layer_idx}.self_attn"
+        state_dict[f"layers.{layer_idx}.post_attention_layernorm.weight"] = torch.ones(
+            config.hidden_size,
+            device=device,
+            dtype=dtype,
+        )
+        prefix = f"layers.{layer_idx}.self_attn"
+        kv_a_proj_with_mqa = torch.cat(
+            [
+                layer_projection_weights.kv_latent_proj,
+                layer_projection_weights.k_rope_proj,
+            ],
+            dim=1,
+        )
         state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj
-        state_dict[f"{prefix}.kv_latent_proj.weight"] = layer_projection_weights.kv_latent_proj
-        state_dict[f"{prefix}.k_rope_proj.weight"] = layer_projection_weights.k_rope_proj
-        state_dict[f"{prefix}.kv_up_proj.weight"] = layer_projection_weights.kv_up_proj
+        state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = kv_a_proj_with_mqa
+        state_dict[f"{prefix}.kv_b_proj.weight"] = layer_projection_weights.kv_up_proj
         state_dict[f"{prefix}.o_proj.weight"] = layer_projection_weights.o_proj
     for layer_idx, layer_mlp_weights in enumerate(mlp_weights):
-        prefix = f"model.layers.{layer_idx}.mlp"
+        prefix = f"layers.{layer_idx}.mlp"
         state_dict[f"{prefix}.gate_proj.weight"] = layer_mlp_weights.gate_proj
         state_dict[f"{prefix}.up_proj.weight"] = layer_mlp_weights.up_proj
         state_dict[f"{prefix}.down_proj.weight"] = layer_mlp_weights.down_proj

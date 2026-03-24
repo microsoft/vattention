@@ -187,6 +187,53 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertEqual(result["final_logits_shape"], [1, 16])
         self.assertTrue(all(token_count == 4 for token_count in result["cache_token_counts"]))
 
+    def test_build_scaffold_state_dict_uses_deepseek_style_projection_aliases(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config()
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self.smoke_module.make_mlp_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+
+        state_dict = self.smoke_module.build_scaffold_state_dict(
+            model,
+            projection_weights,
+            mlp_weights,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+
+        self.assertIn("embed_tokens.weight", state_dict)
+        self.assertIn("norm.weight", state_dict)
+        self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", state_dict)
+        self.assertIn("layers.0.self_attn.kv_b_proj.weight", state_dict)
+        self.assertNotIn("model.layers.0.self_attn.kv_latent_proj.weight", state_dict)
+        self.assertNotIn("model.layers.0.self_attn.k_rope_proj.weight", state_dict)
+
     def test_run_scaffold_smoke_paged_executes_prompt_and_decode(self):
         result = self.smoke_module.run_scaffold_smoke(
             mode="paged",

@@ -10,6 +10,7 @@ It is a bring-up checkpoint for the current scaffold path:
 - prompt prefill
 - iterative greedy decode
 - contiguous vs paged MLA generation parity
+- DeepSeek-style MLA projection aliases in the bounded loader path
 
 ## Recommended Command
 
