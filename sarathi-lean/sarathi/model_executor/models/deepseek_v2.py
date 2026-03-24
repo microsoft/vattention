@@ -96,6 +96,7 @@ class DeepseekV2MLAProjectionWeights:
     q_a_layernorm_weight: Optional[torch.Tensor]
     q_b_proj: Optional[torch.Tensor]
     kv_latent_proj: torch.Tensor
+    kv_a_layernorm_weight: Optional[torch.Tensor]
     k_rope_proj: torch.Tensor
     kv_up_proj: torch.Tensor
     o_proj: torch.Tensor
@@ -230,6 +231,7 @@ def make_projection_weights(
     q_a_layernorm_weight: Optional[torch.Tensor] = None,
     q_b_proj: Optional[torch.Tensor] = None,
     kv_latent_proj: torch.Tensor,
+    kv_a_layernorm_weight: Optional[torch.Tensor] = None,
     k_rope_proj: torch.Tensor,
     kv_up_proj: torch.Tensor,
     o_proj: torch.Tensor,
@@ -245,6 +247,7 @@ def make_projection_weights(
         expected_q_a_layernorm_weight = None
         expected_q_b_proj = None
     expected_kv_latent_proj = (mla_dims.hidden_size, mla_dims.kv_lora_rank)
+    expected_kv_a_layernorm_weight = (mla_dims.kv_lora_rank,)
     expected_k_rope_proj = (
         mla_dims.hidden_size,
         mla_dims.num_heads * mla_dims.qk_rope_head_dim,
@@ -275,6 +278,11 @@ def make_projection_weights(
         raise ValueError("q_b_proj shape does not match local MLA query projection size")
     if tuple(kv_latent_proj.shape) != expected_kv_latent_proj:
         raise ValueError("kv_latent_proj shape does not match local MLA latent projection size")
+    if (
+        kv_a_layernorm_weight is not None
+        and tuple(kv_a_layernorm_weight.shape) != expected_kv_a_layernorm_weight
+    ):
+        raise ValueError("kv_a_layernorm_weight shape does not match kv_lora_rank")
     if tuple(k_rope_proj.shape) != expected_k_rope_proj:
         raise ValueError("k_rope_proj shape does not match local MLA rope projection size")
     if tuple(kv_up_proj.shape) != expected_kv_up_proj:
@@ -287,6 +295,7 @@ def make_projection_weights(
         q_a_layernorm_weight=q_a_layernorm_weight,
         q_b_proj=q_b_proj,
         kv_latent_proj=kv_latent_proj,
+        kv_a_layernorm_weight=kv_a_layernorm_weight,
         k_rope_proj=k_rope_proj,
         kv_up_proj=kv_up_proj,
         o_proj=o_proj,
@@ -452,6 +461,10 @@ def project_mla_from_hidden_states(
         q_latent = q_latent * projection_weights.q_a_layernorm_weight
         query_states = q_latent @ projection_weights.q_b_proj
     kv_latent = hidden_states @ projection_weights.kv_latent_proj
+    if projection_weights.kv_a_layernorm_weight is not None:
+        variance = kv_latent.pow(2).mean(dim=-1, keepdim=True)
+        kv_latent = kv_latent * torch.rsqrt(variance + 1e-6)
+        kv_latent = kv_latent * projection_weights.kv_a_layernorm_weight
     k_rope = hidden_states @ projection_weights.k_rope_proj
     k_rope = k_rope.view(-1, mla_dims.num_heads, mla_dims.qk_rope_head_dim)
     return query_states, make_resident_cache(kv_latent, k_rope, mla_dims)
@@ -742,6 +755,7 @@ class DeepseekV2MLAAttention(nn.Module):
         q_a_layernorm_weight: Optional[torch.Tensor] = None,
         q_b_proj: Optional[torch.Tensor] = None,
         kv_latent_proj: torch.Tensor,
+        kv_a_layernorm_weight: Optional[torch.Tensor] = None,
         k_rope_proj: torch.Tensor,
         kv_up_proj: torch.Tensor,
         o_proj: torch.Tensor,
@@ -752,6 +766,7 @@ class DeepseekV2MLAAttention(nn.Module):
             q_a_layernorm_weight=q_a_layernorm_weight,
             q_b_proj=q_b_proj,
             kv_latent_proj=kv_latent_proj,
+            kv_a_layernorm_weight=kv_a_layernorm_weight,
             k_rope_proj=k_rope_proj,
             kv_up_proj=kv_up_proj,
             o_proj=o_proj,
@@ -1355,6 +1370,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     state_dict,
                     *(f"{prefix}.kv_latent_proj.weight" for prefix in projection_prefixes),
                 ),
+                "kv_a_layernorm_weight": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.kv_a_layernorm.weight" for prefix in projection_prefixes),
+                ),
                 "k_rope_proj": self._get_scaffold_tensor(
                     state_dict,
                     *(f"{prefix}.k_rope_proj.weight" for prefix in projection_prefixes),
@@ -1440,6 +1459,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     q_a_layernorm_weight=projection_tensors["q_a_layernorm_weight"],
                     q_b_proj=projection_tensors["q_b_proj"],
                     kv_latent_proj=projection_tensors["kv_latent_proj"],
+                    kv_a_layernorm_weight=projection_tensors["kv_a_layernorm_weight"],
                     k_rope_proj=projection_tensors["k_rope_proj"],
                     kv_up_proj=projection_tensors["kv_up_proj"],
                     o_proj=projection_tensors["o_proj"],

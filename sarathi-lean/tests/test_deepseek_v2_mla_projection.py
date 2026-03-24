@@ -163,6 +163,7 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
             q_a_layernorm_weight=torch.ones(dims.q_lora_rank),
             q_b_proj=torch.zeros(dims.q_lora_rank, dims.q_proj_output_dim_local),
             kv_latent_proj=torch.zeros(dims.hidden_size, dims.kv_lora_rank),
+            kv_a_layernorm_weight=torch.ones(dims.kv_lora_rank),
             k_rope_proj=torch.zeros(
                 dims.hidden_size, dims.num_heads * dims.qk_rope_head_dim
             ),
@@ -213,6 +214,7 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
                     [0.0, 0.0, 1.0],
                 ]
             ),
+            kv_a_layernorm_weight=torch.tensor([1.0, 0.5, 2.0]),
             k_rope_proj=torch.tensor(
                 [
                     [1.0, 0.0],
@@ -256,6 +258,33 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
         ) @ projection_weights.q_b_proj
         self.assertTrue(torch.allclose(query_states, expected_query_states))
         self.assertEqual(tuple(cache.kv_latent.shape), (2, dims.kv_lora_rank))
+
+    def test_project_from_hidden_states_supports_kv_a_layernorm(self):
+        dims = self._make_dims()
+        hidden_states = torch.tensor([[1.0, 2.0, 3.0, 0.0, 1.0, 0.0]])
+        projection_weights = self._make_projection_weights(dims)
+        projection_weights = deepseek_module.DeepseekV2MLAProjectionWeights(
+            q_proj=projection_weights.q_proj,
+            q_a_proj=projection_weights.q_a_proj,
+            q_a_layernorm_weight=projection_weights.q_a_layernorm_weight,
+            q_b_proj=projection_weights.q_b_proj,
+            kv_latent_proj=projection_weights.kv_latent_proj,
+            kv_a_layernorm_weight=torch.tensor([1.0, 0.5, 2.0]),
+            k_rope_proj=projection_weights.k_rope_proj,
+            kv_up_proj=projection_weights.kv_up_proj,
+            o_proj=projection_weights.o_proj,
+        )
+
+        _, cache = project_mla_from_hidden_states(hidden_states, projection_weights, dims)
+
+        kv_latent = hidden_states @ projection_weights.kv_latent_proj
+        variance = kv_latent.pow(2).mean(dim=-1, keepdim=True)
+        expected_kv_latent = (
+            kv_latent
+            * torch.rsqrt(variance + 1e-6)
+            * projection_weights.kv_a_layernorm_weight
+        )
+        self.assertTrue(torch.allclose(cache.kv_latent, expected_kv_latent))
 
     def test_project_from_hidden_states_returns_query_and_resident_cache(self):
         dims = self._make_dims()

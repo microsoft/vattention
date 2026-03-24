@@ -110,6 +110,7 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
                     [0.0, 0.0, 1.0],
                 ]
             ),
+            kv_a_layernorm_weight=torch.ones(dims.kv_lora_rank),
             k_rope_proj=torch.tensor(
                 [
                     [1.0, 0.0],
@@ -544,6 +545,58 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             torch.allclose(
                 model.model.layer_projection_weights[1].kv_up_proj,
                 projection_weights.kv_up_proj + 1,
+            )
+        )
+
+    def test_causal_lm_scaffold_loader_accepts_kv_a_layernorm_alias(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for layer_idx in range(model.model.num_layers):
+            prefix = f"layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + layer_idx
+            state_dict[f"{prefix}.kv_latent_proj.weight"] = (
+                projection_weights.kv_latent_proj + layer_idx
+            )
+            state_dict[f"{prefix}.kv_a_layernorm.weight"] = torch.full(
+                (dims.kv_lora_rank,),
+                1.0 + layer_idx,
+            )
+            state_dict[f"{prefix}.k_rope_proj.weight"] = (
+                projection_weights.k_rope_proj + layer_idx
+            )
+            state_dict[f"{prefix}.kv_up_proj.weight"] = (
+                projection_weights.kv_up_proj + layer_idx
+            )
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + layer_idx
+
+        model.load_weights(state_dict)
+
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].kv_a_layernorm_weight,
+                torch.full((dims.kv_lora_rank,), 1.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[1].kv_a_layernorm_weight,
+                torch.full((dims.kv_lora_rank,), 2.0),
             )
         )
 
