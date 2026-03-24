@@ -14,6 +14,27 @@ from sarathi.cache_ops import cache_flat
 logger = init_logger(__name__)
 
 
+def _split_resident_cache_by_lengths(cache, lengths):
+    if cache is None:
+        return tuple(None for _ in lengths)
+
+    chunks = []
+    token_offset = 0
+    for length in lengths:
+        next_offset = token_offset + length
+        chunks.append(
+            cache.__class__(
+                kv_latent=cache.kv_latent[token_offset:next_offset],
+                k_rope=cache.k_rope[token_offset:next_offset],
+            )
+        )
+        token_offset = next_offset
+
+    if token_offset != cache.num_tokens:
+        raise ValueError("resident cache token count does not match wrapper metadata lengths")
+    return tuple(chunks)
+
+
 class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
     _inst = None
 
@@ -220,5 +241,72 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
             output[token_offset : token_offset + self.decode_batch_size].copy_(
                 decode_output.reshape(-1, self.num_q_heads * self.head_dim)
             )
+
+        return output
+
+    def forward_mla(self, wrapper_inputs) -> torch.Tensor:
+        from sarathi.model_executor.models.deepseek_v2 import (
+            append_resident_cache,
+            reconstruct_dense_kv,
+        )
+
+        assert self.is_metadata_initialized, "Metadata is not initialized."
+
+        if self.is_profiling_iteration:
+            return torch.zeros(
+                wrapper_inputs.query.shape[0],
+                wrapper_inputs.mla_dims.o_proj_input_dim_local,
+                device=self.device,
+                dtype=wrapper_inputs.query.dtype,
+            )
+
+        if self.decode_cache_lens is None:
+            decode_cache_lens = []
+        else:
+            decode_cache_lens = self.decode_cache_lens.tolist()
+        query_lens = self.prefill_query_lens + [1] * len(decode_cache_lens)
+        past_lens = self.prefill_cache_lens + decode_cache_lens
+
+        current_cache_chunks = _split_resident_cache_by_lengths(
+            wrapper_inputs.new_resident_cache,
+            query_lens,
+        )
+        past_cache_chunks = _split_resident_cache_by_lengths(
+            wrapper_inputs.past_resident_cache,
+            past_lens,
+        )
+
+        output = torch.empty(
+            wrapper_inputs.query.shape[0],
+            wrapper_inputs.mla_dims.o_proj_input_dim_local,
+            device=wrapper_inputs.query.device,
+            dtype=wrapper_inputs.query.dtype,
+        )
+        token_offset = 0
+        for query_len, past_cache, current_cache in zip(
+            query_lens,
+            past_cache_chunks,
+            current_cache_chunks,
+        ):
+            full_cache = append_resident_cache(past_cache, current_cache)
+            key, value = reconstruct_dense_kv(
+                full_cache,
+                wrapper_inputs.kv_up_proj_weight,
+                wrapper_inputs.mla_dims,
+            )
+            seq_query = wrapper_inputs.query[token_offset : token_offset + query_len].unsqueeze(0)
+            seq_key = key.unsqueeze(0)
+            seq_value = value.unsqueeze(0)
+            seq_output = flash_attn_func(
+                seq_query,
+                seq_key,
+                seq_value,
+                causal=True,
+                softmax_scale=wrapper_inputs.softmax_scale,
+            )
+            output[token_offset : token_offset + query_len].copy_(
+                seq_output.reshape(query_len, -1)
+            )
+            token_offset += query_len
 
         return output
