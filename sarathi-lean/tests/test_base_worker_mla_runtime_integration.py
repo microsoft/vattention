@@ -762,6 +762,115 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             },
         )
 
+    def test_worker_can_compare_multiple_mla_runtime_patterns_via_sweep_summaries(self):
+        patterns = [
+            {
+                "name": "single_seq_grow_then_free",
+                "history": [
+                    {
+                        "event": "step",
+                        "persistent_tokens": 2,
+                        "persistent_bytes": 64,
+                        "free_blocks": 8,
+                        "active_request_count": 1,
+                        "seq_to_batch_idx": {10: 0},
+                        "active_batch_indices": (0,),
+                    },
+                    {
+                        "event": "step",
+                        "persistent_tokens": 3,
+                        "persistent_bytes": 96,
+                        "free_blocks": 7,
+                        "active_request_count": 1,
+                        "seq_to_batch_idx": {10: 0},
+                        "active_batch_indices": (0,),
+                    },
+                    {
+                        "event": "free_request",
+                        "persistent_tokens": 0,
+                        "persistent_bytes": 0,
+                        "free_blocks": 9,
+                        "active_request_count": 0,
+                        "seq_to_batch_idx": {},
+                        "active_batch_indices": (),
+                    },
+                ],
+            },
+            {
+                "name": "overlap_two_reqs",
+                "history": [
+                    {
+                        "event": "step",
+                        "persistent_tokens": 2,
+                        "persistent_bytes": 64,
+                        "free_blocks": 8,
+                        "active_request_count": 1,
+                        "seq_to_batch_idx": {10: 0},
+                        "active_batch_indices": (0,),
+                    },
+                    {
+                        "event": "step",
+                        "persistent_tokens": 5,
+                        "persistent_bytes": 160,
+                        "free_blocks": 5,
+                        "active_request_count": 2,
+                        "seq_to_batch_idx": {10: 0, 20: 1},
+                        "active_batch_indices": (0, 1),
+                    },
+                    {
+                        "event": "free_request",
+                        "persistent_tokens": 1,
+                        "persistent_bytes": 32,
+                        "free_blocks": 7,
+                        "active_request_count": 1,
+                        "seq_to_batch_idx": {20: 1},
+                        "active_batch_indices": (1,),
+                    },
+                ],
+            },
+        ]
+
+        pattern_summaries = []
+        for pattern in patterns:
+            cache_engine = _SequencedFakeCacheEngine(pattern["history"])
+            worker = self._make_worker(
+                model_runner=_FakeModelRunner(output="sampler-output"),
+                gpu_cache=("gpu-cache",),
+                seq_manager=_SequencedFakeSeqManager([["a"], ["b"], ["c"]]),
+                cache_engine=cache_engine,
+            )
+            worker.execute_model(scheduler_outputs="step-1")
+            worker.execute_model(scheduler_outputs="step-2")
+            worker.execute_model(
+                scheduler_outputs="step-3",
+                preempted_seq=[types.SimpleNamespace(seq_id=10)],
+            )
+            pattern_summaries.append(
+                worker.get_cache_usage_summary() | {"pattern_name": pattern["name"]}
+            )
+
+        sweep_summary = self.cache_engine_module.summarize_vattention_cache_sweeps(
+            pattern_summaries
+        )
+
+        self.assertEqual(sweep_summary["num_patterns"], 2)
+        self.assertEqual(
+            sweep_summary["pattern_names"],
+            ("single_seq_grow_then_free", "overlap_two_reqs"),
+        )
+        self.assertEqual(sweep_summary["max_peak_persistent_bytes"], 160)
+        self.assertEqual(sweep_summary["min_free_blocks_overall"], 5)
+        self.assertEqual(sweep_summary["max_largest_growth_bytes"], 96)
+        self.assertEqual(sweep_summary["max_largest_reclaim_bytes"], 128)
+        self.assertEqual(
+            sweep_summary["pattern_with_max_peak_bytes"],
+            "overlap_two_reqs",
+        )
+        self.assertEqual(
+            sweep_summary["pattern_with_min_free_blocks"],
+            "overlap_two_reqs",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

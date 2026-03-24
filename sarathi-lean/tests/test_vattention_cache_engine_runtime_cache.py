@@ -138,6 +138,7 @@ summarize_vattention_cache_transition = (
     cache_engine_module.summarize_vattention_cache_transition
 )
 summarize_vattention_cache_history = cache_engine_module.summarize_vattention_cache_history
+summarize_vattention_cache_sweeps = cache_engine_module.summarize_vattention_cache_sweeps
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -348,6 +349,41 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(summary["largest_growth_bytes"], 96)
         self.assertEqual(summary["largest_reclaim_bytes"], 128)
         self.assertEqual(summary["events"], ("step", "step", "free_request"))
+
+    def test_cache_usage_sweep_summary_aggregates_multiple_patterns(self):
+        pattern_summaries = (
+            {
+                "pattern_name": "single_seq_grow_then_free",
+                "peak_persistent_tokens": 3,
+                "peak_persistent_bytes": 96,
+                "min_free_blocks": 7,
+                "largest_growth_bytes": 32,
+                "largest_reclaim_bytes": 96,
+            },
+            {
+                "pattern_name": "overlap_two_reqs",
+                "peak_persistent_tokens": 5,
+                "peak_persistent_bytes": 160,
+                "min_free_blocks": 5,
+                "largest_growth_bytes": 96,
+                "largest_reclaim_bytes": 128,
+            },
+        )
+
+        sweep_summary = summarize_vattention_cache_sweeps(pattern_summaries)
+
+        self.assertEqual(sweep_summary["num_patterns"], 2)
+        self.assertEqual(
+            sweep_summary["pattern_names"],
+            ("single_seq_grow_then_free", "overlap_two_reqs"),
+        )
+        self.assertEqual(sweep_summary["max_peak_persistent_bytes"], 160)
+        self.assertEqual(sweep_summary["max_peak_persistent_tokens"], 5)
+        self.assertEqual(sweep_summary["min_free_blocks_overall"], 5)
+        self.assertEqual(sweep_summary["max_largest_growth_bytes"], 96)
+        self.assertEqual(sweep_summary["max_largest_reclaim_bytes"], 128)
+        self.assertEqual(sweep_summary["pattern_with_max_peak_bytes"], "overlap_two_reqs")
+        self.assertEqual(sweep_summary["pattern_with_min_free_blocks"], "overlap_two_reqs")
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(

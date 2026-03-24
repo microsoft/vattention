@@ -145,6 +145,62 @@ def summarize_vattention_cache_history(history, transitions=None) -> dict:
     }
 
 
+def summarize_vattention_cache_sweeps(pattern_summaries) -> dict:
+    pattern_summaries = tuple(pattern_summaries)
+    if not pattern_summaries:
+        return {
+            "num_patterns": 0,
+            "pattern_names": (),
+            "max_peak_persistent_bytes": 0,
+            "max_peak_persistent_tokens": 0,
+            "min_free_blocks_overall": None,
+            "max_largest_growth_bytes": 0,
+            "max_largest_reclaim_bytes": 0,
+            "pattern_with_max_peak_bytes": None,
+            "pattern_with_min_free_blocks": None,
+        }
+
+    def _pattern_name(summary):
+        return summary.get("pattern_name")
+
+    max_peak_summary = max(
+        pattern_summaries,
+        key=lambda summary: summary["peak_persistent_bytes"],
+    )
+    free_block_summaries = [
+        summary for summary in pattern_summaries
+        if summary.get("min_free_blocks") is not None
+    ]
+    min_free_summary = (
+        min(free_block_summaries, key=lambda summary: summary["min_free_blocks"])
+        if free_block_summaries
+        else None
+    )
+    return {
+        "num_patterns": len(pattern_summaries),
+        "pattern_names": tuple(_pattern_name(summary) for summary in pattern_summaries),
+        "max_peak_persistent_bytes": max(
+            summary["peak_persistent_bytes"] for summary in pattern_summaries
+        ),
+        "max_peak_persistent_tokens": max(
+            summary["peak_persistent_tokens"] for summary in pattern_summaries
+        ),
+        "min_free_blocks_overall": (
+            None if min_free_summary is None else min_free_summary["min_free_blocks"]
+        ),
+        "max_largest_growth_bytes": max(
+            summary["largest_growth_bytes"] for summary in pattern_summaries
+        ),
+        "max_largest_reclaim_bytes": max(
+            summary["largest_reclaim_bytes"] for summary in pattern_summaries
+        ),
+        "pattern_with_max_peak_bytes": _pattern_name(max_peak_summary),
+        "pattern_with_min_free_blocks": (
+            None if min_free_summary is None else _pattern_name(min_free_summary)
+        ),
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (
