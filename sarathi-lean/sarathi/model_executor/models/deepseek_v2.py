@@ -1968,7 +1968,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             return tensor
 
         shard_size = expected_local_shape[shard_dim]
-        tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = self._get_tensor_model_parallel_rank()
         shard_start = tp_rank * shard_size
         shard_end = shard_start + shard_size
         if shard_dim == 0:
@@ -2014,10 +2014,17 @@ class DeepseekV2ForCausalLM(nn.Module):
 
         kv_latent_proj = tensor[:, : mla_dims.kv_lora_rank].contiguous()
         rope_width_local = mla_dims.num_heads * mla_dims.qk_rope_head_dim
-        rope_start = mla_dims.kv_lora_rank + get_tensor_model_parallel_rank() * rope_width_local
+        rope_start = mla_dims.kv_lora_rank + self._get_tensor_model_parallel_rank() * rope_width_local
         rope_end = rope_start + rope_width_local
         k_rope_proj = tensor[:, rope_start:rope_end].contiguous()
         return kv_latent_proj, k_rope_proj
+
+    @staticmethod
+    def _get_tensor_model_parallel_rank() -> int:
+        try:
+            return get_tensor_model_parallel_rank()
+        except (AssertionError, RuntimeError):
+            return 0
 
     def _normalize_mlp_tensor_layouts(
         self,

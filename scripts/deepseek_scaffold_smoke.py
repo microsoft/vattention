@@ -20,8 +20,8 @@ def build_config(query_mode="direct", mlp_mode="dense"):
     config = SimpleNamespace(
         vocab_size=16,
         hidden_size=6,
-        intermediate_size=4,
-        moe_intermediate_size=4,
+        intermediate_size=8,
+        moe_intermediate_size=8,
         num_attention_heads=4,
         num_hidden_layers=4,
         max_position_embeddings=128,
@@ -512,6 +512,7 @@ def _run_scaffold_smoke_artifacts(
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
         set_pipeline_model_parallel_world_size,
+        set_tensor_model_parallel_rank,
         set_tensor_model_parallel_world_size,
     )
     from sarathi.model_executor.models.deepseek_v2 import (
@@ -524,6 +525,7 @@ def _run_scaffold_smoke_artifacts(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.float16 if device.type == "cuda" else torch.float32
     set_tensor_model_parallel_world_size(2)
+    set_tensor_model_parallel_rank(0)
     set_pipeline_model_parallel_world_size(1)
     set_pipeline_model_parallel_rank(0)
 
