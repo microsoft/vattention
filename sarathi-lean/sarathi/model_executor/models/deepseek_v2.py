@@ -271,6 +271,27 @@ def make_component_mla_kv_cache(
     )
 
 
+def make_runtime_mla_kv_caches(
+    num_layers: int,
+    batch_size: int,
+    max_seq_len: int,
+    mla_dims: DeepseekV2MLADims,
+    *,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tuple[DeepseekV2ComponentMLAKVCache, ...]:
+    return tuple(
+        make_component_mla_kv_cache(
+            batch_size=batch_size,
+            max_seq_len=max_seq_len,
+            mla_dims=mla_dims,
+            device=device,
+            dtype=dtype,
+        )
+        for _ in range(num_layers)
+    )
+
+
 def is_component_mla_kv_cache(kv_cache: object) -> bool:
     return isinstance(kv_cache, DeepseekV2ComponentMLAKVCache)
 
@@ -904,6 +925,24 @@ class DeepseekV2Model(nn.Module):
             next_caches.append(next_cache)
         return hidden_states, tuple(next_caches)
 
+    def make_runtime_mla_kv_caches(
+        self,
+        batch_size: int,
+        max_seq_len: int,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> Tuple[DeepseekV2ComponentMLAKVCache, ...]:
+        mla_dims = self.layers[0].self_attn.mla_dims
+        return make_runtime_mla_kv_caches(
+            num_layers=self.num_layers,
+            batch_size=batch_size,
+            max_seq_len=max_seq_len,
+            mla_dims=mla_dims,
+            device=device,
+            dtype=dtype,
+        )
+
 
 class DeepseekV2ForCausalLM(nn.Module):
 
@@ -949,4 +988,19 @@ class DeepseekV2ForCausalLM(nn.Module):
             attention_wrapper=attention_wrapper,
             caches=caches,
             softmax_scale=softmax_scale,
+        )
+
+    def make_runtime_mla_kv_caches(
+        self,
+        batch_size: int,
+        max_seq_len: int,
+        *,
+        device: Optional[torch.device] = None,
+        dtype: torch.dtype = torch.float32,
+    ) -> Tuple[DeepseekV2ComponentMLAKVCache, ...]:
+        return self.model.make_runtime_mla_kv_caches(
+            batch_size=batch_size,
+            max_seq_len=max_seq_len,
+            device=device,
+            dtype=dtype,
         )
