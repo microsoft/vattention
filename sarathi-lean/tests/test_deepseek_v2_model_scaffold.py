@@ -65,6 +65,8 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         return types.SimpleNamespace(
             vocab_size=32000,
             hidden_size=5120,
+            intermediate_size=12288,
+            moe_intermediate_size=1408,
             num_attention_heads=128,
             num_hidden_layers=60,
             rms_norm_eps=1e-6,
@@ -79,6 +81,8 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         return types.SimpleNamespace(
             vocab_size=16,
             hidden_size=6,
+            intermediate_size=8,
+            moe_intermediate_size=8,
             num_attention_heads=4,
             num_hidden_layers=4,
             rms_norm_eps=1e-6,
@@ -963,6 +967,194 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
                 torch.allclose(
                     model.model.layer_projection_weights[0].o_proj,
                     expected_projection_weights.o_proj,
+                )
+            )
+
+    def test_causal_lm_loader_slices_global_mlp_and_moe_weights_by_tensor_parallel_rank(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_rank,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_moe_config()
+        config.num_experts_per_tok = 1
+        config.norm_topk_prob = True
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        rank0_dense_mlp = make_mlp_weights(
+            gate_proj=torch.full((config.hidden_size, 4), 1.0),
+            up_proj=torch.full((config.hidden_size, 4), 2.0),
+            down_proj=torch.full((4, config.hidden_size), 3.0),
+            hidden_size=config.hidden_size,
+        )
+        rank1_dense_mlp = make_mlp_weights(
+            gate_proj=rank0_dense_mlp.gate_proj + 10.0,
+            up_proj=rank0_dense_mlp.up_proj + 20.0,
+            down_proj=rank0_dense_mlp.down_proj + 30.0,
+            hidden_size=config.hidden_size,
+        )
+        rank0_shared_mlp = make_mlp_weights(
+            gate_proj=torch.full((config.hidden_size, 4), 4.0),
+            up_proj=torch.full((config.hidden_size, 4), 5.0),
+            down_proj=torch.full((4, config.hidden_size), 6.0),
+            hidden_size=config.hidden_size,
+        )
+        rank1_shared_mlp = make_mlp_weights(
+            gate_proj=rank0_shared_mlp.gate_proj + 10.0,
+            up_proj=rank0_shared_mlp.up_proj + 20.0,
+            down_proj=rank0_shared_mlp.down_proj + 30.0,
+            hidden_size=config.hidden_size,
+        )
+        rank0_expert_mlps = tuple(
+            make_mlp_weights(
+                gate_proj=torch.full((config.hidden_size, 4), 10.0 + expert_idx),
+                up_proj=torch.full((config.hidden_size, 4), 20.0 + expert_idx),
+                down_proj=torch.full((4, config.hidden_size), 30.0 + expert_idx),
+                hidden_size=config.hidden_size,
+            )
+            for expert_idx in range(config.n_routed_experts)
+        )
+        rank1_expert_mlps = tuple(
+            make_mlp_weights(
+                gate_proj=expert_mlp.gate_proj + 100.0,
+                up_proj=expert_mlp.up_proj + 200.0,
+                down_proj=expert_mlp.down_proj + 300.0,
+                hidden_size=config.hidden_size,
+            )
+            for expert_mlp in rank0_expert_mlps
+        )
+        routed_gate = torch.arange(
+            config.n_routed_experts * config.hidden_size,
+            dtype=torch.float32,
+        ).view(config.n_routed_experts, config.hidden_size)
+        state_dict = {
+            "model.embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "model.norm.weight": torch.ones(config.hidden_size),
+        }
+        for layer_idx in range(config.num_hidden_layers):
+            attn_prefix = f"model.layers.{layer_idx}.self_attn"
+            state_dict[f"{attn_prefix}.q_proj.weight"] = projection_weights.q_proj
+            state_dict[f"{attn_prefix}.kv_a_proj_with_mqa.weight"] = torch.cat(
+                [
+                    projection_weights.kv_latent_proj,
+                    projection_weights.k_rope_proj,
+                ],
+                dim=1,
+            )
+            state_dict[f"{attn_prefix}.kv_b_proj.weight"] = projection_weights.kv_up_proj
+            state_dict[f"{attn_prefix}.o_proj.weight"] = projection_weights.o_proj
+            mlp_prefix = f"model.layers.{layer_idx}.mlp"
+            if layer_idx < config.first_k_dense_replace:
+                state_dict[f"{mlp_prefix}.gate_proj.weight"] = torch.cat(
+                    [rank0_dense_mlp.gate_proj, rank1_dense_mlp.gate_proj],
+                    dim=1,
+                )
+                state_dict[f"{mlp_prefix}.up_proj.weight"] = torch.cat(
+                    [rank0_dense_mlp.up_proj, rank1_dense_mlp.up_proj],
+                    dim=1,
+                )
+                state_dict[f"{mlp_prefix}.down_proj.weight"] = torch.cat(
+                    [rank0_dense_mlp.down_proj, rank1_dense_mlp.down_proj],
+                    dim=0,
+                )
+            else:
+                state_dict[f"{mlp_prefix}.gate.weight"] = routed_gate
+                state_dict[f"{mlp_prefix}.shared_experts.gate_proj.weight"] = torch.cat(
+                    [rank0_shared_mlp.gate_proj, rank1_shared_mlp.gate_proj],
+                    dim=1,
+                )
+                state_dict[f"{mlp_prefix}.shared_experts.up_proj.weight"] = torch.cat(
+                    [rank0_shared_mlp.up_proj, rank1_shared_mlp.up_proj],
+                    dim=1,
+                )
+                state_dict[f"{mlp_prefix}.shared_experts.down_proj.weight"] = torch.cat(
+                    [rank0_shared_mlp.down_proj, rank1_shared_mlp.down_proj],
+                    dim=0,
+                )
+                for expert_idx in range(config.n_routed_experts):
+                    state_dict[f"{mlp_prefix}.experts.{expert_idx}.gate_proj.weight"] = torch.cat(
+                        [
+                            rank0_expert_mlps[expert_idx].gate_proj,
+                            rank1_expert_mlps[expert_idx].gate_proj,
+                        ],
+                        dim=1,
+                    )
+                    state_dict[f"{mlp_prefix}.experts.{expert_idx}.up_proj.weight"] = torch.cat(
+                        [
+                            rank0_expert_mlps[expert_idx].up_proj,
+                            rank1_expert_mlps[expert_idx].up_proj,
+                        ],
+                        dim=1,
+                    )
+                    state_dict[f"{mlp_prefix}.experts.{expert_idx}.down_proj.weight"] = torch.cat(
+                        [
+                            rank0_expert_mlps[expert_idx].down_proj,
+                            rank1_expert_mlps[expert_idx].down_proj,
+                        ],
+                        dim=0,
+                    )
+
+        for rank, expected_dense_mlp, expected_shared_mlp, expected_expert_mlps in (
+            (0, rank0_dense_mlp, rank0_shared_mlp, rank0_expert_mlps),
+            (1, rank1_dense_mlp, rank1_shared_mlp, rank1_expert_mlps),
+        ):
+            set_tensor_model_parallel_rank(rank)
+            model = DeepseekV2ForCausalLM(config)
+            model.load_weights(state_dict)
+
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_mlp_weights[0].gate_proj,
+                    expected_dense_mlp.gate_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_mlp_weights[0].up_proj,
+                    expected_dense_mlp.up_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_mlp_weights[0].down_proj,
+                    expected_dense_mlp.down_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].gate,
+                    routed_gate,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].shared_experts.gate_proj,
+                    expected_shared_mlp.gate_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].shared_experts.down_proj,
+                    expected_shared_mlp.down_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].experts[0].up_proj,
+                    expected_expert_mlps[0].up_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].experts[-1].down_proj,
+                    expected_expert_mlps[-1].down_proj,
                 )
             )
 

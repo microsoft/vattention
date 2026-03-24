@@ -1708,6 +1708,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             mlp_tensors = self._normalize_mlp_tensor_layouts(
                 mlp_tensors,
                 hidden_size=hidden_size,
+                intermediate_size=getattr(self.config, "intermediate_size", None),
             )
             present_mlp_keys = [
                 name for name, tensor in mlp_tensors.items() if tensor is not None
@@ -1754,6 +1755,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             shared_expert_tensors = self._normalize_mlp_tensor_layouts(
                 shared_expert_tensors,
                 hidden_size=hidden_size,
+                intermediate_size=getattr(self.config, "moe_intermediate_size", None),
             )
             routed_experts = []
             for expert_idx in range(n_routed_experts):
@@ -1792,6 +1794,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 expert_tensors = self._normalize_mlp_tensor_layouts(
                     expert_tensors,
                     hidden_size=hidden_size,
+                    intermediate_size=getattr(self.config, "moe_intermediate_size", None),
                 )
                 try:
                     expert_weights = self._make_optional_mlp_weights(
@@ -2016,13 +2019,39 @@ class DeepseekV2ForCausalLM(nn.Module):
         k_rope_proj = tensor[:, rope_start:rope_end].contiguous()
         return kv_latent_proj, k_rope_proj
 
-    @classmethod
     def _normalize_mlp_tensor_layouts(
-        cls,
+        self,
         tensors: Mapping[str, Optional[torch.Tensor]],
         *,
         hidden_size: int,
+        intermediate_size: Optional[int] = None,
     ) -> Mapping[str, Optional[torch.Tensor]]:
+        if intermediate_size is not None:
+            if intermediate_size % self.model.tensor_parallel_world_size != 0:
+                raise ValueError(
+                    "DeepSeek-V2 intermediate size must divide evenly across tensor parallel ranks"
+                )
+            local_intermediate_size = (
+                intermediate_size // self.model.tensor_parallel_world_size
+            )
+            return {
+                "gate_proj": self._coerce_and_slice_tensor_parallel_linear_weight(
+                    tensors.get("gate_proj"),
+                    expected_local_shape=(hidden_size, local_intermediate_size),
+                    shard_dim=1,
+                ),
+                "up_proj": self._coerce_and_slice_tensor_parallel_linear_weight(
+                    tensors.get("up_proj"),
+                    expected_local_shape=(hidden_size, local_intermediate_size),
+                    shard_dim=1,
+                ),
+                "down_proj": self._coerce_and_slice_tensor_parallel_linear_weight(
+                    tensors.get("down_proj"),
+                    expected_local_shape=(local_intermediate_size, hidden_size),
+                    shard_dim=0,
+                ),
+            }
+
         normalized = dict(tensors)
         for name in ("gate_proj", "up_proj"):
             tensor = normalized.get(name)
@@ -2031,7 +2060,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             intermediate_size = (
                 tensor.shape[1] if tensor.shape[0] == hidden_size else tensor.shape[0]
             )
-            normalized[name] = cls._coerce_linear_weight_layout(
+            normalized[name] = self._coerce_linear_weight_layout(
                 tensor,
                 expected_shape=(hidden_size, intermediate_size),
             )
@@ -2042,7 +2071,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 if down_proj.shape[1] == hidden_size
                 else down_proj.shape[1]
             )
-            normalized["down_proj"] = cls._coerce_linear_weight_layout(
+            normalized["down_proj"] = self._coerce_linear_weight_layout(
                 down_proj,
                 expected_shape=(intermediate_size, hidden_size),
             )
