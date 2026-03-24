@@ -128,6 +128,33 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
         self.batch_index = batch_idx.to(torch.int32)
         self.batch_index_gen = batch_idx_gen.to(torch.int32)
 
+    def set_mla_runtime_metadata(
+        self,
+        *,
+        prefill_query_lens,
+        prefill_cache_lens,
+        decode_cache_lens=None,
+        batch_index=None,
+        batch_index_gen=None,
+    ) -> None:
+        self.prefill_query_lens = list(prefill_query_lens)
+        self.prefill_cache_lens = list(prefill_cache_lens)
+        self.decode_cache_lens = (
+            None
+            if decode_cache_lens is None
+            else torch.tensor(decode_cache_lens, dtype=torch.int32, device=self.device)
+        )
+        self.batch_index = (
+            None
+            if batch_index is None
+            else torch.tensor(batch_index, dtype=torch.int32, device=self.device)
+        )
+        self.batch_index_gen = (
+            None
+            if batch_index_gen is None
+            else torch.tensor(batch_index_gen, dtype=torch.int32, device=self.device)
+        )
+
     def forward(
         self,
         query: torch.Tensor,
