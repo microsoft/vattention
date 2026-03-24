@@ -207,6 +207,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(result["prompt_token_ids"], [1, 3])
         self.assertTrue(result["generated_tokens_match"])
         self.assertTrue(result["final_logits_match"])
@@ -219,6 +220,56 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertTrue(
             all(token_count == 4 for token_count in result["paged_cache_token_counts"])
         )
+
+    def test_validate_scaffold_smoke_compare_returns_compare_result(self):
+        result = self.smoke_module.validate_scaffold_smoke_compare(
+            prompt_token_ids=(1, 3),
+            max_new_tokens=3,
+        )
+
+        self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["generated_tokens_match"])
+        self.assertTrue(result["final_logits_match"])
+        self.assertTrue(result["cache_token_counts_match"])
+
+    def test_compare_scaffold_smoke_reports_blocked_paged_runtime_errors(self):
+        original = self.smoke_module._run_scaffold_smoke_artifacts
+
+        def _fake_run(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
+            del prompt_token_ids, max_new_tokens
+            if mode == "paged":
+                raise RuntimeError("real paged wrapper blocker")
+            return (
+                torch.tensor([1, 2, 3], dtype=torch.long),
+                torch.zeros(1, 16),
+                tuple(types.SimpleNamespace(num_tokens=4) for _ in range(2)),
+            )
+
+        try:
+            self.smoke_module._run_scaffold_smoke_artifacts = _fake_run
+            result = self.smoke_module.compare_scaffold_smoke()
+        finally:
+            self.smoke_module._run_scaffold_smoke_artifacts = original
+
+        self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["prompt_token_ids"], [1, 3])
+        self.assertEqual(result["generated_token_ids"], [1, 2, 3])
+        self.assertIn("real paged wrapper blocker", result["error"])
+
+    def test_validate_scaffold_smoke_compare_raises_for_blocked_runtime(self):
+        original = self.smoke_module.compare_scaffold_smoke
+        try:
+            self.smoke_module.compare_scaffold_smoke = lambda **_: {
+                "mode": "compare",
+                "status": "blocked",
+                "error": "real paged wrapper blocker",
+            }
+            with self.assertRaises(RuntimeError):
+                self.smoke_module.validate_scaffold_smoke_compare()
+        finally:
+            self.smoke_module.compare_scaffold_smoke = original
 
 
 if __name__ == "__main__":
