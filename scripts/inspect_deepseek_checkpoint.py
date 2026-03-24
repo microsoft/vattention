@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 
 from sarathi.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM
 from sarathi.model_executor.weight_utils import convert_pyslice_to_tensor, hf_model_weights_iterator
@@ -24,23 +25,46 @@ def _load_weight_names_and_config(checkpoint_path):
     return tuple(sorted(state_dict.keys())), config
 
 
+def _extract_layer_indices(names):
+    layer_indices = set()
+    pattern = re.compile(r"(?:^|\.)(?:model\.)?layers\.(\d+)\.")
+    for name in names:
+        match = pattern.search(name)
+        if match is not None:
+            layer_indices.add(int(match.group(1)))
+    return tuple(sorted(layer_indices))
+
+
+def _has_name(names, suffix):
+    return any(name.endswith(suffix) for name in names)
+
+
+def _layer_has_name(names, layer_idx, suffix):
+    return any(
+        name.endswith(f"layers.{layer_idx}.{suffix}")
+        or name.endswith(f"model.layers.{layer_idx}.{suffix}")
+        for name in names
+    )
+
+
 def inspect_deepseek_checkpoint(checkpoint_path):
     names, config = _load_weight_names_and_config(checkpoint_path)
+    layer_indices = _extract_layer_indices(names)
 
-    has_q_proj = any(name.endswith(".self_attn.q_proj.weight") for name in names)
+    has_q_proj = _has_name(names, ".self_attn.q_proj.weight")
     has_q_lora = all(
-        any(name.endswith(suffix) for name in names)
+        _has_name(names, suffix)
         for suffix in (
             ".self_attn.q_a_proj.weight",
             ".self_attn.q_a_layernorm.weight",
             ".self_attn.q_b_proj.weight",
         )
     )
-    has_combined_kv = any(name.endswith(".self_attn.kv_a_proj_with_mqa.weight") for name in names)
-    has_kv_a_layernorm = any(name.endswith(".self_attn.kv_a_layernorm.weight") for name in names)
-    has_kv_b_proj = any(name.endswith(".self_attn.kv_b_proj.weight") for name in names)
+    has_combined_kv = _has_name(names, ".self_attn.kv_a_proj_with_mqa.weight")
+    has_kv_a_layernorm = _has_name(names, ".self_attn.kv_a_layernorm.weight")
+    has_kv_b_proj = _has_name(names, ".self_attn.kv_b_proj.weight")
     has_dense_mlp = all(
-        any(name.endswith(suffix) for name in names)
+        _has_name(names, suffix)
         for suffix in (
             ".mlp.gate_proj.weight",
             ".mlp.up_proj.weight",
@@ -53,6 +77,14 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         or ".mlp.experts." in name
         for name in names
     )
+    moe_layer_indices = tuple(
+        layer_idx
+        for layer_idx in layer_indices
+        if _layer_has_name(names, layer_idx, "mlp.gate.weight")
+    )
+    config_first_k_dense_replace = None if config is None else config.get("first_k_dense_replace")
+    config_n_routed_experts = None if config is None else config.get("n_routed_experts")
+    config_n_shared_experts = None if config is None else config.get("n_shared_experts")
 
     status = "supported_non_moe_surface"
     blockers = []
@@ -63,15 +95,56 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         status = "blocked"
         blockers.append("missing_kv_projection_surface")
     if has_moe:
-        status = "blocked"
-        blockers.append("moe_not_supported")
+        if config_first_k_dense_replace is None or not config_n_routed_experts:
+            status = "blocked"
+            blockers.append("missing_moe_config")
+        else:
+            for layer_idx in moe_layer_indices:
+                if layer_idx < config_first_k_dense_replace:
+                    status = "blocked"
+                    blockers.append("moe_before_first_k_dense_replace")
+                    break
+                if not _layer_has_name(names, layer_idx, "mlp.gate.weight"):
+                    status = "blocked"
+                    blockers.append("missing_moe_gate")
+                    break
+                if config_n_shared_experts:
+                    for suffix in (
+                        "mlp.shared_experts.gate_proj.weight",
+                        "mlp.shared_experts.up_proj.weight",
+                        "mlp.shared_experts.down_proj.weight",
+                    ):
+                        if not _layer_has_name(names, layer_idx, suffix):
+                            status = "blocked"
+                            blockers.append("missing_shared_expert_weights")
+                            break
+                    if blockers:
+                        break
+                for expert_idx in range(config_n_routed_experts):
+                    for suffix in (
+                        f"mlp.experts.{expert_idx}.gate_proj.weight",
+                        f"mlp.experts.{expert_idx}.up_proj.weight",
+                        f"mlp.experts.{expert_idx}.down_proj.weight",
+                    ):
+                        if not _layer_has_name(names, layer_idx, suffix):
+                            status = "blocked"
+                            blockers.append("missing_routed_expert_weights")
+                            break
+                    if blockers:
+                        break
+                if blockers:
+                    break
+        if not blockers:
+            status = "supported_bounded_moe_surface"
 
     return {
         "status": status,
         "checkpoint_path": checkpoint_path,
         "config_model_type": None if config is None else config.get("model_type"),
         "config_q_lora_rank": None if config is None else config.get("q_lora_rank"),
-        "config_n_routed_experts": None if config is None else config.get("n_routed_experts"),
+        "config_first_k_dense_replace": config_first_k_dense_replace,
+        "config_n_routed_experts": config_n_routed_experts,
+        "config_n_shared_experts": config_n_shared_experts,
         "has_q_proj": has_q_proj,
         "has_q_lora": has_q_lora,
         "has_combined_kv": has_combined_kv,
@@ -79,6 +152,7 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         "has_kv_b_proj": has_kv_b_proj,
         "has_dense_mlp": has_dense_mlp,
         "has_moe": has_moe,
+        "moe_layer_indices": list(moe_layer_indices),
         "blockers": blockers,
         "num_tensors": len(names),
     }

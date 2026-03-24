@@ -64,8 +64,8 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.smoke_module, self.inspect_module = _load_modules()
         self.deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
 
-    def _make_model_and_weights(self, *, query_mode="direct"):
-        config = self.smoke_module.build_config(query_mode=query_mode)
+    def _make_model_and_weights(self, *, query_mode="direct", mlp_mode="dense"):
+        config = self.smoke_module.build_config(query_mode=query_mode, mlp_mode=mlp_mode)
         model = self.deepseek_module.DeepseekV2ForCausalLM(
             config,
             tensor_parallel_world_size=2,
@@ -87,18 +87,44 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
             for _ in range(model.model.num_layers)
         )
         mlp_weights = tuple(
-            self.smoke_module.make_mlp_weights(
-                self.deepseek_module,
-                config.hidden_size,
-                device=torch.device("cpu"),
-                dtype=torch.float32,
+            (
+                self.smoke_module.make_mlp_weights(
+                    self.deepseek_module,
+                    config.hidden_size,
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                )
+                if (
+                    mlp_mode != "moe"
+                    or layer_idx < getattr(config, "first_k_dense_replace", model.model.num_layers)
+                )
+                else None
             )
-            for _ in range(model.model.num_layers)
+            for layer_idx in range(model.model.num_layers)
         )
-        return model, projection_weights, mlp_weights
+        if mlp_mode == "moe":
+            moe_weights = tuple(
+                (
+                    None
+                    if layer_idx < config.first_k_dense_replace
+                    else self.smoke_module.make_moe_weights(
+                        self.deepseek_module,
+                        config.hidden_size,
+                        device=torch.device("cpu"),
+                        dtype=torch.float32,
+                        num_experts=config.n_routed_experts,
+                    )
+                )
+                for layer_idx in range(model.model.num_layers)
+            )
+        else:
+            moe_weights = tuple(None for _ in range(model.model.num_layers))
+        return model, projection_weights, mlp_weights, moe_weights
 
     def test_inspect_checkpoint_reports_supported_direct_hf_directory(self):
-        model, projection_weights, mlp_weights = self._make_model_and_weights(query_mode="direct")
+        model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
+            query_mode="direct"
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
                 model,
@@ -107,6 +133,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
                 device=torch.device("cpu"),
                 dtype=torch.float32,
                 output_dir=tmpdir,
+                moe_weights=moe_weights,
             )
             result = self.inspect_module.inspect_deepseek_checkpoint(checkpoint_dir)
 
@@ -118,7 +145,9 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertEqual(result["config_model_type"], "deepseek_v2")
 
     def test_inspect_checkpoint_reports_supported_q_lora_hf_directory(self):
-        model, projection_weights, mlp_weights = self._make_model_and_weights(query_mode="q_lora")
+        model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
+            query_mode="q_lora"
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
                 model,
@@ -127,6 +156,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
                 device=torch.device("cpu"),
                 dtype=torch.float32,
                 output_dir=tmpdir,
+                moe_weights=moe_weights,
             )
             result = self.inspect_module.inspect_deepseek_checkpoint(checkpoint_dir)
 
@@ -135,8 +165,11 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertTrue(result["has_q_lora"])
         self.assertEqual(result["config_q_lora_rank"], 2)
 
-    def test_inspect_checkpoint_reports_moe_blocker(self):
-        model, projection_weights, mlp_weights = self._make_model_and_weights(query_mode="direct")
+    def test_inspect_checkpoint_reports_supported_bounded_moe_surface(self):
+        model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
+            query_mode="direct",
+            mlp_mode="moe",
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
                 model,
@@ -145,29 +178,48 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
                 device=torch.device("cpu"),
                 dtype=torch.float32,
                 output_dir=tmpdir,
+                moe_weights=moe_weights,
+            )
+            result = self.inspect_module.inspect_deepseek_checkpoint(checkpoint_dir)
+
+        self.assertEqual(result["status"], "supported_bounded_moe_surface")
+        self.assertTrue(result["has_moe"])
+        self.assertEqual(result["config_first_k_dense_replace"], 1)
+        self.assertEqual(result["config_n_routed_experts"], 4)
+        self.assertEqual(result["moe_layer_indices"], [1, 2, 3])
+
+    def test_inspect_checkpoint_reports_incomplete_moe_blocker(self):
+        model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
+            query_mode="direct",
+            mlp_mode="moe",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                output_dir=tmpdir,
+                moe_weights=moe_weights,
             )
             shard_path = Path(checkpoint_dir) / "model-00001-of-00002.safetensors"
             from safetensors.torch import load_file, save_file
 
             shard_state = load_file(shard_path)
-            shard_state["layers.1.mlp.gate.weight"] = torch.zeros(4, model.config.hidden_size)
-            shard_state["layers.1.mlp.shared_experts.gate_proj.weight"] = torch.zeros(
-                model.config.hidden_size,
-                4,
-            )
+            del shard_state["layers.1.mlp.experts.0.down_proj.weight"]
             save_file(shard_state, shard_path)
 
             index_path = Path(checkpoint_dir) / "model.safetensors.index.json"
             index = json.loads(index_path.read_text())
-            index["weight_map"]["layers.1.mlp.gate.weight"] = shard_path.name
-            index["weight_map"]["layers.1.mlp.shared_experts.gate_proj.weight"] = shard_path.name
+            del index["weight_map"]["layers.1.mlp.experts.0.down_proj.weight"]
             index_path.write_text(json.dumps(index, indent=2, sort_keys=True))
 
             result = self.inspect_module.inspect_deepseek_checkpoint(checkpoint_dir)
 
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["has_moe"])
-        self.assertIn("moe_not_supported", result["blockers"])
+        self.assertIn("missing_routed_expert_weights", result["blockers"])
 
 
 if __name__ == "__main__":

@@ -284,6 +284,67 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertIn("layers.0.self_attn.q_b_proj.weight", state_dict)
         self.assertNotIn("layers.0.self_attn.q_proj.weight", state_dict)
 
+    def test_build_scaffold_state_dict_emits_bounded_moe_weights(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config(mlp_mode="moe")
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self.smoke_module.make_mlp_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            if layer_idx < config.first_k_dense_replace
+            else None
+            for layer_idx in range(model.model.num_layers)
+        )
+        moe_weights = tuple(
+            None
+            if layer_idx < config.first_k_dense_replace
+            else self.smoke_module.make_moe_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                num_experts=config.n_routed_experts,
+            )
+            for layer_idx in range(model.model.num_layers)
+        )
+
+        state_dict = self.smoke_module.build_scaffold_state_dict(
+            model,
+            projection_weights,
+            mlp_weights,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            moe_weights=moe_weights,
+        )
+
+        self.assertIn("layers.0.mlp.gate_proj.weight", state_dict)
+        self.assertIn("layers.1.mlp.gate.weight", state_dict)
+        self.assertIn("layers.1.mlp.shared_experts.gate_proj.weight", state_dict)
+        self.assertIn("layers.1.mlp.experts.0.gate_proj.weight", state_dict)
+        self.assertNotIn("layers.1.mlp.gate_proj.weight", state_dict)
+
     def test_write_scaffold_checkpoint_emits_pt_checkpoint_file(self):
         deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
         config = self.smoke_module.build_config()
@@ -568,6 +629,20 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertTrue(result["final_logits_match"])
         self.assertTrue(result["cache_token_counts_match"])
 
+    def test_compare_scaffold_smoke_matches_bounded_moe_generation(self):
+        result = self.smoke_module.compare_scaffold_smoke(
+            prompt_token_ids=(1, 3),
+            max_new_tokens=3,
+            mlp_mode="moe",
+        )
+
+        self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["mlp_mode"], "moe")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["generated_tokens_match"])
+        self.assertTrue(result["final_logits_match"])
+        self.assertTrue(result["cache_token_counts_match"])
+
     def test_compare_scaffold_smoke_matches_hf_directory_generation(self):
         result = self.smoke_module.compare_scaffold_smoke(
             prompt_token_ids=(1, 3),
@@ -592,8 +667,16 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
             checkpoint_format="pt",
             query_mode="direct",
             checkpoint_layout="single_file",
+            mlp_mode="dense",
         ):
-            del prompt_token_ids, max_new_tokens, checkpoint_format, query_mode, checkpoint_layout
+            del (
+                prompt_token_ids,
+                max_new_tokens,
+                checkpoint_format,
+                query_mode,
+                checkpoint_layout,
+                mlp_mode,
+            )
             if mode == "paged":
                 raise RuntimeError("real paged wrapper blocker")
             return (
