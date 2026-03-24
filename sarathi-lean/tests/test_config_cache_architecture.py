@@ -65,6 +65,7 @@ def _load_config_module():
 
 config_module = _load_config_module()
 CacheArchitecture = config_module.CacheArchitecture
+CacheLayout = config_module.CacheLayout
 ModelConfig = config_module.ModelConfig
 ParallelConfig = config_module.ParallelConfig
 
@@ -220,6 +221,31 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             16 * per_token_local,
         )
 
+    def test_dense_kv_cache_layout_packages_all_derived_fields(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+        page_size = 2 * 1024 * 1024
+
+        layout = model_config.get_cache_layout(page_size, parallel_config)
+
+        self.assertIsInstance(layout, CacheLayout)
+        self.assertEqual(layout.architecture, CacheArchitecture.DENSE_KV)
+        self.assertFalse(layout.megacache)
+        self.assertEqual(layout.cached_token_bytes_per_layer, 2 * (2 * 4 * 128))
+        self.assertEqual(layout.cached_token_bytes_local, 12 * (2 * 2 * 4 * 128))
+        self.assertEqual(layout.page_buffer_token_bytes, 2 * 4 * 128)
+        self.assertEqual(layout.tokens_per_page, page_size // (2 * 4 * 128))
+
     def test_mla_cached_bytes_per_layer_uses_resident_payload_only(self):
         hf_config = types.SimpleNamespace(
             model_type="deepseek_v2",
@@ -297,6 +323,40 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(
             model_config.get_cache_block_size_bytes(32, parallel_config),
             32 * per_token_local,
+        )
+
+    def test_mla_cache_layout_packages_all_derived_fields(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+        page_size = 2 * 1024 * 1024
+
+        layout = model_config.get_cache_layout(
+            page_size,
+            parallel_config,
+            megacache=True,
+        )
+
+        expected_per_layer = 2 * (512 + 64)
+        self.assertIsInstance(layout, CacheLayout)
+        self.assertEqual(layout.architecture, CacheArchitecture.MLA)
+        self.assertTrue(layout.megacache)
+        self.assertEqual(layout.cached_token_bytes_per_layer, expected_per_layer)
+        self.assertEqual(layout.cached_token_bytes_local, 20 * expected_per_layer)
+        self.assertEqual(layout.page_buffer_token_bytes, 20 * expected_per_layer)
+        self.assertEqual(
+            layout.tokens_per_page,
+            page_size // (20 * expected_per_layer),
         )
 
 

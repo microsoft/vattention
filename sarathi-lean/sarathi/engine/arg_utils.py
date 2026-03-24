@@ -152,11 +152,11 @@ class EngineArgs:
         block_size = self.block_size
         if AttentionBackend.is_vATTN(self.attention_backend):
             megacache = "megacache" in self.attention_backend.lower()
-            block_size = model_config.get_num_cached_tokens_per_page(
+            block_size = model_config.get_cache_layout(
                 page_size,
                 parallel_config,
                 megacache=megacache,
-            )
+            ).tokens_per_page
 
         cache_config = CacheConfig(
             block_size=block_size,

@@ -1,5 +1,6 @@
 from abc import ABC
 from enum import Enum
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
@@ -15,6 +16,16 @@ logger = init_logger(__name__)
 class CacheArchitecture(Enum):
     DENSE_KV = "dense_kv"
     MLA = "mla"
+
+
+@dataclass(frozen=True)
+class CacheLayout:
+    architecture: CacheArchitecture
+    megacache: bool
+    cached_token_bytes_per_layer: int
+    cached_token_bytes_local: int
+    page_buffer_token_bytes: int
+    tokens_per_page: int
 
 
 class SchedulerType(BaseIntEnum):
@@ -226,6 +237,33 @@ class ModelConfig:
         return block_size * self.get_cached_token_bytes_local(
             parallel_config,
             megacache=megacache,
+        )
+
+    def get_cache_layout(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> CacheLayout:
+        return CacheLayout(
+            architecture=self.get_cache_architecture(),
+            megacache=megacache,
+            cached_token_bytes_per_layer=self.get_cached_token_bytes_per_layer(
+                parallel_config
+            ),
+            cached_token_bytes_local=self.get_cached_token_bytes_local(
+                parallel_config,
+                megacache=megacache,
+            ),
+            page_buffer_token_bytes=self.get_page_buffer_token_bytes(
+                parallel_config,
+                megacache=megacache,
+            ),
+            tokens_per_page=self.get_num_cached_tokens_per_page(
+                page_size,
+                parallel_config,
+                megacache=megacache,
+            ),
         )
 
     def get_head_size(self) -> int:
