@@ -737,6 +737,36 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertTrue(result["final_logits_match"])
         self.assertTrue(result["cache_token_counts_match"])
 
+    def test_run_scaffold_smoke_keeps_artifacts_when_output_dir_is_provided(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self.smoke_module.run_scaffold_smoke(
+                mode="contiguous",
+                checkpoint_layout="hf_dir",
+                query_mode="q_lora",
+                mlp_mode="moe",
+                output_dir=tmpdir,
+            )
+
+            checkpoint_path = Path(result["checkpoint_path"])
+            self.assertEqual(checkpoint_path, Path(tmpdir))
+            self.assertTrue((checkpoint_path / "config.json").exists())
+            self.assertTrue((checkpoint_path / "model.safetensors.index.json").exists())
+
+    def test_compare_scaffold_smoke_reports_persistent_checkpoint_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self.smoke_module.compare_scaffold_smoke(
+                prompt_token_ids=(1, 3),
+                max_new_tokens=3,
+                checkpoint_layout="hf_dir",
+                query_mode="q_lora",
+                mlp_mode="moe",
+                output_dir=tmpdir,
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["checkpoint_path"], tmpdir)
+            self.assertTrue((Path(tmpdir) / "config.json").exists())
+
     def test_compare_scaffold_smoke_reports_blocked_paged_runtime_errors(self):
         original = self.smoke_module._run_scaffold_smoke_artifacts
 
@@ -748,6 +778,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
             query_mode="direct",
             checkpoint_layout="single_file",
             mlp_mode="dense",
+            output_dir=None,
         ):
             del (
                 prompt_token_ids,
@@ -756,6 +787,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
                 query_mode,
                 checkpoint_layout,
                 mlp_mode,
+                output_dir,
             )
             if mode == "paged":
                 raise RuntimeError("real paged wrapper blocker")
@@ -763,6 +795,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
                 torch.tensor([1, 2, 3], dtype=torch.long),
                 torch.zeros(1, 16),
                 tuple(types.SimpleNamespace(num_tokens=4) for _ in range(2)),
+                None,
             )
 
         try:

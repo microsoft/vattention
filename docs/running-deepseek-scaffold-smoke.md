@@ -52,6 +52,23 @@ scripts/docker/run-deepseek-scaffold-smoke.sh compare \
   --mlp-mode moe
 ```
 
+To keep the emitted synthetic checkpoint directory on disk for separate inspection:
+
+```bash
+scripts/docker/run-deepseek-scaffold-smoke.sh compare \
+  --checkpoint-layout hf_dir \
+  --query-mode q_lora \
+  --mlp-mode moe \
+  --output-dir /workspace/tmp/deepseek-v2-lite-scaffold
+```
+
+Then inspect the emitted directory directly inside the container:
+
+```bash
+docker exec -w /workspace vattn-$USER \
+  python scripts/inspect_deepseek_checkpoint.py /workspace/tmp/deepseek-v2-lite-scaffold
+```
+
 ## Expected Output
 
 The script prints a JSON summary including:

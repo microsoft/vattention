@@ -65,6 +65,15 @@ def _layer_has_name(names, layer_idx, suffix):
 
 
 def inspect_deepseek_checkpoint(checkpoint_path):
+    if not os.path.exists(checkpoint_path):
+        return {
+            "status": "blocked",
+            "checkpoint_path": checkpoint_path,
+            "blockers": ["checkpoint_path_missing"],
+            "loadable_scaffold_surface": False,
+            "load_error": f"Checkpoint path does not exist: {checkpoint_path}",
+        }
+
     state_dict, config = _load_weight_names_and_config(checkpoint_path)
     names = tuple(sorted(state_dict.keys()))
     layer_indices = _extract_layer_indices(names)

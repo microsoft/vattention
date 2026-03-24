@@ -286,6 +286,13 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertIn("n_routed_experts_mismatch", result["blockers"])
         self.assertEqual(result["observed_n_routed_experts"], 4)
 
+    def test_inspect_checkpoint_reports_missing_path_blocker(self):
+        result = self.inspect_module.inspect_deepseek_checkpoint("/tmp/definitely-missing-deepseek")
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("checkpoint_path_missing", result["blockers"])
+        self.assertFalse(result["loadable_scaffold_surface"])
+
 
 if __name__ == "__main__":
     unittest.main()

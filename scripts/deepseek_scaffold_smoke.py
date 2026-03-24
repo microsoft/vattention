@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -488,6 +489,7 @@ def _run_scaffold_smoke_artifacts(
     query_mode="direct",
     checkpoint_layout="single_file",
     mlp_mode="dense",
+    output_dir=None,
 ):
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
@@ -558,7 +560,13 @@ def _run_scaffold_smoke_artifacts(
         )
     else:
         moe_weights = tuple(None for _ in range(model.model.num_layers))
-    with tempfile.TemporaryDirectory() as tmpdir:
+    if output_dir is None:
+        tempdir_ctx = tempfile.TemporaryDirectory()
+        output_dir = tempdir_ctx.__enter__()
+    else:
+        tempdir_ctx = None
+        os.makedirs(output_dir, exist_ok=True)
+    try:
         checkpoint_format = resolve_checkpoint_format(
             checkpoint_format,
             checkpoint_layout,
@@ -570,7 +578,7 @@ def _run_scaffold_smoke_artifacts(
                 mlp_weights,
                 device=device,
                 dtype=dtype,
-                output_dir=tmpdir,
+                output_dir=output_dir,
                 checkpoint_format=checkpoint_format,
                 moe_weights=moe_weights,
             )
@@ -581,7 +589,7 @@ def _run_scaffold_smoke_artifacts(
                 mlp_weights,
                 device=device,
                 dtype=dtype,
-                output_dir=tmpdir,
+                output_dir=output_dir,
                 checkpoint_format=checkpoint_format,
                 moe_weights=moe_weights,
             )
@@ -615,7 +623,10 @@ def _run_scaffold_smoke_artifacts(
             max_new_tokens=max_new_tokens,
             **generate_kwargs,
         )
-        return generated_token_ids, final_logits, final_caches
+        return generated_token_ids, final_logits, final_caches, checkpoint_path
+    finally:
+        if tempdir_ctx is not None:
+            tempdir_ctx.__exit__(None, None, None)
 
 
 def run_scaffold_smoke(
@@ -626,9 +637,10 @@ def run_scaffold_smoke(
     query_mode="direct",
     checkpoint_layout="single_file",
     mlp_mode="dense",
+    output_dir=None,
 ):
     checkpoint_format = resolve_checkpoint_format(checkpoint_format, checkpoint_layout)
-    generated_token_ids, final_logits, final_caches = _run_scaffold_smoke_artifacts(
+    generated_token_ids, final_logits, final_caches, checkpoint_path = _run_scaffold_smoke_artifacts(
         mode=mode,
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
@@ -636,6 +648,7 @@ def run_scaffold_smoke(
         query_mode=query_mode,
         checkpoint_layout=checkpoint_layout,
         mlp_mode=mlp_mode,
+        output_dir=output_dir,
     )
     return {
         "mode": mode,
@@ -643,6 +656,7 @@ def run_scaffold_smoke(
         "query_mode": query_mode,
         "checkpoint_layout": checkpoint_layout,
         "mlp_mode": mlp_mode,
+        "checkpoint_path": checkpoint_path if output_dir is not None else None,
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": generated_token_ids.tolist(),
         "final_logits_shape": list(final_logits.shape),
@@ -660,9 +674,10 @@ def compare_scaffold_smoke(
     query_mode="direct",
     checkpoint_layout="single_file",
     mlp_mode="dense",
+    output_dir=None,
 ):
     checkpoint_format = resolve_checkpoint_format(checkpoint_format, checkpoint_layout)
-    contiguous_tokens, contiguous_logits, contiguous_caches = _run_scaffold_smoke_artifacts(
+    contiguous_tokens, contiguous_logits, contiguous_caches, checkpoint_path = _run_scaffold_smoke_artifacts(
         mode="contiguous",
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
@@ -670,9 +685,10 @@ def compare_scaffold_smoke(
         query_mode=query_mode,
         checkpoint_layout=checkpoint_layout,
         mlp_mode=mlp_mode,
+        output_dir=output_dir,
     )
     try:
-        paged_tokens, paged_logits, paged_caches = _run_scaffold_smoke_artifacts(
+        paged_tokens, paged_logits, paged_caches, _ = _run_scaffold_smoke_artifacts(
             mode="paged",
             prompt_token_ids=prompt_token_ids,
             max_new_tokens=max_new_tokens,
@@ -680,6 +696,7 @@ def compare_scaffold_smoke(
             query_mode=query_mode,
             checkpoint_layout=checkpoint_layout,
             mlp_mode=mlp_mode,
+            output_dir=output_dir,
         )
     except RuntimeError as exc:
         return {
@@ -688,6 +705,7 @@ def compare_scaffold_smoke(
             "query_mode": query_mode,
             "checkpoint_layout": checkpoint_layout,
             "mlp_mode": mlp_mode,
+            "checkpoint_path": checkpoint_path if output_dir is not None else None,
             "status": "blocked",
             "prompt_token_ids": list(prompt_token_ids),
             "generated_token_ids": contiguous_tokens.tolist(),
@@ -702,6 +720,7 @@ def compare_scaffold_smoke(
         "query_mode": query_mode,
         "checkpoint_layout": checkpoint_layout,
         "mlp_mode": mlp_mode,
+        "checkpoint_path": checkpoint_path if output_dir is not None else None,
         "status": "ok",
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": contiguous_tokens.tolist(),
@@ -726,6 +745,7 @@ def validate_scaffold_smoke_compare(
     query_mode="direct",
     checkpoint_layout="single_file",
     mlp_mode="dense",
+    output_dir=None,
 ):
     result = compare_scaffold_smoke(
         prompt_token_ids=prompt_token_ids,
@@ -734,6 +754,7 @@ def validate_scaffold_smoke_compare(
         query_mode=query_mode,
         checkpoint_layout=checkpoint_layout,
         mlp_mode=mlp_mode,
+        output_dir=output_dir,
     )
     if result.get("status") == "blocked":
         raise RuntimeError(f"scaffold smoke compare blocked: {result['error']}")
@@ -775,6 +796,11 @@ def main():
         default="dense",
     )
     parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="optional directory where the emitted scaffold checkpoint artifacts should be kept",
+    )
+    parser.add_argument(
         "--require-match",
         action="store_true",
         help="fail with a non-zero exit code if compare mode detects a mismatch",
@@ -788,6 +814,7 @@ def main():
             query_mode=args.query_mode,
             checkpoint_layout=args.checkpoint_layout,
             mlp_mode=args.mlp_mode,
+            output_dir=args.output_dir,
         )
     else:
         output = run_scaffold_smoke(
@@ -797,6 +824,7 @@ def main():
             query_mode=args.query_mode,
             checkpoint_layout=args.checkpoint_layout,
             mlp_mode=args.mlp_mode,
+            output_dir=args.output_dir,
         )
     print(
         json.dumps(
