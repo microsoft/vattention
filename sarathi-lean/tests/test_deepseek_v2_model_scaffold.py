@@ -60,6 +60,7 @@ make_mlp_weights = deepseek_module.make_mlp_weights
 class DeepseekV2ModelScaffoldTests(unittest.TestCase):
     def _make_config(self):
         return types.SimpleNamespace(
+            vocab_size=32000,
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
@@ -146,7 +147,32 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         self.assertIsInstance(model.model, DeepseekV2Model)
         self.assertEqual(model.mla_dims.num_heads, 128)
         self.assertEqual(model.model.num_layers, 60)
-        self.assertIsNone(model.lm_head)
+        self.assertIsNotNone(model.model.embed_tokens)
+        self.assertIsNotNone(model.lm_head)
+
+    def test_model_rejects_token_ids_without_first_stage_embeddings(self):
+        config = self._make_config()
+        model = DeepseekV2Model(
+            config,
+            tensor_parallel_world_size=4,
+            pipeline_parallel_world_size=2,
+            pipeline_parallel_rank=1,
+        )
+
+        with self.assertRaises(ValueError):
+            model(
+                hidden_states=torch.tensor([1, 2], dtype=torch.long),
+                projection_weights=tuple(
+                    model.layers[0].self_attn.make_projection_weights(
+                        q_proj=torch.zeros(config.hidden_size, model.layers[0].self_attn.mla_dims.q_proj_output_dim_local),
+                        kv_latent_proj=torch.zeros(config.hidden_size, model.layers[0].self_attn.mla_dims.kv_lora_rank),
+                        k_rope_proj=torch.zeros(config.hidden_size, model.layers[0].self_attn.mla_dims.num_heads * model.layers[0].self_attn.mla_dims.qk_rope_head_dim),
+                        kv_up_proj=torch.zeros(model.layers[0].self_attn.mla_dims.kv_lora_rank, model.layers[0].self_attn.mla_dims.kv_up_proj_output_dim_local),
+                        o_proj=torch.zeros(model.layers[0].self_attn.mla_dims.o_proj_input_dim_local, config.hidden_size),
+                    )
+                    for _ in range(model.num_layers)
+                ),
+            )
 
     def test_make_mlp_weights_rejects_invalid_down_projection_shape(self):
         hidden_size = 8

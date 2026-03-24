@@ -61,6 +61,7 @@ make_projection_weights = deepseek_module.make_projection_weights
 class DeepseekV2ModelForwardTests(unittest.TestCase):
     def _make_config(self):
         return types.SimpleNamespace(
+            vocab_size=16,
             hidden_size=6,
             num_attention_heads=4,
             num_hidden_layers=4,
@@ -128,6 +129,19 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
                 [0.0, 1.0, 0.0, 2.0, 0.0, 1.0],
             ]
         )
+
+    def _set_embedding_and_lm_head_weights(self, model):
+        embedding_weight = torch.arange(
+            model.config.vocab_size * model.config.hidden_size,
+            dtype=torch.float32,
+        ).view(model.config.vocab_size, model.config.hidden_size) / 1000.0
+        model.model.embed_tokens.weight.data.copy_(embedding_weight)
+        if model.lm_head is not None:
+            lm_head_weight = torch.arange(
+                model.config.vocab_size * model.config.hidden_size,
+                dtype=torch.float32,
+            ).view(model.config.vocab_size, model.config.hidden_size) / 1000.0
+            model.lm_head.weight.data.copy_(lm_head_weight)
 
     def _make_mlp_weights(self, hidden_size):
         return make_mlp_weights(
@@ -365,6 +379,133 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
 
         self.assertEqual(tuple(output.shape), (2, config.hidden_size))
         self.assertEqual(len(caches), model.model.num_layers)
+
+    def test_causal_lm_accepts_token_ids_via_embedding_path(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(2)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size) for _ in range(model.model.num_layers)
+        )
+        input_ids = torch.tensor([1, 3], dtype=torch.long)
+
+        embedded_hidden_states = model.model.embed_tokens(input_ids)
+        baseline_output, baseline_caches = model(
+            hidden_states=embedded_hidden_states,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+        )
+        output, caches = model(
+            hidden_states=input_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+        )
+
+        self.assertTrue(torch.allclose(output, baseline_output))
+        self.assertEqual(len(caches), len(baseline_caches))
+        self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
+
+    def test_causal_lm_forward_logits_projects_hidden_states_to_vocab(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size) for _ in range(model.model.num_layers)
+        )
+        input_ids = torch.tensor([2, 4], dtype=torch.long)
+
+        hidden_states, caches = model(
+            hidden_states=input_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+        )
+        logits, logits_caches = model.forward_logits(
+            hidden_states=input_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+        )
+
+        self.assertEqual(tuple(logits.shape), (2, config.vocab_size))
+        self.assertEqual(tuple(model.compute_logits(hidden_states).shape), (2, config.vocab_size))
+        self.assertEqual(len(logits_caches), len(caches))
+
+    def test_causal_lm_forward_logits_with_attention_wrapper_accepts_token_ids(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size) for _ in range(model.model.num_layers)
+        )
+
+        class _Wrapper:
+            def forward(self, query, key, value, kv_cache, softmax_scale=1.0, layer_id=None):
+                return value[-query.shape[0] :].clone()
+
+        wrapper = _Wrapper()
+        input_ids = torch.tensor([1, 5], dtype=torch.long)
+        kv_caches = tuple(object() for _ in range(model.model.num_layers))
+
+        hidden_states, layer_caches = model.forward_with_attention_wrapper(
+            hidden_states=input_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+            kv_caches=kv_caches,
+            attention_wrapper=wrapper,
+        )
+        logits, logits_caches = model.forward_logits_with_attention_wrapper(
+            hidden_states=input_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+            kv_caches=kv_caches,
+            attention_wrapper=wrapper,
+        )
+
+        self.assertEqual(tuple(logits.shape), (2, config.vocab_size))
+        self.assertEqual(tuple(model.compute_logits(hidden_states).shape), (2, config.vocab_size))
+        self.assertEqual(len(logits_caches), len(layer_caches))
+        self.assertTrue(all(cache.resident_cache.num_tokens == 2 for cache in logits_caches))
 
 
 if __name__ == "__main__":

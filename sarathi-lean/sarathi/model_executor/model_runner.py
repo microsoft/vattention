@@ -76,6 +76,7 @@ class ModelRunner:
     ):
         model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
         projection_weights = model_kwargs.pop("projection_weights", None)
+        mlp_weights = model_kwargs.pop("mlp_weights", None)
         caches = model_kwargs.pop("caches", None)
         softmax_scale = model_kwargs.pop("softmax_scale", None)
 
@@ -89,6 +90,7 @@ class ModelRunner:
                 return self.model.forward_with_attention_wrapper(
                     hidden_states=hidden_states,
                     projection_weights=projection_weights,
+                    mlp_weights=mlp_weights,
                     kv_caches=kv_caches,
                     attention_wrapper=get_attention_wrapper(),
                     caches=caches,
@@ -97,6 +99,7 @@ class ModelRunner:
             return self.model(
                 hidden_states=hidden_states,
                 projection_weights=projection_weights,
+                mlp_weights=mlp_weights,
                 caches=caches,
                 softmax_scale=softmax_scale,
             )

@@ -892,6 +892,14 @@ class DeepseekV2Model(nn.Module):
             raise ValueError(
                 "DeepSeek-V2 hidden layers must divide evenly across pipeline stages"
             )
+        self.is_pipeline_first_stage = self.pipeline_parallel_rank == 0
+        self.is_pipeline_last_stage = (
+            self.pipeline_parallel_rank == self.pipeline_parallel_world_size - 1
+        )
+        self.vocab_size = getattr(config, "vocab_size", None)
+        self.embed_tokens = None
+        if self.is_pipeline_first_stage and self.vocab_size is not None:
+            self.embed_tokens = nn.Embedding(self.vocab_size, config.hidden_size)
         self.num_layers = config.num_hidden_layers // self.pipeline_parallel_world_size
         self.layer_offset = self.pipeline_parallel_rank * self.num_layers
         self.layers = nn.ModuleList(
@@ -904,6 +912,20 @@ class DeepseekV2Model(nn.Module):
                 for layer_index in range(self.num_layers)
             ]
         )
+        self.norm = nn.Identity() if self.is_pipeline_last_stage else None
+
+    def _prepare_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.dtype in (torch.int32, torch.int64, torch.long):
+            if hidden_states.ndim != 1:
+                raise ValueError("token input must have shape [tokens]")
+            if self.embed_tokens is None:
+                raise ValueError(
+                    "token input is only supported on the first pipeline stage with embeddings"
+                )
+            return self.embed_tokens(hidden_states)
+        if hidden_states.ndim != 2 or hidden_states.shape[1] != self.config.hidden_size:
+            raise ValueError("hidden_states must have shape [tokens, hidden_size]")
+        return hidden_states
 
     def forward(
         self,
@@ -924,6 +946,7 @@ class DeepseekV2Model(nn.Module):
         if len(caches) != self.num_layers:
             raise ValueError("caches must provide one entry per local layer")
 
+        hidden_states = self._prepare_hidden_states(hidden_states)
         next_caches = []
         for layer, layer_projection_weights, layer_mlp_weights, layer_cache in zip(
             self.layers,
@@ -939,6 +962,8 @@ class DeepseekV2Model(nn.Module):
                 softmax_scale=softmax_scale,
             )
             next_caches.append(next_cache)
+        if self.norm is not None:
+            hidden_states = self.norm(hidden_states)
         return hidden_states, tuple(next_caches)
 
     def forward_with_attention_wrapper(
@@ -964,6 +989,7 @@ class DeepseekV2Model(nn.Module):
         if len(caches) != self.num_layers:
             raise ValueError("caches must provide one entry per local layer")
 
+        hidden_states = self._prepare_hidden_states(hidden_states)
         next_caches = []
         for layer, layer_projection_weights, layer_mlp_weights, layer_kv_cache, layer_cache in zip(
             self.layers,
@@ -982,6 +1008,8 @@ class DeepseekV2Model(nn.Module):
                 softmax_scale=softmax_scale,
             )
             next_caches.append(next_cache)
+        if self.norm is not None:
+            hidden_states = self.norm(hidden_states)
         return hidden_states, tuple(next_caches)
 
     def make_runtime_mla_kv_caches(
@@ -1008,9 +1036,11 @@ class DeepseekV2ForCausalLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.lm_head = None
         self.model = DeepseekV2Model(config)
         self.mla_dims = DeepseekV2MLADims.from_config(config)
+        self.lm_head = None
+        if self.model.is_pipeline_last_stage and getattr(config, "vocab_size", None) is not None:
+            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
     def forward(
         self,
@@ -1034,6 +1064,30 @@ class DeepseekV2ForCausalLM(nn.Module):
             "The MLA attention/model path still needs to be added."
         )
 
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.lm_head is None:
+            raise ValueError("lm_head is only available on the last pipeline stage")
+        if hidden_states.ndim != 2 or hidden_states.shape[1] != self.config.hidden_size:
+            raise ValueError("hidden_states must have shape [tokens, hidden_size]")
+        return self.lm_head(hidden_states)
+
+    def forward_logits(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+        hidden_states, caches = self.forward(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+            caches=caches,
+            softmax_scale=softmax_scale,
+        )
+        return self.compute_logits(hidden_states), caches
+
     def forward_with_attention_wrapper(
         self,
         hidden_states: torch.Tensor,
@@ -1043,7 +1097,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         attention_wrapper=None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2LayerCache, ...]]:
+        ) -> Tuple[torch.Tensor, Tuple[DeepseekV2LayerCache, ...]]:
         return self.model.forward_with_attention_wrapper(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
@@ -1053,6 +1107,27 @@ class DeepseekV2ForCausalLM(nn.Module):
             caches=caches,
             softmax_scale=softmax_scale,
         )
+
+    def forward_logits_with_attention_wrapper(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        kv_caches: Tuple[object, ...],
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        attention_wrapper=None,
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2LayerCache, ...]]:
+        hidden_states, caches = self.forward_with_attention_wrapper(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+            kv_caches=kv_caches,
+            attention_wrapper=attention_wrapper,
+            caches=caches,
+            softmax_scale=softmax_scale,
+        )
+        return self.compute_logits(hidden_states), caches
 
     def make_runtime_mla_kv_caches(
         self,

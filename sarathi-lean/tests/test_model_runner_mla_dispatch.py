@@ -212,6 +212,7 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
             kv_caches=("cache",),
             model_kwargs={
                 "projection_weights": projection_weights,
+                "mlp_weights": ("mlp",),
                 "caches": ("resident",),
                 "softmax_scale": 0.5,
             },
@@ -220,6 +221,7 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
         self.assertEqual(output, "wrapper")
         self.assertEqual(len(runner.model.wrapper_calls), 1)
         self.assertEqual(runner.model.wrapper_calls[0]["projection_weights"], projection_weights)
+        self.assertEqual(runner.model.wrapper_calls[0]["mlp_weights"], ("mlp",))
         self.assertEqual(runner.model.wrapper_calls[0]["kv_caches"], ("cache",))
         self.assertEqual(runner.model.wrapper_calls[0]["attention_wrapper"], ATTENTION_WRAPPER)
         self.assertEqual(runner.model.wrapper_calls[0]["caches"], ("resident",))
