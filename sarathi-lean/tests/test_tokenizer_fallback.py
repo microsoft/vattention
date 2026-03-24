@@ -71,6 +71,7 @@ class TokenizerFallbackTests(unittest.TestCase):
         transformers_utils.__path__ = [str(SARATHI_ROOT / "transformers_utils")]
         sys.modules["sarathi.transformers_utils"] = transformers_utils
 
+        sys.modules.pop("sarathi.transformers_utils.tokenizer", None)
         self.tokenizer_module = _load_module(
             "sarathi.transformers_utils.tokenizer",
             SARATHI_ROOT / "transformers_utils" / "tokenizer.py",
@@ -90,6 +91,38 @@ class TokenizerFallbackTests(unittest.TestCase):
             tokenizer = self.tokenizer_module.get_tokenizer(tmpdir)
 
         self.assertEqual(tokenizer, {"loaded_from": tmpdir})
+
+    def test_detokenize_incrementally_falls_back_when_fast_tokenizer_has_no_decoder(self):
+        class _DecoderlessTokenizer:
+            is_fast = True
+            all_special_tokens = ["<pad>"]
+
+            def get_added_vocab(self):
+                return {}
+
+            def convert_ids_to_tokens(self, token_ids, skip_special_tokens=False):
+                del skip_special_tokens
+                mapping = {0: "<pad>", 1: "hello", 2: "world"}
+                return [mapping[token_id] for token_id in token_ids]
+
+            def convert_tokens_to_string(self, tokens):
+                raise AttributeError("'NoneType' object has no attribute 'decode'")
+
+            def __len__(self):
+                return 3
+
+        new_tokens, new_text, prefix_offset, read_offset = (
+            self.tokenizer_module.detokenize_incrementally(
+                _DecoderlessTokenizer(),
+                [1, 2],
+                prev_tokens=None,
+            )
+        )
+
+        self.assertEqual(new_tokens, ["hello", "world"])
+        self.assertEqual(new_text, " world")
+        self.assertGreaterEqual(prefix_offset, 0)
+        self.assertGreaterEqual(read_offset, 0)
 
 
 if __name__ == "__main__":

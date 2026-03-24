@@ -89,6 +89,23 @@ def _convert_tokens_to_string_with_added_encoders(
     return " ".join(sub_texts)
 
 
+def _safe_convert_tokens_to_string(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    output_tokens: List[str],
+    *,
+    skip_special_tokens: bool,
+) -> str:
+    try:
+        return tokenizer.convert_tokens_to_string(output_tokens)
+    except AttributeError:
+        if skip_special_tokens:
+            special_tokens = set(getattr(tokenizer, "all_special_tokens", ()))
+            output_tokens = [
+                token for token in output_tokens if token not in special_tokens
+            ]
+        return " ".join(token for token in output_tokens if token)
+
+
 # Based on
 # https://github.com/huggingface/text-generation-inference/blob/v0.9.4/server/text_generation_server/models/model.py#L62C9-L62C15
 # under Apache 2.0 license
@@ -136,10 +153,16 @@ def detokenize_incrementally(
     # the decode which decide to add a space or not depending on the
     # surrounding ids.
     if tokenizer.is_fast or not tokenizer.get_added_vocab():
-        prefix_text = tokenizer.convert_tokens_to_string(
-            output_tokens[prefix_offset:read_offset]
+        prefix_text = _safe_convert_tokens_to_string(
+            tokenizer,
+            output_tokens[prefix_offset:read_offset],
+            skip_special_tokens=skip_special_tokens,
         )
-        new_text = tokenizer.convert_tokens_to_string(output_tokens[prefix_offset:])
+        new_text = _safe_convert_tokens_to_string(
+            tokenizer,
+            output_tokens[prefix_offset:],
+            skip_special_tokens=skip_special_tokens,
+        )
     else:
         prefix_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,

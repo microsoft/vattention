@@ -91,7 +91,8 @@ class BaseBlockSpaceManager(ABC):
 
         self.block_tables[seq.seq_id] = block_table
 
-    def can_append_slot(self) -> bool:
+    def can_append_slot(self, seq: Sequence = None) -> bool:
+        del seq
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
         return num_free_gpu_blocks > 0
 
