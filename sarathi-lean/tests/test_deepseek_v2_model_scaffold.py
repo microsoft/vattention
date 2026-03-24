@@ -65,6 +65,7 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
+            rms_norm_eps=1e-6,
             q_lora_rank=None,
             kv_lora_rank=512,
             qk_nope_head_dim=128,
@@ -78,6 +79,7 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             hidden_size=6,
             num_attention_heads=4,
             num_hidden_layers=4,
+            rms_norm_eps=1e-6,
             q_lora_rank=None,
             kv_lora_rank=3,
             qk_nope_head_dim=2,
@@ -335,6 +337,12 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
                 self._make_projection_weights(dims).q_proj + model.model.layer_offset + 1,
             )
         )
+        self.assertTrue(
+            torch.allclose(
+                model.model.norm.weight,
+                torch.ones(config.hidden_size),
+            )
+        )
 
     def test_causal_lm_scaffold_loader_accepts_global_layer_ids_for_first_stage(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
@@ -355,6 +363,12 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         }
         for global_layer_idx in range(model.model.layer_offset, model.model.layer_offset + model.model.num_layers):
             projection_weights = self._make_projection_weights(dims)
+            state_dict[
+                f"model.layers.{global_layer_idx}.input_layernorm.weight"
+            ] = torch.full((config.hidden_size,), 2.0 + global_layer_idx)
+            state_dict[
+                f"model.layers.{global_layer_idx}.post_attention_layernorm.weight"
+            ] = torch.full((config.hidden_size,), 3.0 + global_layer_idx)
             prefix = f"model.layers.{global_layer_idx}.self_attn"
             state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + global_layer_idx
             state_dict[f"{prefix}.kv_latent_proj.weight"] = (
@@ -377,6 +391,18 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             torch.allclose(
                 model.model.layer_projection_weights[0].q_proj,
                 self._make_projection_weights(dims).q_proj,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layers[0].input_layernorm.weight,
+                torch.full((config.hidden_size,), 2.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layers[0].post_attention_layernorm.weight,
+                torch.full((config.hidden_size,), 3.0),
             )
         )
 

@@ -65,6 +65,7 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
             hidden_size=6,
             num_attention_heads=4,
             num_hidden_layers=4,
+            rms_norm_eps=1e-6,
             q_lora_rank=None,
             kv_lora_rank=3,
             qk_nope_head_dim=2,
@@ -143,15 +144,37 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
             ).view(model.config.vocab_size, model.config.hidden_size) / 1000.0
             model.lm_head.weight.data.copy_(lm_head_weight)
 
-    def _make_scaffold_state_dict(self, model, projection_weights, mlp_weights=None):
+    def _make_scaffold_state_dict(
+        self,
+        model,
+        projection_weights,
+        mlp_weights=None,
+        *,
+        norm_scale=1.0,
+    ):
         state_dict = {}
         if model.model.embed_tokens is not None:
             state_dict["model.embed_tokens.weight"] = (
                 model.model.embed_tokens.weight.detach().clone()
             )
+        if model.model.norm is not None:
+            state_dict["model.norm.weight"] = torch.full(
+                (model.config.hidden_size,),
+                norm_scale,
+            )
         if model.lm_head is not None:
             state_dict["lm_head.weight"] = model.lm_head.weight.detach().clone()
         for layer_idx, layer_projection_weights in enumerate(projection_weights):
+            state_dict[f"model.layers.{layer_idx}.input_layernorm.weight"] = torch.full(
+                (model.config.hidden_size,),
+                norm_scale + layer_idx,
+            )
+            state_dict[
+                f"model.layers.{layer_idx}.post_attention_layernorm.weight"
+            ] = torch.full(
+                (model.config.hidden_size,),
+                norm_scale + layer_idx + 0.5,
+            )
             prefix = f"model.layers.{layer_idx}.self_attn"
             state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj.detach().clone()
             state_dict[f"{prefix}.kv_latent_proj.weight"] = (
@@ -588,9 +611,77 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
                 scaffold_state_dict["model.layers.0.mlp.gate_proj.weight"],
             )
         )
+        self.assertTrue(
+            torch.allclose(
+                loaded_model.model.layers[0].input_layernorm.weight,
+                scaffold_state_dict["model.layers.0.input_layernorm.weight"],
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                loaded_model.model.layers[0].post_attention_layernorm.weight,
+                scaffold_state_dict["model.layers.0.post_attention_layernorm.weight"],
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                loaded_model.model.norm.weight,
+                scaffold_state_dict["model.norm.weight"],
+            )
+        )
         self.assertEqual(tuple(loaded_output.shape), (2, config.hidden_size))
         self.assertEqual(tuple(loaded_logits.shape), (2, config.vocab_size))
         self.assertTrue(all(cache.num_tokens == 2 for cache in loaded_caches))
+
+    def test_loaded_norm_weights_change_scaffold_forward_output(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        base_model = DeepseekV2ForCausalLM(config)
+        scaled_model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(base_model)
+        self._set_embedding_and_lm_head_weights(scaled_model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = tuple(
+            self._make_projection_weights(dims)
+            for _ in range(base_model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size)
+            for _ in range(base_model.model.num_layers)
+        )
+        base_model.load_weights(
+            self._make_scaffold_state_dict(
+                base_model,
+                projection_weights,
+                mlp_weights,
+                norm_scale=1.0,
+            )
+        )
+        scaled_model.load_weights(
+            self._make_scaffold_state_dict(
+                scaled_model,
+                projection_weights,
+                mlp_weights,
+                norm_scale=2.0,
+            )
+        )
+
+        input_ids = torch.tensor([1, 4], dtype=torch.long)
+        base_output, _ = base_model(hidden_states=input_ids)
+        scaled_output, _ = scaled_model(hidden_states=input_ids)
+
+        self.assertEqual(tuple(base_output.shape), (2, config.hidden_size))
+        self.assertEqual(tuple(scaled_output.shape), (2, config.hidden_size))
+        self.assertFalse(torch.allclose(base_output, scaled_output))
 
     def test_causal_lm_forward_logits_projects_hidden_states_to_vocab(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (

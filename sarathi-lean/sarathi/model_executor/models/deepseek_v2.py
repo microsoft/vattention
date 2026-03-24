@@ -130,6 +130,18 @@ DeepseekV2AttentionBackend = Callable[
 ]
 
 
+class DeepseekV2RMSNorm(nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        variance = hidden_states.pow(2).mean(dim=-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        return hidden_states * self.weight
+
+
 def split_query_projection(
     query_states: torch.Tensor,
     mla_dims: DeepseekV2MLADims,
@@ -807,9 +819,12 @@ class DeepseekV2DecoderLayer(nn.Module):
             tensor_parallel_world_size=tensor_parallel_world_size,
         )
         self.layer_id = layer_id
-        # MoE and RMSNorm execution are still pending.
-        self.input_layernorm = nn.Identity()
-        self.post_attention_layernorm = nn.Identity()
+        rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
+        self.input_layernorm = DeepseekV2RMSNorm(config.hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = DeepseekV2RMSNorm(
+            config.hidden_size,
+            eps=rms_norm_eps,
+        )
 
     def forward(
         self,
@@ -912,7 +927,14 @@ class DeepseekV2Model(nn.Module):
                 for layer_index in range(self.num_layers)
             ]
         )
-        self.norm = nn.Identity() if self.is_pipeline_last_stage else None
+        self.norm = (
+            DeepseekV2RMSNorm(
+                config.hidden_size,
+                eps=getattr(config, "rms_norm_eps", 1e-6),
+            )
+            if self.is_pipeline_last_stage
+            else None
+        )
         self.layer_projection_weights: Optional[
             Tuple[DeepseekV2MLAProjectionWeights, ...]
         ] = None
@@ -1130,8 +1152,22 @@ class DeepseekV2ForCausalLM(nn.Module):
                 if tuple(embed_weight.shape) != expected_shape:
                     raise ValueError(
                         "model.embed_tokens.weight shape does not match scaffold embedding size"
-                    )
+                )
                 self.model.embed_tokens.weight.data.copy_(embed_weight)
+
+        if self.model.norm is not None:
+            norm_weight = self._get_scaffold_tensor(
+                state_dict,
+                "model.norm.weight",
+                "norm.weight",
+            )
+            if norm_weight is not None:
+                expected_shape = (hidden_size,)
+                if tuple(norm_weight.shape) != expected_shape:
+                    raise ValueError(
+                        "model.norm.weight shape does not match scaffold final norm size"
+                    )
+                self.model.norm.weight.data.copy_(norm_weight)
 
         if self.lm_head is not None:
             lm_head_key = "lm_head.weight"
@@ -1157,6 +1193,30 @@ class DeepseekV2ForCausalLM(nn.Module):
         for layer_idx, layer in enumerate(self.model.layers):
             local_prefix = f"model.layers.{layer_idx}"
             global_prefix = f"model.layers.{self.model.layer_offset + layer_idx}"
+            input_norm_weight = self._get_scaffold_tensor(
+                state_dict,
+                f"{local_prefix}.input_layernorm.weight",
+                f"{global_prefix}.input_layernorm.weight",
+            )
+            if input_norm_weight is not None:
+                if tuple(input_norm_weight.shape) != (hidden_size,):
+                    raise ValueError(
+                        "input_layernorm.weight shape does not match scaffold hidden size"
+                    )
+                layer.input_layernorm.weight.data.copy_(input_norm_weight)
+
+            post_attn_norm_weight = self._get_scaffold_tensor(
+                state_dict,
+                f"{local_prefix}.post_attention_layernorm.weight",
+                f"{global_prefix}.post_attention_layernorm.weight",
+            )
+            if post_attn_norm_weight is not None:
+                if tuple(post_attn_norm_weight.shape) != (hidden_size,):
+                    raise ValueError(
+                        "post_attention_layernorm.weight shape does not match scaffold hidden size"
+                    )
+                layer.post_attention_layernorm.weight.data.copy_(post_attn_norm_weight)
+
             projection_prefixes = (
                 f"{local_prefix}.self_attn",
                 f"{global_prefix}.self_attn",
