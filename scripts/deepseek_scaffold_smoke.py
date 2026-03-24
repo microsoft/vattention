@@ -498,6 +498,116 @@ def _load_model_via_model_loader(checkpoint_path, config, dtype):
     return get_model(_make_loader_model_config(checkpoint_path, config, dtype))
 
 
+class _NoOpModelRunnerWrapper:
+    def init(self, model_config, parallel_config, block_size, device):
+        del model_config, parallel_config, block_size
+        self.device = device
+
+    def begin_forward(self, seq_metadata_list):
+        del seq_metadata_list
+
+    def end_forward(self):
+        return None
+
+
+class _ModelRunnerSmokeConfig:
+    def __init__(self, checkpoint_path, config, dtype):
+        self.model = checkpoint_path
+        self.hf_config = SimpleNamespace(**vars(config))
+        self.dtype = dtype
+        self.load_format = "auto"
+        self.download_dir = None
+        self.revision = None
+        self.attention_backend = None
+        self.seed = 0
+
+    def get_num_q_heads(self, parallel_config):
+        return self.hf_config.num_attention_heads // parallel_config.tensor_parallel_size
+
+    def get_num_kv_heads(self, parallel_config):
+        return self.get_num_q_heads(parallel_config)
+
+    def get_head_size(self):
+        return self.hf_config.hidden_size // self.hf_config.num_attention_heads
+
+
+class _NullCpuTimer:
+    def __init__(self, *args, **kwargs):
+        del args, kwargs
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def _run_model_runner_generation(
+    checkpoint_path,
+    config,
+    dtype,
+    *,
+    runtime_mode,
+    prompt_token_ids,
+    max_new_tokens,
+):
+    import sarathi.model_executor.model_runner as model_runner_module
+    from sarathi.model_executor.model_runner import ModelRunner
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if runtime_mode == "paged":
+        from sarathi.model_executor.attention.vattention_flashattention_wrapper import (
+            VAttentionFlashAttentionWrapper,
+        )
+
+        attention_wrapper = VAttentionFlashAttentionWrapper()
+        attention_wrapper.device = device
+        attention_wrapper.is_metadata_initialized = True
+        attention_wrapper.is_profiling_iteration = False
+    elif runtime_mode == "contiguous":
+        attention_wrapper = _NoOpModelRunnerWrapper()
+    else:
+        raise ValueError(f"Unsupported model runner runtime mode: {runtime_mode}")
+
+    original_get_attention_wrapper = model_runner_module.get_attention_wrapper
+    original_cpu_timer = model_runner_module.CpuTimer
+    model_runner_module.get_attention_wrapper = lambda: attention_wrapper
+    model_runner_module.CpuTimer = _NullCpuTimer
+    try:
+        model_config = _ModelRunnerSmokeConfig(checkpoint_path, config, dtype)
+        model_config.attention_backend = (
+            "FA_VATTN" if runtime_mode == "paged" else "NO_OP"
+        )
+        runner = ModelRunner(
+            model_config=model_config,
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=2,
+                pipeline_parallel_size=1,
+            ),
+            scheduler_config=SimpleNamespace(),
+            cache_config=SimpleNamespace(block_size=16),
+            device=device,
+            rank=0,
+        )
+        gpu_cache = None
+        if runtime_mode == "paged":
+            gpu_cache = runner.model.make_runtime_mla_kv_caches(
+                batch_size=1,
+                max_seq_len=len(prompt_token_ids) + max_new_tokens + 1,
+                device=device,
+                dtype=dtype,
+            )
+        token_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=device)
+        return runner.run_greedy_generation(
+            token_ids,
+            max_new_tokens,
+            gpu_cache=gpu_cache,
+        )
+    finally:
+        model_runner_module.get_attention_wrapper = original_get_attention_wrapper
+        model_runner_module.CpuTimer = original_cpu_timer
+
+
 def _run_scaffold_smoke_artifacts(
     mode="contiguous",
     prompt_token_ids=(1, 3),
@@ -827,6 +937,83 @@ def compare_loader_scaffold_smoke(
     }
 
 
+def compare_model_runner_scaffold_smoke(
+    runtime_mode="contiguous",
+    prompt_token_ids=(1, 3),
+    max_new_tokens=3,
+    checkpoint_format="pt",
+    query_mode="direct",
+    checkpoint_layout="single_file",
+    mlp_mode="dense",
+    output_dir=None,
+):
+    checkpoint_format = resolve_checkpoint_format(checkpoint_format, checkpoint_layout)
+    if output_dir is None:
+        tempdir_ctx = tempfile.TemporaryDirectory()
+        output_dir = tempdir_ctx.__enter__()
+    else:
+        tempdir_ctx = None
+        os.makedirs(output_dir, exist_ok=True)
+    try:
+        direct_tokens, direct_logits, direct_caches, checkpoint_path = _run_scaffold_smoke_artifacts(
+            mode=runtime_mode,
+            prompt_token_ids=prompt_token_ids,
+            max_new_tokens=max_new_tokens,
+            checkpoint_format=checkpoint_format,
+            query_mode=query_mode,
+            checkpoint_layout=checkpoint_layout,
+            mlp_mode=mlp_mode,
+            output_dir=output_dir,
+            use_model_loader=True,
+        )
+        (
+            runner_tokens,
+            runner_logits,
+            runner_caches,
+        ) = _run_model_runner_generation(
+            checkpoint_path,
+            build_config(query_mode=query_mode, mlp_mode=mlp_mode),
+            direct_logits.dtype,
+            runtime_mode=runtime_mode,
+            prompt_token_ids=prompt_token_ids,
+            max_new_tokens=max_new_tokens,
+        )
+        direct_cache_counts = [
+            cache.num_tokens if hasattr(cache, "num_tokens") else cache.resident_cache.num_tokens
+            for cache in direct_caches
+        ]
+        runner_cache_counts = [
+            cache.num_tokens if hasattr(cache, "num_tokens") else cache.resident_cache.num_tokens
+            for cache in runner_caches
+        ]
+        return {
+            "mode": "runner_compare",
+            "runtime_mode": runtime_mode,
+            "checkpoint_format": checkpoint_format,
+            "checkpoint_layout": checkpoint_layout,
+            "query_mode": query_mode,
+            "mlp_mode": mlp_mode,
+            "checkpoint_path": checkpoint_path if output_dir is not None else None,
+            "status": "ok",
+            "prompt_token_ids": list(prompt_token_ids),
+            "generated_token_ids": direct_tokens.tolist(),
+            "runner_generated_token_ids": runner_tokens.tolist(),
+            "generated_tokens_match": torch.equal(direct_tokens, runner_tokens),
+            "final_logits_match": torch.allclose(
+                direct_logits,
+                runner_logits,
+                atol=1e-6,
+                rtol=1e-6,
+            ),
+            "direct_cache_token_counts": direct_cache_counts,
+            "runner_cache_token_counts": runner_cache_counts,
+            "cache_token_counts_match": direct_cache_counts == runner_cache_counts,
+        }
+    finally:
+        if tempdir_ctx is not None:
+            tempdir_ctx.__exit__(None, None, None)
+
+
 def validate_scaffold_smoke_compare(
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
@@ -860,7 +1047,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("contiguous", "paged", "compare", "loader_compare"),
+        choices=("contiguous", "paged", "compare", "loader_compare", "runner_compare"),
         default="contiguous",
     )
     parser.add_argument("--max-new-tokens", type=int, default=3)
@@ -921,6 +1108,16 @@ def main():
             mlp_mode=args.mlp_mode,
             output_dir=args.output_dir,
         )
+    elif args.mode == "runner_compare":
+        output = compare_model_runner_scaffold_smoke(
+            runtime_mode=args.loader_runtime_mode,
+            max_new_tokens=args.max_new_tokens,
+            checkpoint_format=args.checkpoint_format,
+            query_mode=args.query_mode,
+            checkpoint_layout=args.checkpoint_layout,
+            mlp_mode=args.mlp_mode,
+            output_dir=args.output_dir,
+        )
     else:
         output = run_scaffold_smoke(
             mode=args.mode,
@@ -938,7 +1135,7 @@ def main():
             sort_keys=True,
         )
     )
-    if args.mode in ("compare", "loader_compare") and args.require_match:
+    if args.mode in ("compare", "loader_compare", "runner_compare") and args.require_match:
         if output.get("status") == "blocked":
             print(
                 f"scaffold smoke compare blocked: {output['error']}",

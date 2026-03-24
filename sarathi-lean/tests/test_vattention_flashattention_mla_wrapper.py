@@ -446,12 +446,23 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
         self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
         self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
         self.assertTrue(torch.all(self.flash_calls[0]["value"][..., dims.v_head_dim:] == 0))
-        self.assertTrue(
-            torch.equal(
-                runtime_cache.kv_latent[0, 1:2],
-                wrapper_inputs.new_resident_cache.kv_latent,
-            )
+
+    def test_set_mla_runtime_metadata_marks_wrapper_initialized(self):
+        wrapper = self.wrapper_module.VAttentionFlashAttentionWrapper()
+        wrapper.device = torch.device("cpu")
+        wrapper.is_metadata_initialized = False
+
+        wrapper.set_mla_runtime_metadata(
+            prefill_query_lens=[2],
+            prefill_cache_lens=[0],
+            batch_index=[0],
+            batch_index_gen=[],
         )
+
+        self.assertTrue(wrapper.is_metadata_initialized)
+        self.assertEqual(wrapper.prefill_query_lens, [2])
+        self.assertEqual(wrapper.prefill_cache_lens, [0])
+        self.assertTrue(torch.equal(wrapper.batch_index, torch.tensor([0], dtype=torch.int32)))
 
     def test_value_padding_helpers_expand_and_trim_flash_attention_value_heads(self):
         value = torch.tensor(

@@ -812,6 +812,64 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertTrue(result["final_logits_match"])
         self.assertTrue(result["cache_token_counts_match"])
 
+    def test_compare_model_runner_scaffold_smoke_matches_direct_generation(self):
+        original_run = self.smoke_module._run_scaffold_smoke_artifacts
+        original_runner = self.smoke_module._run_model_runner_generation
+
+        def _fake_run(**kwargs):
+            del kwargs
+            return (
+                torch.tensor([1, 2, 3], dtype=torch.long),
+                torch.zeros(1, 16),
+                tuple(types.SimpleNamespace(num_tokens=4) for _ in range(2)),
+                "/tmp/deepseek-runner-checkpoint",
+            )
+
+        def _fake_runner(
+            checkpoint_path,
+            config,
+            dtype,
+            *,
+            runtime_mode,
+            prompt_token_ids,
+            max_new_tokens,
+        ):
+            del config, dtype, runtime_mode, prompt_token_ids, max_new_tokens
+            self.assertEqual(checkpoint_path, "/tmp/deepseek-runner-checkpoint")
+            return (
+                torch.tensor([1, 2, 3], dtype=torch.long),
+                torch.zeros(1, 16),
+                tuple(types.SimpleNamespace(num_tokens=4) for _ in range(2)),
+            )
+
+        try:
+            self.smoke_module._run_scaffold_smoke_artifacts = _fake_run
+            self.smoke_module._run_model_runner_generation = _fake_runner
+            result = self.smoke_module.compare_model_runner_scaffold_smoke(
+                runtime_mode="paged",
+                prompt_token_ids=(1, 3),
+                max_new_tokens=3,
+                checkpoint_layout="hf_dir",
+                query_mode="q_lora",
+                mlp_mode="moe",
+                output_dir="/tmp/kept-checkpoint",
+            )
+        finally:
+            self.smoke_module._run_scaffold_smoke_artifacts = original_run
+            self.smoke_module._run_model_runner_generation = original_runner
+
+        self.assertEqual(result["mode"], "runner_compare")
+        self.assertEqual(result["runtime_mode"], "paged")
+        self.assertEqual(result["checkpoint_format"], "safetensors")
+        self.assertEqual(result["checkpoint_layout"], "hf_dir")
+        self.assertEqual(result["query_mode"], "q_lora")
+        self.assertEqual(result["mlp_mode"], "moe")
+        self.assertEqual(result["checkpoint_path"], "/tmp/deepseek-runner-checkpoint")
+        self.assertEqual(result["runner_generated_token_ids"], [1, 2, 3])
+        self.assertTrue(result["generated_tokens_match"])
+        self.assertTrue(result["final_logits_match"])
+        self.assertTrue(result["cache_token_counts_match"])
+
     def test_run_scaffold_smoke_keeps_artifacts_when_output_dir_is_provided(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             result = self.smoke_module.run_scaffold_smoke(

@@ -163,6 +163,7 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
         batch_index=None,
         batch_index_gen=None,
     ) -> None:
+        self.is_metadata_initialized = True
         self.prefill_query_lens = list(prefill_query_lens)
         self.prefill_cache_lens = list(prefill_cache_lens)
         self.decode_cache_lens = (
