@@ -44,6 +44,12 @@ class CacheComponentSpec:
     name: str
     token_dim: int
 
+    def __post_init__(self):
+        if not self.name:
+            raise ValueError("Cache component name must be non-empty")
+        if self.token_dim <= 0:
+            raise ValueError("Cache component token_dim must be positive")
+
 
 @dataclass(frozen=True)
 class VAttentionCacheSpec:
@@ -61,6 +67,48 @@ class VAttentionCacheSpec:
     cache_components: Tuple[CacheComponentSpec, ...]
     mla_kv_lora_rank: Optional[int]
     mla_qk_rope_head_dim: Optional[int]
+
+    def __post_init__(self):
+        if self.page_size <= 0:
+            raise ValueError("page_size must be positive")
+        if self.tokens_per_page <= 0:
+            raise ValueError("tokens_per_page must be positive")
+        if self.cached_token_bytes_per_layer <= 0:
+            raise ValueError("cached_token_bytes_per_layer must be positive")
+        if self.cached_token_bytes_local <= 0:
+            raise ValueError("cached_token_bytes_local must be positive")
+        if self.page_buffer_token_bytes <= 0:
+            raise ValueError("page_buffer_token_bytes must be positive")
+        if self.dtype_size <= 0:
+            raise ValueError("dtype_size must be positive")
+        if self.num_layers <= 0:
+            raise ValueError("num_layers must be positive")
+        if self.num_kv_heads <= 0:
+            raise ValueError("num_kv_heads must be positive")
+        if self.head_size <= 0:
+            raise ValueError("head_size must be positive")
+        if not self.cache_components:
+            raise ValueError("cache_components must be non-empty")
+
+        component_token_dim = sum(
+            component.token_dim for component in self.cache_components
+        )
+        if component_token_dim * self.dtype_size != self.cached_token_bytes_per_layer:
+            raise ValueError(
+                "cache_components do not match cached_token_bytes_per_layer"
+            )
+        if self.page_buffer_token_bytes > self.page_size:
+            raise ValueError("page_buffer_token_bytes cannot exceed page_size")
+        if self.tokens_per_page != self.page_size // self.page_buffer_token_bytes:
+            raise ValueError("tokens_per_page does not match page_size and page_buffer_token_bytes")
+
+        is_mla = self.architecture == CacheArchitecture.MLA
+        if is_mla:
+            if self.mla_kv_lora_rank is None or self.mla_qk_rope_head_dim is None:
+                raise ValueError("MLA cache spec requires MLA dimensions")
+        else:
+            if self.mla_kv_lora_rank is not None or self.mla_qk_rope_head_dim is not None:
+                raise ValueError("Dense KV cache spec cannot carry MLA dimensions")
 
     def to_extension_dict(self) -> Dict[str, Any]:
         return {
@@ -91,6 +139,14 @@ class VAttentionInitSpec:
     max_context_length: int
     device_idx: int
     dtype: torch.dtype
+
+    def __post_init__(self):
+        if self.max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        if self.max_context_length <= 0:
+            raise ValueError("max_context_length must be positive")
+        if self.device_idx < 0:
+            raise ValueError("device_idx must be non-negative")
 
     def to_legacy_init_kvcache_args(self) -> Tuple[int, int, int, int, int, int, torch.dtype, int, bool]:
         return (

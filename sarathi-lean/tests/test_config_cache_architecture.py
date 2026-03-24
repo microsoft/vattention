@@ -780,6 +780,84 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(payload["cache_spec"]["mla_kv_lora_rank"], 512)
         self.assertEqual(payload["cache_spec"]["mla_qk_rope_head_dim"], 64)
 
+    def test_cache_component_spec_rejects_non_positive_dim(self):
+        with self.assertRaises(ValueError):
+            CacheComponentSpec(name="kv_latent", token_dim=0)
+
+    def test_vattention_cache_spec_rejects_mismatched_component_bytes(self):
+        with self.assertRaises(ValueError):
+            VAttentionCacheSpec(
+                architecture=CacheArchitecture.MLA,
+                megacache=False,
+                page_size=2 * 1024 * 1024,
+                tokens_per_page=1024,
+                cached_token_bytes_per_layer=100,
+                cached_token_bytes_local=2000,
+                page_buffer_token_bytes=200,
+                dtype_size=2,
+                num_layers=20,
+                num_kv_heads=32,
+                head_size=40,
+                cache_components=(
+                    CacheComponentSpec(name="kv_latent", token_dim=32),
+                    CacheComponentSpec(name="k_rope", token_dim=16),
+                ),
+                mla_kv_lora_rank=32,
+                mla_qk_rope_head_dim=16,
+            )
+
+    def test_vattention_cache_spec_rejects_dense_kv_with_mla_fields(self):
+        with self.assertRaises(ValueError):
+            VAttentionCacheSpec(
+                architecture=CacheArchitecture.DENSE_KV,
+                megacache=False,
+                page_size=2 * 1024 * 1024,
+                tokens_per_page=2048,
+                cached_token_bytes_per_layer=2048,
+                cached_token_bytes_local=24576,
+                page_buffer_token_bytes=1024,
+                dtype_size=2,
+                num_layers=12,
+                num_kv_heads=4,
+                head_size=128,
+                cache_components=(
+                    CacheComponentSpec(name="k", token_dim=512),
+                    CacheComponentSpec(name="v", token_dim=512),
+                ),
+                mla_kv_lora_rank=512,
+                mla_qk_rope_head_dim=64,
+            )
+
+    def test_vattention_init_spec_rejects_invalid_runtime_values(self):
+        valid_cache_spec = VAttentionCacheSpec(
+            architecture=CacheArchitecture.DENSE_KV,
+            megacache=False,
+            page_size=2 * 1024 * 1024,
+            tokens_per_page=2048,
+            cached_token_bytes_per_layer=2048,
+            cached_token_bytes_local=24576,
+            page_buffer_token_bytes=1024,
+            dtype_size=2,
+            num_layers=12,
+            num_kv_heads=4,
+            head_size=128,
+            cache_components=(
+                CacheComponentSpec(name="k", token_dim=512),
+                CacheComponentSpec(name="v", token_dim=512),
+            ),
+            mla_kv_lora_rank=None,
+            mla_qk_rope_head_dim=None,
+        )
+
+        with self.assertRaises(ValueError):
+            VAttentionInitSpec(
+                cache_spec=valid_cache_spec,
+                max_batch_size=0,
+                max_context_length=8192,
+                device_idx=0,
+                dtype=torch.float16,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
