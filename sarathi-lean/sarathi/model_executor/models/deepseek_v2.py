@@ -949,6 +949,7 @@ class DeepseekV2ForCausalLM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.lm_head = None
         self.model = DeepseekV2Model(config)
         self.mla_dims = DeepseekV2MLADims.from_config(config)
 

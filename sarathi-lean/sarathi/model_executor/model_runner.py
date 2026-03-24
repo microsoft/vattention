@@ -67,6 +67,51 @@ class ModelRunner:
             CpuOperationMetrics.MODEL_EXECUTION_E2E, rank=self.rank
         )
 
+    def _execute_model(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches,
+        model_kwargs: Optional[dict] = None,
+    ):
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        projection_weights = model_kwargs.pop("projection_weights", None)
+        caches = model_kwargs.pop("caches", None)
+        softmax_scale = model_kwargs.pop("softmax_scale", None)
+
+        if projection_weights is not None:
+            if model_kwargs:
+                raise ValueError(
+                    "Unsupported model_kwargs for projection-weight execution: "
+                    + ", ".join(sorted(model_kwargs.keys()))
+                )
+            if hasattr(self.model, "forward_with_attention_wrapper"):
+                return self.model.forward_with_attention_wrapper(
+                    hidden_states=hidden_states,
+                    projection_weights=projection_weights,
+                    kv_caches=kv_caches,
+                    attention_wrapper=get_attention_wrapper(),
+                    caches=caches,
+                    softmax_scale=softmax_scale,
+                )
+            return self.model(
+                hidden_states=hidden_states,
+                projection_weights=projection_weights,
+                caches=caches,
+                softmax_scale=softmax_scale,
+            )
+
+        if model_kwargs:
+            raise ValueError(
+                "Unsupported model_kwargs for standard execution: "
+                + ", ".join(sorted(model_kwargs.keys()))
+            )
+        return self.model(
+            hidden_states=hidden_states,
+            positions=positions,
+            kv_caches=kv_caches,
+        )
+
     def _prepare_inputs(
         self,
         seq_metadata_list: List[SequenceMetadata],
@@ -228,6 +273,7 @@ class ModelRunner:
         self,
         seq_metadata_list: List[SequenceMetadata],
         gpu_cache: Optional[List[torch.Tensor]] = None,
+        model_kwargs: Optional[dict] = None,
     ) -> torch.Tensor:
         # Prepare input tensors.
         with self._prepare_inputs_e2e_timer:
@@ -239,10 +285,11 @@ class ModelRunner:
         with self._model_execution_e2e_timer:
             # Execute the model.
             try:
-                output = self.model(
+                output = self._execute_model(
                     hidden_states=input_tokens,
                     positions=input_positions,
                     kv_caches=gpu_cache,
+                    model_kwargs=model_kwargs,
                 )
             except RuntimeError as e:
                 logger.error(

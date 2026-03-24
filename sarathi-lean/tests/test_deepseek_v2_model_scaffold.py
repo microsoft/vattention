@@ -145,6 +145,7 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         self.assertIsInstance(model.model, DeepseekV2Model)
         self.assertEqual(model.mla_dims.num_heads, 128)
         self.assertEqual(model.model.num_layers, 60)
+        self.assertIsNone(model.lm_head)
 
 
 if __name__ == "__main__":
