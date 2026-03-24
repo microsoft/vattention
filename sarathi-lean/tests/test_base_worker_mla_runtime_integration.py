@@ -871,6 +871,172 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             "overlap_two_reqs",
         )
 
+    def test_worker_can_compare_mla_runtime_sweep_families(self):
+        families = [
+            {
+                "family_name": "prompt_length_matrix",
+                "patterns": [
+                    {
+                        "name": "short_prompt",
+                        "history": [
+                            {
+                                "event": "step",
+                                "persistent_tokens": 2,
+                                "persistent_bytes": 64,
+                                "free_blocks": 8,
+                                "active_request_count": 1,
+                                "seq_to_batch_idx": {10: 0},
+                                "active_batch_indices": (0,),
+                            },
+                            {
+                                "event": "free_request",
+                                "persistent_tokens": 0,
+                                "persistent_bytes": 0,
+                                "free_blocks": 9,
+                                "active_request_count": 0,
+                                "seq_to_batch_idx": {},
+                                "active_batch_indices": (),
+                            },
+                        ],
+                    },
+                    {
+                        "name": "long_prompt",
+                        "history": [
+                            {
+                                "event": "step",
+                                "persistent_tokens": 4,
+                                "persistent_bytes": 128,
+                                "free_blocks": 6,
+                                "active_request_count": 1,
+                                "seq_to_batch_idx": {20: 0},
+                                "active_batch_indices": (0,),
+                            },
+                            {
+                                "event": "free_request",
+                                "persistent_tokens": 0,
+                                "persistent_bytes": 0,
+                                "free_blocks": 9,
+                                "active_request_count": 0,
+                                "seq_to_batch_idx": {},
+                                "active_batch_indices": (),
+                            },
+                        ],
+                    },
+                ],
+            },
+            {
+                "family_name": "overlap_matrix",
+                "patterns": [
+                    {
+                        "name": "single_req",
+                        "history": [
+                            {
+                                "event": "step",
+                                "persistent_tokens": 3,
+                                "persistent_bytes": 96,
+                                "free_blocks": 7,
+                                "active_request_count": 1,
+                                "seq_to_batch_idx": {30: 0},
+                                "active_batch_indices": (0,),
+                            },
+                            {
+                                "event": "free_request",
+                                "persistent_tokens": 0,
+                                "persistent_bytes": 0,
+                                "free_blocks": 9,
+                                "active_request_count": 0,
+                                "seq_to_batch_idx": {},
+                                "active_batch_indices": (),
+                            },
+                        ],
+                    },
+                    {
+                        "name": "overlap_two_reqs",
+                        "history": [
+                            {
+                                "event": "step",
+                                "persistent_tokens": 2,
+                                "persistent_bytes": 64,
+                                "free_blocks": 8,
+                                "active_request_count": 1,
+                                "seq_to_batch_idx": {40: 0},
+                                "active_batch_indices": (0,),
+                            },
+                            {
+                                "event": "step",
+                                "persistent_tokens": 5,
+                                "persistent_bytes": 160,
+                                "free_blocks": 5,
+                                "active_request_count": 2,
+                                "seq_to_batch_idx": {40: 0, 41: 1},
+                                "active_batch_indices": (0, 1),
+                            },
+                            {
+                                "event": "free_request",
+                                "persistent_tokens": 1,
+                                "persistent_bytes": 32,
+                                "free_blocks": 7,
+                                "active_request_count": 1,
+                                "seq_to_batch_idx": {41: 1},
+                                "active_batch_indices": (1,),
+                            },
+                        ],
+                    },
+                ],
+            },
+        ]
+
+        family_summaries = []
+        for family in families:
+            pattern_summaries = []
+            for pattern in family["patterns"]:
+                cache_engine = _SequencedFakeCacheEngine(pattern["history"])
+                seq_lists = [["step-1"], ["step-2"], ["step-3"]][: len(pattern["history"])]
+                worker = self._make_worker(
+                    model_runner=_FakeModelRunner(output="sampler-output"),
+                    gpu_cache=("gpu-cache",),
+                    seq_manager=_SequencedFakeSeqManager(seq_lists),
+                    cache_engine=cache_engine,
+                )
+                worker.execute_model(scheduler_outputs="step-1")
+                if len(pattern["history"]) > 1:
+                    worker.execute_model(scheduler_outputs="step-2")
+                if len(pattern["history"]) > 2:
+                    worker.execute_model(
+                        scheduler_outputs="step-3",
+                        preempted_seq=[types.SimpleNamespace(seq_id=40)],
+                    )
+                pattern_summaries.append(
+                    worker.get_cache_usage_summary() | {"pattern_name": pattern["name"]}
+                )
+            family_summaries.append(
+                self.cache_engine_module.summarize_vattention_cache_sweep_family(
+                    family["family_name"],
+                    pattern_summaries,
+                )
+            )
+
+        matrix_summary = self.cache_engine_module.summarize_vattention_cache_sweep_matrix(
+            family_summaries
+        )
+
+        self.assertEqual(len(family_summaries), 2)
+        self.assertEqual(family_summaries[0]["family_name"], "prompt_length_matrix")
+        self.assertEqual(family_summaries[0]["max_peak_persistent_bytes"], 128)
+        self.assertEqual(family_summaries[1]["family_name"], "overlap_matrix")
+        self.assertEqual(family_summaries[1]["min_free_blocks_overall"], 5)
+        self.assertEqual(matrix_summary["num_families"], 2)
+        self.assertEqual(
+            matrix_summary["family_names"],
+            ("prompt_length_matrix", "overlap_matrix"),
+        )
+        self.assertEqual(matrix_summary["max_peak_persistent_bytes"], 160)
+        self.assertEqual(matrix_summary["min_free_blocks_overall"], 5)
+        self.assertEqual(matrix_summary["max_largest_growth_bytes"], 96)
+        self.assertEqual(matrix_summary["max_largest_reclaim_bytes"], 128)
+        self.assertEqual(matrix_summary["family_with_max_peak_bytes"], "overlap_matrix")
+        self.assertEqual(matrix_summary["family_with_min_free_blocks"], "overlap_matrix")
+
 
 if __name__ == "__main__":
     unittest.main()

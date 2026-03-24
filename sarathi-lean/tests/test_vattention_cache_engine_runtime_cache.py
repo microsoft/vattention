@@ -139,6 +139,12 @@ summarize_vattention_cache_transition = (
 )
 summarize_vattention_cache_history = cache_engine_module.summarize_vattention_cache_history
 summarize_vattention_cache_sweeps = cache_engine_module.summarize_vattention_cache_sweeps
+summarize_vattention_cache_sweep_family = (
+    cache_engine_module.summarize_vattention_cache_sweep_family
+)
+summarize_vattention_cache_sweep_matrix = (
+    cache_engine_module.summarize_vattention_cache_sweep_matrix
+)
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -384,6 +390,71 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(sweep_summary["max_largest_reclaim_bytes"], 128)
         self.assertEqual(sweep_summary["pattern_with_max_peak_bytes"], "overlap_two_reqs")
         self.assertEqual(sweep_summary["pattern_with_min_free_blocks"], "overlap_two_reqs")
+
+    def test_cache_usage_sweep_family_and_matrix_aggregate_pattern_groups(self):
+        prompt_family = summarize_vattention_cache_sweep_family(
+            "prompt_length_matrix",
+            (
+                {
+                    "pattern_name": "short_prompt",
+                    "peak_persistent_tokens": 2,
+                    "peak_persistent_bytes": 64,
+                    "min_free_blocks": 8,
+                    "largest_growth_bytes": 64,
+                    "largest_reclaim_bytes": 64,
+                },
+                {
+                    "pattern_name": "long_prompt",
+                    "peak_persistent_tokens": 4,
+                    "peak_persistent_bytes": 128,
+                    "min_free_blocks": 6,
+                    "largest_growth_bytes": 128,
+                    "largest_reclaim_bytes": 128,
+                },
+            ),
+        )
+        overlap_family = summarize_vattention_cache_sweep_family(
+            "overlap_matrix",
+            (
+                {
+                    "pattern_name": "single_req",
+                    "peak_persistent_tokens": 3,
+                    "peak_persistent_bytes": 96,
+                    "min_free_blocks": 7,
+                    "largest_growth_bytes": 32,
+                    "largest_reclaim_bytes": 96,
+                },
+                {
+                    "pattern_name": "overlap_two_reqs",
+                    "peak_persistent_tokens": 5,
+                    "peak_persistent_bytes": 160,
+                    "min_free_blocks": 5,
+                    "largest_growth_bytes": 96,
+                    "largest_reclaim_bytes": 128,
+                },
+            ),
+        )
+
+        matrix_summary = summarize_vattention_cache_sweep_matrix(
+            (prompt_family, overlap_family)
+        )
+
+        self.assertEqual(prompt_family["family_name"], "prompt_length_matrix")
+        self.assertEqual(prompt_family["max_peak_persistent_bytes"], 128)
+        self.assertEqual(overlap_family["family_name"], "overlap_matrix")
+        self.assertEqual(overlap_family["min_free_blocks_overall"], 5)
+        self.assertEqual(matrix_summary["num_families"], 2)
+        self.assertEqual(
+            matrix_summary["family_names"],
+            ("prompt_length_matrix", "overlap_matrix"),
+        )
+        self.assertEqual(matrix_summary["max_peak_persistent_bytes"], 160)
+        self.assertEqual(matrix_summary["max_peak_persistent_tokens"], 5)
+        self.assertEqual(matrix_summary["min_free_blocks_overall"], 5)
+        self.assertEqual(matrix_summary["max_largest_growth_bytes"], 128)
+        self.assertEqual(matrix_summary["max_largest_reclaim_bytes"], 128)
+        self.assertEqual(matrix_summary["family_with_max_peak_bytes"], "overlap_matrix")
+        self.assertEqual(matrix_summary["family_with_min_free_blocks"], "overlap_matrix")
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(

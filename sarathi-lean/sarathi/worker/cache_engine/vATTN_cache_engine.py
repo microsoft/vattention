@@ -201,6 +201,70 @@ def summarize_vattention_cache_sweeps(pattern_summaries) -> dict:
     }
 
 
+def summarize_vattention_cache_sweep_family(
+    family_name,
+    pattern_summaries,
+) -> dict:
+    sweep_summary = summarize_vattention_cache_sweeps(pattern_summaries)
+    return {"family_name": family_name} | sweep_summary
+
+
+def summarize_vattention_cache_sweep_matrix(family_summaries) -> dict:
+    family_summaries = tuple(family_summaries)
+    if not family_summaries:
+        return {
+            "num_families": 0,
+            "family_names": (),
+            "max_peak_persistent_bytes": 0,
+            "max_peak_persistent_tokens": 0,
+            "min_free_blocks_overall": None,
+            "max_largest_growth_bytes": 0,
+            "max_largest_reclaim_bytes": 0,
+            "family_with_max_peak_bytes": None,
+            "family_with_min_free_blocks": None,
+        }
+
+    def _family_name(summary):
+        return summary.get("family_name")
+
+    max_peak_summary = max(
+        family_summaries,
+        key=lambda summary: summary["max_peak_persistent_bytes"],
+    )
+    free_block_summaries = [
+        summary for summary in family_summaries
+        if summary.get("min_free_blocks_overall") is not None
+    ]
+    min_free_summary = (
+        min(free_block_summaries, key=lambda summary: summary["min_free_blocks_overall"])
+        if free_block_summaries
+        else None
+    )
+    return {
+        "num_families": len(family_summaries),
+        "family_names": tuple(_family_name(summary) for summary in family_summaries),
+        "max_peak_persistent_bytes": max(
+            summary["max_peak_persistent_bytes"] for summary in family_summaries
+        ),
+        "max_peak_persistent_tokens": max(
+            summary["max_peak_persistent_tokens"] for summary in family_summaries
+        ),
+        "min_free_blocks_overall": (
+            None if min_free_summary is None else min_free_summary["min_free_blocks_overall"]
+        ),
+        "max_largest_growth_bytes": max(
+            summary["max_largest_growth_bytes"] for summary in family_summaries
+        ),
+        "max_largest_reclaim_bytes": max(
+            summary["max_largest_reclaim_bytes"] for summary in family_summaries
+        ),
+        "family_with_max_peak_bytes": _family_name(max_peak_summary),
+        "family_with_min_free_blocks": (
+            None if min_free_summary is None else _family_name(min_free_summary)
+        ),
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (
