@@ -289,6 +289,36 @@ class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
         self.assertEqual(wrapper.calls[0].layer_id, 9)
         self.assertEqual(layer_cache.resident_cache.num_tokens, 2)
 
+    def test_attention_wrapper_bridge_passes_combined_layer_cache_to_forward_mla(self):
+        config = self._make_config()
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        attention = DeepseekV2MLAAttention(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        wrapper = _RecordingMLAAttentionWrapper()
+        kv_cache = object()
+
+        _, layer_cache = attention.forward_hidden_states_with_attention_wrapper(
+            hidden_states=self._make_hidden_states()[:1],
+            projection_weights=projection_weights,
+            kv_cache=kv_cache,
+            layer_id=13,
+            attention_wrapper=wrapper,
+        )
+        output, next_layer_cache = attention.forward_hidden_states_with_attention_wrapper(
+            hidden_states=self._make_hidden_states()[1:],
+            projection_weights=projection_weights,
+            kv_cache=layer_cache,
+            layer_id=13,
+            attention_wrapper=wrapper,
+        )
+
+        self.assertEqual(tuple(output.shape), (1, config.hidden_size))
+        self.assertEqual(len(wrapper.calls), 2)
+        self.assertIsInstance(wrapper.calls[1].kv_cache, DeepseekV2LayerCache)
+        self.assertIs(wrapper.calls[1].kv_cache.kv_cache, kv_cache)
+        self.assertEqual(wrapper.calls[1].kv_cache.resident_cache.num_tokens, 1)
+        self.assertEqual(next_layer_cache.resident_cache.num_tokens, 2)
+
     def test_decoder_layer_threads_layer_id_into_attention_wrapper(self):
         config = self._make_config()
         dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)

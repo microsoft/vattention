@@ -256,6 +256,12 @@ def resolve_layer_cache(
     return layer_cache_or_kv_cache, resident_cache
 
 
+def get_layer_cache_kv_handle(layer_cache_or_kv_cache) -> object:
+    if isinstance(layer_cache_or_kv_cache, DeepseekV2LayerCache):
+        return layer_cache_or_kv_cache.kv_cache
+    return layer_cache_or_kv_cache
+
+
 def project_mla_from_hidden_states(
     hidden_states: torch.Tensor,
     projection_weights: DeepseekV2MLAProjectionWeights,
@@ -395,6 +401,10 @@ def prepare_mla_wrapper_inputs(
     cache: Optional[DeepseekV2MLAResidentCache] = None,
     softmax_scale: Optional[float] = None,
 ) -> Tuple[DeepseekV2MLAWrapperInputs, DeepseekV2MLAResidentCache]:
+    kv_cache_carries_resident_state = (
+        isinstance(kv_cache, DeepseekV2LayerCache) and cache is None
+    )
+    _, resolved_cache = resolve_layer_cache(kv_cache, cache)
     query_states, new_cache = project_mla_from_hidden_states(
         hidden_states,
         projection_weights,
@@ -411,13 +421,15 @@ def prepare_mla_wrapper_inputs(
             query=query,
             kv_cache=kv_cache,
             kv_up_proj_weight=projection_weights.kv_up_proj,
-            past_resident_cache=cache,
+            past_resident_cache=(
+                None if kv_cache_carries_resident_state else resolved_cache
+            ),
             new_resident_cache=new_cache,
             softmax_scale=softmax_scale,
             layer_id=layer_id,
             mla_dims=mla_dims,
         ),
-        append_resident_cache(cache, new_cache),
+        append_resident_cache(resolved_cache, new_cache),
     )
 
 
@@ -449,6 +461,7 @@ def mla_attention_with_wrapper(
     if hasattr(attention_wrapper, "forward_mla"):
         output = attention_wrapper.forward_mla(wrapper_inputs)
     else:
+        runtime_kv_cache = get_layer_cache_kv_handle(wrapper_inputs.kv_cache)
         key, value = reconstruct_dense_kv(
             full_cache,
             projection_weights.kv_up_proj,
@@ -458,7 +471,7 @@ def mla_attention_with_wrapper(
             wrapper_inputs.query.reshape(wrapper_inputs.query.shape[0], -1),
             key.reshape(key.shape[0], -1),
             value.reshape(value.shape[0], -1),
-            wrapper_inputs.kv_cache,
+            runtime_kv_cache,
             wrapper_inputs.softmax_scale,
             wrapper_inputs.layer_id,
         )
@@ -631,18 +644,17 @@ class DeepseekV2MLAAttention(nn.Module):
         cache: Optional[DeepseekV2MLAResidentCache] = None,
         softmax_scale: Optional[float] = None,
     ) -> Tuple[torch.Tensor, DeepseekV2LayerCache]:
-        runtime_kv_cache, cache = resolve_layer_cache(kv_cache, cache)
         output, next_cache = mla_attention_with_wrapper(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
             mla_dims=self.mla_dims,
-            kv_cache=runtime_kv_cache,
+            kv_cache=kv_cache,
             layer_id=layer_id,
             attention_wrapper=attention_wrapper,
             cache=cache,
             softmax_scale=softmax_scale,
         )
-        return output, make_layer_cache(runtime_kv_cache, next_cache)
+        return output, make_layer_cache(get_layer_cache_kv_handle(kv_cache), next_cache)
 
     def forward_hidden_states_contiguous_batched(
         self,

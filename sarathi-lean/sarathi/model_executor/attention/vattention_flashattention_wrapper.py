@@ -248,6 +248,7 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
         from sarathi.model_executor.models.deepseek_v2 import (
             append_resident_cache,
             reconstruct_dense_kv,
+            resolve_layer_cache,
         )
 
         assert self.is_metadata_initialized, "Metadata is not initialized."
@@ -267,12 +268,16 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
         query_lens = self.prefill_query_lens + [1] * len(decode_cache_lens)
         past_lens = self.prefill_cache_lens + decode_cache_lens
 
+        _, past_resident_cache = resolve_layer_cache(
+            wrapper_inputs.kv_cache,
+            wrapper_inputs.past_resident_cache,
+        )
         current_cache_chunks = _split_resident_cache_by_lengths(
             wrapper_inputs.new_resident_cache,
             query_lens,
         )
         past_cache_chunks = _split_resident_cache_by_lengths(
-            wrapper_inputs.past_resident_cache,
+            past_resident_cache,
             past_lens,
         )
 

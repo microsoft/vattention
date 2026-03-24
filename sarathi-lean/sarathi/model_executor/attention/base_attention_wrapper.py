@@ -89,11 +89,17 @@ class BaseAttentionWrapper(ABC):
 
         from sarathi.model_executor.models.deepseek_v2 import (
             append_resident_cache,
+            get_layer_cache_kv_handle,
             reconstruct_dense_kv,
+            resolve_layer_cache,
         )
 
-        full_cache = append_resident_cache(
+        runtime_kv_cache, past_resident_cache = resolve_layer_cache(
+            wrapper_inputs.kv_cache,
             wrapper_inputs.past_resident_cache,
+        )
+        full_cache = append_resident_cache(
+            past_resident_cache,
             wrapper_inputs.new_resident_cache,
         )
         key, value = reconstruct_dense_kv(
@@ -105,7 +111,7 @@ class BaseAttentionWrapper(ABC):
             wrapper_inputs.query.reshape(wrapper_inputs.query.shape[0], -1),
             key.reshape(key.shape[0], -1),
             value.reshape(value.shape[0], -1),
-            wrapper_inputs.kv_cache,
+            get_layer_cache_kv_handle(runtime_kv_cache),
             wrapper_inputs.softmax_scale,
             wrapper_inputs.layer_id,
         )

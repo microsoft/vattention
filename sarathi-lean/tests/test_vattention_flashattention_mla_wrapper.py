@@ -313,6 +313,40 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
         self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
         self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
 
+    def test_forward_mla_can_read_past_resident_cache_from_layer_cache(self):
+        dims = self.deepseek_module.DeepseekV2MLADims.from_config(
+            self._make_config(),
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = self._make_projection_weights(dims)
+        hidden_states = self._make_hidden_states()
+        kv_handle = object()
+        _, past_cache = self.deepseek_module.prepare_mla_wrapper_inputs(
+            hidden_states=hidden_states[:1],
+            projection_weights=projection_weights,
+            mla_dims=dims,
+            kv_cache=kv_handle,
+            layer_id=6,
+        )
+        wrapper_inputs, _ = self.deepseek_module.prepare_mla_wrapper_inputs(
+            hidden_states=hidden_states[1:],
+            projection_weights=projection_weights,
+            mla_dims=dims,
+            kv_cache=self.deepseek_module.make_layer_cache(kv_handle, past_cache),
+            layer_id=6,
+        )
+        wrapper = self._make_wrapper()
+        wrapper.prefill_query_lens = []
+        wrapper.prefill_cache_lens = []
+        wrapper.decode_cache_lens = torch.tensor([1], dtype=torch.int32)
+
+        output = wrapper.forward_mla(wrapper_inputs)
+
+        self.assertEqual(tuple(output.shape), (1, dims.o_proj_input_dim_local))
+        self.assertEqual(len(self.flash_calls), 1)
+        self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
+        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
+
 
 if __name__ == "__main__":
     unittest.main()
