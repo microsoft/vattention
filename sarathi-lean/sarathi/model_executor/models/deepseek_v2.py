@@ -1357,6 +1357,25 @@ class DeepseekV2ForCausalLM(nn.Module):
         )
 
     @staticmethod
+    def _make_optional_mlp_weights(
+        tensors: Mapping[str, Optional[torch.Tensor]],
+        *,
+        hidden_size: int,
+    ) -> Optional[DeepseekV2MLPWeights]:
+        present_keys = [name for name, tensor in tensors.items() if tensor is not None]
+        if not present_keys:
+            return None
+        if len(present_keys) != len(tensors):
+            missing = sorted(set(tensors) - set(present_keys))
+            raise KeyError("Missing scaffold MLP weights: " + ", ".join(missing))
+        return make_mlp_weights(
+            gate_proj=tensors["gate_proj"],
+            up_proj=tensors["up_proj"],
+            down_proj=tensors["down_proj"],
+            hidden_size=hidden_size,
+        )
+
+    @staticmethod
     def _has_moe_layer_weights(
         state_dict: Mapping[str, torch.Tensor],
         layer_prefixes: Tuple[str, ...],
@@ -1395,6 +1414,7 @@ class DeepseekV2ForCausalLM(nn.Module):
     ) -> None:
         local_projection_weights = []
         local_mlp_weights = []
+        local_moe_weights = []
         hidden_size = self.config.hidden_size
 
         if self.model.embed_tokens is not None:
@@ -1629,16 +1649,6 @@ class DeepseekV2ForCausalLM(nn.Module):
             global_layer_idx = self.model.layer_offset + layer_idx
             first_k_dense_replace = getattr(self.config, "first_k_dense_replace", None)
             n_routed_experts = getattr(self.config, "n_routed_experts", 0)
-            if (
-                first_k_dense_replace is not None
-                and n_routed_experts
-                and global_layer_idx >= first_k_dense_replace
-                and self._has_moe_layer_weights(state_dict, mlp_prefixes)
-            ):
-                raise NotImplementedError(
-                    "DeepSeek-V2 MoE weight loading is not implemented yet "
-                    f"(encountered MoE weights for layer {global_layer_idx})"
-                )
             mlp_tensors = {
                 "gate_proj": self._get_scaffold_tensor(
                     state_dict,
@@ -1656,7 +1666,102 @@ class DeepseekV2ForCausalLM(nn.Module):
             present_mlp_keys = [
                 name for name, tensor in mlp_tensors.items() if tensor is not None
             ]
+            mlp_reference = layer.post_attention_layernorm.weight
+            mlp_tensors = {
+                name: self._coerce_scaffold_tensor(
+                    tensor,
+                    reference=mlp_reference,
+                )
+                for name, tensor in mlp_tensors.items()
+            }
+            routed_gate = self._get_scaffold_tensor(
+                state_dict,
+                *(f"{prefix}.gate.weight" for prefix in mlp_prefixes),
+            )
+            routed_gate = self._coerce_scaffold_tensor(
+                routed_gate,
+                reference=mlp_reference,
+            )
+            shared_expert_tensors = {
+                "gate_proj": self._coerce_scaffold_tensor(
+                    self._get_scaffold_tensor(
+                        state_dict,
+                        *(f"{prefix}.shared_experts.gate_proj.weight" for prefix in mlp_prefixes),
+                    ),
+                    reference=mlp_reference,
+                ),
+                "up_proj": self._coerce_scaffold_tensor(
+                    self._get_scaffold_tensor(
+                        state_dict,
+                        *(f"{prefix}.shared_experts.up_proj.weight" for prefix in mlp_prefixes),
+                    ),
+                    reference=mlp_reference,
+                ),
+                "down_proj": self._coerce_scaffold_tensor(
+                    self._get_scaffold_tensor(
+                        state_dict,
+                        *(f"{prefix}.shared_experts.down_proj.weight" for prefix in mlp_prefixes),
+                    ),
+                    reference=mlp_reference,
+                ),
+            }
+            routed_experts = []
+            for expert_idx in range(n_routed_experts):
+                expert_tensors = {
+                    "gate_proj": self._coerce_scaffold_tensor(
+                        self._get_scaffold_tensor(
+                            state_dict,
+                            *(
+                                f"{prefix}.experts.{expert_idx}.gate_proj.weight"
+                                for prefix in mlp_prefixes
+                            ),
+                        ),
+                        reference=mlp_reference,
+                    ),
+                    "up_proj": self._coerce_scaffold_tensor(
+                        self._get_scaffold_tensor(
+                            state_dict,
+                            *(
+                                f"{prefix}.experts.{expert_idx}.up_proj.weight"
+                                for prefix in mlp_prefixes
+                            ),
+                        ),
+                        reference=mlp_reference,
+                    ),
+                    "down_proj": self._coerce_scaffold_tensor(
+                        self._get_scaffold_tensor(
+                            state_dict,
+                            *(
+                                f"{prefix}.experts.{expert_idx}.down_proj.weight"
+                                for prefix in mlp_prefixes
+                            ),
+                        ),
+                        reference=mlp_reference,
+                    ),
+                }
+                try:
+                    expert_weights = self._make_optional_mlp_weights(
+                        expert_tensors,
+                        hidden_size=hidden_size,
+                    )
+                except KeyError as exc:
+                    raise KeyError(
+                        f"Incomplete routed expert weights for layer {global_layer_idx} "
+                        f"expert {expert_idx}: {exc}"
+                    ) from exc
+                if expert_weights is not None:
+                    routed_experts.append(expert_weights)
+            has_moe_weights = (
+                routed_gate is not None
+                or self._has_moe_layer_weights(state_dict, mlp_prefixes)
+                or any(tensor is not None for tensor in shared_expert_tensors.values())
+                or bool(routed_experts)
+            )
             if present_mlp_keys:
+                if has_moe_weights:
+                    raise ValueError(
+                        f"Layer {global_layer_idx} provides both dense MLP and MoE weights"
+                    )
                 if len(present_mlp_keys) != len(mlp_tensors):
                     if strict:
                         missing = sorted(set(mlp_tensors) - set(present_mlp_keys))
@@ -1665,15 +1770,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                             f"{layer_idx}: {', '.join(missing)}"
                         )
                     local_mlp_weights.append(None)
+                    local_moe_weights.append(None)
                 else:
-                    mlp_reference = layer.post_attention_layernorm.weight
-                    mlp_tensors = {
-                        name: self._coerce_scaffold_tensor(
-                            tensor,
-                            reference=mlp_reference,
-                        )
-                        for name, tensor in mlp_tensors.items()
-                    }
                     local_mlp_weights.append(
                         make_mlp_weights(
                             gate_proj=mlp_tensors["gate_proj"],
@@ -1682,12 +1780,51 @@ class DeepseekV2ForCausalLM(nn.Module):
                             hidden_size=hidden_size,
                         )
                     )
+                    local_moe_weights.append(None)
+            elif has_moe_weights:
+                if first_k_dense_replace is None or not n_routed_experts:
+                    raise NotImplementedError(
+                        "DeepSeek-V2 MoE weights require MoE-aware config fields"
+                    )
+                if global_layer_idx < first_k_dense_replace:
+                    raise ValueError(
+                        f"Layer {global_layer_idx} carries MoE weights before first_k_dense_replace"
+                    )
+                if routed_gate is None:
+                    raise KeyError(f"Missing scaffold MoE gate weights for layer {global_layer_idx}")
+                if len(routed_experts) != n_routed_experts:
+                    raise KeyError(
+                        f"Missing routed expert weights for layer {global_layer_idx}: "
+                        f"expected {n_routed_experts}, found {len(routed_experts)}"
+                    )
+                try:
+                    shared_experts = self._make_optional_mlp_weights(
+                        shared_expert_tensors,
+                        hidden_size=hidden_size,
+                    )
+                except KeyError as exc:
+                    raise KeyError(
+                        f"Incomplete shared expert weights for layer {global_layer_idx}: {exc}"
+                    ) from exc
+                local_mlp_weights.append(None)
+                local_moe_weights.append(
+                    make_moe_weights(
+                        gate=routed_gate,
+                        experts=tuple(routed_experts),
+                        shared_experts=shared_experts,
+                        top_k=getattr(self.config, "num_experts_per_tok", 1),
+                        norm_topk_prob=getattr(self.config, "norm_topk_prob", True),
+                        hidden_size=hidden_size,
+                    )
+                )
             else:
                 local_mlp_weights.append(None)
+                local_moe_weights.append(None)
 
         self.set_scaffold_weights(
             projection_weights=tuple(local_projection_weights),
             mlp_weights=tuple(local_mlp_weights),
+            moe_weights=tuple(local_moe_weights),
         )
 
     @staticmethod
