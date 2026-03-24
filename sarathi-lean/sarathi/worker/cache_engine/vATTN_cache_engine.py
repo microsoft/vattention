@@ -53,6 +53,16 @@ class vATTNCacheEngine(BaseCacheEngine):
     def num_free_blocks(self) -> int:
         return vattention.num_free_kvblocks()
 
+    def _init_kvcache_from_spec(self):
+        init_mode = self.init_spec.get_extension_init_mode()
+        if init_mode == "legacy_dense_kv":
+            return vattention.init_kvcache(
+                *self.init_spec.to_legacy_init_kvcache_args()
+            )
+        raise NotImplementedError(
+            f"vAttention extension init mode '{init_mode}' is not wired yet"
+        )
+
     def allocate_gpu_cache(self) -> List[torch.Tensor]:
         print(f"\n[PYTHON TRACE] Initializing KV Cache:")
         print(f" > Architecture: {self.cache_spec.architecture.value}")
@@ -62,8 +72,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         print(f" > Tokens Per Page: {self.cache_spec.tokens_per_page}")
         print(f" > Page Buffer Token Bytes: {self.cache_spec.page_buffer_token_bytes}")
         
-        kv_cache = vattention.init_kvcache(
-                                    *self.init_spec.to_legacy_init_kvcache_args())
+        kv_cache = self._init_kvcache_from_spec()
         if self.vattn_mega_cache:
             k_cache = kv_cache[0]
             v_cache = kv_cache[1]

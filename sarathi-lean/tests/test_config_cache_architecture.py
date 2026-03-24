@@ -454,6 +454,7 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(init_spec.max_context_length, 8192)
         self.assertEqual(init_spec.device_idx, 0)
         self.assertEqual(init_spec.dtype, torch.float16)
+        self.assertEqual(init_spec.get_extension_init_mode(), "legacy_dense_kv")
         self.assertEqual(
             init_spec.to_legacy_init_kvcache_args(),
             (12, 4, 128, 128, 8192, 0, torch.float16, 2 * 1024 * 1024, False),
@@ -483,6 +484,7 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         )
 
         payload = init_spec.to_extension_dict()
+        self.assertEqual(payload["init_mode"], "legacy_dense_kv")
         self.assertEqual(payload["max_batch_size"], 128)
         self.assertEqual(payload["max_context_length"], 8192)
         self.assertEqual(payload["device_idx"], 0)
@@ -739,10 +741,9 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(init_spec.max_context_length, 16384)
         self.assertEqual(init_spec.device_idx, 2)
         self.assertEqual(init_spec.dtype, torch.float16)
-        self.assertEqual(
-            init_spec.to_legacy_init_kvcache_args(),
-            (20, 32, 40, 64, 16384, 2, torch.float16, 2 * 1024 * 1024, True),
-        )
+        self.assertEqual(init_spec.get_extension_init_mode(), "component_spec")
+        with self.assertRaises(ValueError):
+            init_spec.to_legacy_init_kvcache_args()
 
     def test_mla_vattention_init_spec_exports_structured_payload(self):
         hf_config = types.SimpleNamespace(
@@ -772,6 +773,7 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         )
 
         payload = init_spec.to_extension_dict()
+        self.assertEqual(payload["init_mode"], "component_spec")
         self.assertEqual(payload["max_batch_size"], 64)
         self.assertEqual(payload["max_context_length"], 16384)
         self.assertEqual(payload["device_idx"], 2)

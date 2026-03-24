@@ -148,7 +148,16 @@ class VAttentionInitSpec:
         if self.device_idx < 0:
             raise ValueError("device_idx must be non-negative")
 
+    def get_extension_init_mode(self) -> str:
+        if self.cache_spec.architecture == CacheArchitecture.MLA:
+            return "component_spec"
+        return "legacy_dense_kv"
+
     def to_legacy_init_kvcache_args(self) -> Tuple[int, int, int, int, int, int, torch.dtype, int, bool]:
+        if self.get_extension_init_mode() != "legacy_dense_kv":
+            raise ValueError(
+                "Legacy init_kvcache args are only valid for dense KV cache specs"
+            )
         return (
             self.cache_spec.num_layers,
             self.cache_spec.num_kv_heads,
@@ -163,6 +172,7 @@ class VAttentionInitSpec:
 
     def to_extension_dict(self) -> Dict[str, Any]:
         return {
+            "init_mode": self.get_extension_init_mode(),
             "cache_spec": self.cache_spec.to_extension_dict(),
             "max_batch_size": self.max_batch_size,
             "max_context_length": self.max_context_length,
