@@ -458,6 +458,8 @@ class _InstalledWrapperExecutionModelRunner:
         self.attention_wrapper = attention_wrapper
         self.calls = []
         self.load_calls = []
+        self.prefill_calls = []
+        self.decode_calls = []
 
     def load_model_weights(self, *args, **kwargs):
         self.load_calls.append((args, kwargs))
@@ -477,6 +479,42 @@ class _InstalledWrapperExecutionModelRunner:
             kv_caches=tuple(gpu_cache),
             attention_wrapper=self.attention_wrapper,
             caches=model_kwargs.get("caches"),
+            softmax_scale=model_kwargs.get("softmax_scale"),
+            mlp_weights=model_kwargs.get("mlp_weights"),
+        )
+
+    def run_prefill_tokens(self, token_ids, gpu_cache, model_kwargs=None):
+        self.prefill_calls.append(
+            {
+                "token_ids": token_ids,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        return self.model.prefill_tokens(
+            token_ids,
+            kv_caches=tuple(gpu_cache),
+            attention_wrapper=self.attention_wrapper,
+            softmax_scale=model_kwargs.get("softmax_scale"),
+            mlp_weights=model_kwargs.get("mlp_weights"),
+        )
+
+    def run_decode_tokens(self, token_ids, caches, gpu_cache, model_kwargs=None):
+        self.decode_calls.append(
+            {
+                "token_ids": token_ids,
+                "caches": caches,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        return self.model.decode_tokens(
+            token_ids,
+            caches=caches,
+            kv_caches=tuple(gpu_cache),
+            attention_wrapper=self.attention_wrapper,
             softmax_scale=model_kwargs.get("softmax_scale"),
             mlp_weights=model_kwargs.get("mlp_weights"),
         )
@@ -963,6 +1001,101 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(worker.cache_engine.steps, [["seq-md"]])
         self.assertEqual(worker.cache_engine.completions, [["seq-md"]])
         self.assertEqual(len(self.flash_calls), model.model.num_layers)
+
+    def test_worker_token_prefill_and_decode_match_full_loaded_paged_scaffold_logits(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = self.deepseek_module.DeepseekV2ForCausalLM(config)
+        dims = self.deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size) for _ in range(model.model.num_layers)
+        )
+        scaffold_state_dict = self._make_scaffold_state_dict(
+            config,
+            projection_weights,
+            mlp_weights,
+            include_embed=True,
+            include_lm_head=True,
+        )
+        gpu_cache = model.make_runtime_mla_kv_caches(
+            batch_size=1,
+            max_seq_len=4,
+            device=torch.device("cpu"),
+        )
+        wrapper = self._make_wrapper()
+        model_runner = _InstalledWrapperExecutionModelRunner(
+            model=model,
+            hidden_states=self._make_hidden_states(),
+            attention_wrapper=wrapper,
+        )
+        worker = self._make_worker(
+            model_runner=model_runner,
+            gpu_cache=gpu_cache,
+            cache_usage_stats=None,
+        )
+        worker.load_model_weights(scaffold_state_dict)
+
+        prompt_token_ids = torch.tensor([1, 3], dtype=torch.long)
+        decode_token_ids = torch.tensor([5], dtype=torch.long)
+        full_token_ids = torch.tensor([1, 3, 5], dtype=torch.long)
+
+        wrapper.set_mla_runtime_metadata(
+            prefill_query_lens=[2],
+            prefill_cache_lens=[0],
+            batch_index=[0],
+            batch_index_gen=[],
+        )
+        prefill_logits, layer_caches = worker.prefill_tokens_with_installed_attention_wrapper(
+            prompt_token_ids,
+            softmax_scale=0.25,
+        )
+
+        wrapper.set_mla_runtime_metadata(
+            prefill_query_lens=[],
+            prefill_cache_lens=[],
+            decode_cache_lens=[2],
+            batch_index=[],
+            batch_index_gen=[0],
+        )
+        decode_logits, next_layer_caches = worker.decode_tokens_with_installed_attention_wrapper(
+            decode_token_ids,
+            layer_caches,
+            softmax_scale=0.25,
+        )
+        full_logits, full_caches = model.forward_logits(hidden_states=full_token_ids)
+
+        self.assertEqual(tuple(prefill_logits.shape), (2, config.vocab_size))
+        self.assertEqual(tuple(decode_logits.shape), (1, config.vocab_size))
+        self.assertTrue(torch.allclose(decode_logits[0], full_logits[-1], atol=1e-6, rtol=1e-6))
+        self.assertEqual(len(model_runner.prefill_calls), 1)
+        self.assertEqual(len(model_runner.decode_calls), 1)
+        self.assertEqual(model_runner.prefill_calls[0]["model_kwargs"], {"softmax_scale": 0.25})
+        self.assertEqual(model_runner.decode_calls[0]["model_kwargs"], {"softmax_scale": 0.25})
+        self.assertTrue(
+            all(layer_cache.resident_cache.num_tokens == 3 for layer_cache in next_layer_caches)
+        )
+        self.assertTrue(
+            all(
+                layer_cache.resident_cache.kv_latent.shape == full_cache.kv_latent.shape
+                and layer_cache.resident_cache.k_rope.shape == full_cache.k_rope.shape
+                for layer_cache, full_cache in zip(next_layer_caches, full_caches)
+            )
+        )
 
     def test_worker_can_compare_multiple_mla_runtime_patterns_via_sweep_summaries(self):
         patterns = [

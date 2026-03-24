@@ -185,6 +185,8 @@ class _FakeModelRunner:
         self.output = output
         self.calls = []
         self.load_calls = []
+        self.prefill_calls = []
+        self.decode_calls = []
 
     def run(self, seq_metadata_list, gpu_cache, model_kwargs=None):
         self.calls.append(
@@ -199,6 +201,27 @@ class _FakeModelRunner:
     def load_model_weights(self, *args, **kwargs):
         self.load_calls.append((args, kwargs))
         return "loaded"
+
+    def run_prefill_tokens(self, token_ids, gpu_cache, model_kwargs=None):
+        self.prefill_calls.append(
+            {
+                "token_ids": token_ids,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        return ("prefill-logits", "prefill-caches")
+
+    def run_decode_tokens(self, token_ids, caches, gpu_cache, model_kwargs=None):
+        self.decode_calls.append(
+            {
+                "token_ids": token_ids,
+                "caches": caches,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        return ("decode-logits", "decode-caches")
 
 
 class _FakeMetricsStore:
@@ -297,6 +320,52 @@ class BaseWorkerMLADispatchTests(unittest.TestCase):
         self.assertEqual(
             worker.model_runner.load_calls,
             [(({"weight": "value"},), {"strict": False})],
+        )
+
+    def test_prefill_tokens_with_installed_attention_wrapper_forwards_to_model_runner(self):
+        worker, _ = self._make_worker()
+
+        output = worker.prefill_tokens_with_installed_attention_wrapper(
+            token_ids="prompt-token-ids",
+            mlp_weights=("mlp",),
+            softmax_scale=0.75,
+        )
+
+        self.assertEqual(output, ("prefill-logits", "prefill-caches"))
+        self.assertEqual(
+            worker.model_runner.prefill_calls,
+            [
+                {
+                    "token_ids": "prompt-token-ids",
+                    "gpu_cache": ("gpu-cache",),
+                    "model_kwargs": {
+                        "mlp_weights": ("mlp",),
+                        "softmax_scale": 0.75,
+                    },
+                }
+            ],
+        )
+
+    def test_decode_tokens_with_installed_attention_wrapper_forwards_to_model_runner(self):
+        worker, _ = self._make_worker()
+
+        output = worker.decode_tokens_with_installed_attention_wrapper(
+            token_ids="decode-token-ids",
+            caches=("resident",),
+            softmax_scale=0.5,
+        )
+
+        self.assertEqual(output, ("decode-logits", "decode-caches"))
+        self.assertEqual(
+            worker.model_runner.decode_calls,
+            [
+                {
+                    "token_ids": "decode-token-ids",
+                    "caches": ("resident",),
+                    "gpu_cache": ("gpu-cache",),
+                    "model_kwargs": {"softmax_scale": 0.5},
+                }
+            ],
         )
 
 

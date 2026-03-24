@@ -217,6 +217,8 @@ class _RecordingModel:
     def __init__(self):
         self.calls = []
         self.wrapper_calls = []
+        self.prefill_calls = []
+        self.decode_calls = []
         self.lm_head = None
 
     def __call__(self, **kwargs):
@@ -226,6 +228,14 @@ class _RecordingModel:
     def forward_with_attention_wrapper(self, **kwargs):
         self.wrapper_calls.append(kwargs)
         return "wrapper"
+
+    def prefill_tokens(self, token_ids, **kwargs):
+        self.prefill_calls.append({"token_ids": token_ids, **kwargs})
+        return "prefill"
+
+    def decode_tokens(self, token_ids, caches, **kwargs):
+        self.decode_calls.append({"token_ids": token_ids, "caches": caches, **kwargs})
+        return "decode"
 
 
 class ModelRunnerMLADispatchTests(unittest.TestCase):
@@ -578,6 +588,43 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
         self.assertEqual(len(ATTENTION_WRAPPER.begin_calls), 1)
         self.assertEqual(ATTENTION_WRAPPER.begin_calls[0], ["seq-md-last-stage"])
         self.assertEqual(ATTENTION_WRAPPER.end_call_count, 1)
+
+    def test_run_prefill_tokens_uses_model_prefill_entrypoint(self):
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.model = _RecordingModel()
+
+        output = runner.run_prefill_tokens(
+            torch.tensor([1, 3], dtype=torch.long),
+            gpu_cache=("cache",),
+            model_kwargs={"mlp_weights": ("mlp",), "softmax_scale": 0.5},
+        )
+
+        self.assertEqual(output, "prefill")
+        self.assertEqual(len(runner.model.prefill_calls), 1)
+        self.assertEqual(runner.model.prefill_calls[0]["token_ids"].tolist(), [1, 3])
+        self.assertEqual(runner.model.prefill_calls[0]["kv_caches"], ("cache",))
+        self.assertEqual(runner.model.prefill_calls[0]["attention_wrapper"], ATTENTION_WRAPPER)
+        self.assertEqual(runner.model.prefill_calls[0]["mlp_weights"], ("mlp",))
+        self.assertEqual(runner.model.prefill_calls[0]["softmax_scale"], 0.5)
+
+    def test_run_decode_tokens_uses_model_decode_entrypoint(self):
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.model = _RecordingModel()
+
+        output = runner.run_decode_tokens(
+            torch.tensor([5], dtype=torch.long),
+            caches=("resident",),
+            gpu_cache=("cache",),
+            model_kwargs={"softmax_scale": 0.25},
+        )
+
+        self.assertEqual(output, "decode")
+        self.assertEqual(len(runner.model.decode_calls), 1)
+        self.assertEqual(runner.model.decode_calls[0]["token_ids"].tolist(), [5])
+        self.assertEqual(runner.model.decode_calls[0]["caches"], ("resident",))
+        self.assertEqual(runner.model.decode_calls[0]["kv_caches"], ("cache",))
+        self.assertEqual(runner.model.decode_calls[0]["attention_wrapper"], ATTENTION_WRAPPER)
+        self.assertEqual(runner.model.decode_calls[0]["softmax_scale"], 0.25)
 
 
 if __name__ == "__main__":

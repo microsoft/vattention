@@ -335,6 +335,46 @@ class BaseWorker:
         )
 
     @synchronized
+    def prefill_tokens_with_installed_attention_wrapper(
+        self,
+        token_ids: torch.Tensor,
+        *,
+        mlp_weights=None,
+        softmax_scale: Optional[float] = None,
+    ):
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.model_runner.run_prefill_tokens(
+            token_ids,
+            self.gpu_cache,
+            model_kwargs=(model_runner_kwargs or None),
+        )
+
+    @synchronized
+    def decode_tokens_with_installed_attention_wrapper(
+        self,
+        token_ids: torch.Tensor,
+        caches,
+        *,
+        mlp_weights=None,
+        softmax_scale: Optional[float] = None,
+    ):
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.model_runner.run_decode_tokens(
+            token_ids,
+            caches,
+            self.gpu_cache,
+            model_kwargs=(model_runner_kwargs or None),
+        )
+
+    @synchronized
     def get_metrics_store(self) -> MetricsStore:
         return self.metrics_store
 
