@@ -53,8 +53,10 @@ deepseek_module = _load_deepseek_model_module()
 DeepseekV2MLADims = deepseek_module.DeepseekV2MLADims
 DeepseekV2MLAAttention = deepseek_module.DeepseekV2MLAAttention
 DeepseekV2DecoderLayer = deepseek_module.DeepseekV2DecoderLayer
+DeepseekV2LayerCache = deepseek_module.DeepseekV2LayerCache
 DeepseekV2Model = deepseek_module.DeepseekV2Model
 DeepseekV2ForCausalLM = deepseek_module.DeepseekV2ForCausalLM
+make_layer_cache = deepseek_module.make_layer_cache
 make_projection_weights = deepseek_module.make_projection_weights
 
 
@@ -164,7 +166,9 @@ class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
         )
 
         self.assertEqual(tuple(output.shape), (2, config.hidden_size))
-        self.assertEqual(cache.num_tokens, 2)
+        self.assertIsInstance(cache, DeepseekV2LayerCache)
+        self.assertIs(cache.kv_cache, kv_cache)
+        self.assertEqual(cache.resident_cache.num_tokens, 2)
         self.assertEqual(len(wrapper.calls), 1)
         self.assertEqual(
             tuple(wrapper.calls[0]["query"].shape),
@@ -180,6 +184,35 @@ class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
         )
         self.assertIs(wrapper.calls[0]["kv_cache"], kv_cache)
         self.assertEqual(wrapper.calls[0]["layer_id"], 7)
+
+    def test_attention_wrapper_bridge_accepts_combined_layer_cache_for_decode(self):
+        config = self._make_config()
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        attention = DeepseekV2MLAAttention(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        wrapper = _RecordingAttentionWrapper()
+        kv_cache = object()
+
+        _, cache = attention.forward_hidden_states_with_attention_wrapper(
+            hidden_states=self._make_hidden_states()[:1],
+            projection_weights=projection_weights,
+            kv_cache=kv_cache,
+            layer_id=3,
+            attention_wrapper=wrapper,
+        )
+        output, cache = attention.forward_hidden_states_with_attention_wrapper(
+            hidden_states=self._make_hidden_states()[1:],
+            projection_weights=projection_weights,
+            kv_cache=cache,
+            layer_id=3,
+            attention_wrapper=wrapper,
+        )
+
+        self.assertEqual(tuple(output.shape), (1, config.hidden_size))
+        self.assertIs(cache.kv_cache, kv_cache)
+        self.assertEqual(cache.resident_cache.num_tokens, 2)
+        self.assertEqual(len(wrapper.calls), 2)
+        self.assertIs(wrapper.calls[1]["kv_cache"], kv_cache)
 
     def test_decoder_layer_threads_layer_id_into_attention_wrapper(self):
         config = self._make_config()
@@ -201,7 +234,8 @@ class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
         )
 
         self.assertEqual(tuple(output.shape), (2, config.hidden_size))
-        self.assertEqual(cache.num_tokens, 2)
+        self.assertIsInstance(cache, DeepseekV2LayerCache)
+        self.assertEqual(cache.resident_cache.num_tokens, 2)
         self.assertEqual(len(wrapper.calls), 1)
         self.assertEqual(wrapper.calls[0]["layer_id"], 11)
         self.assertIs(wrapper.calls[0]["kv_cache"], kv_cache)
@@ -230,10 +264,12 @@ class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
 
         self.assertEqual(tuple(output.shape), (2, config.hidden_size))
         self.assertEqual(len(caches), model.num_layers)
+        self.assertTrue(all(isinstance(cache, DeepseekV2LayerCache) for cache in caches))
+        self.assertTrue(all(cache.resident_cache.num_tokens == 2 for cache in caches))
         self.assertEqual([call["layer_id"] for call in wrapper.calls], [2, 3])
         self.assertEqual([call["kv_cache"] for call in wrapper.calls], list(kv_caches))
 
-    def test_causal_lm_wrapper_forward_reuses_resident_caches_on_decode(self):
+    def test_causal_lm_wrapper_forward_reuses_combined_layer_caches_on_decode(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
             set_pipeline_model_parallel_rank,
             set_pipeline_model_parallel_world_size,
@@ -263,14 +299,21 @@ class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
         output, caches = model.forward_with_attention_wrapper(
             hidden_states=hidden_states[1:],
             projection_weights=projection_weights,
-            kv_caches=kv_caches,
+            kv_caches=caches,
             attention_wrapper=wrapper,
-            caches=caches,
         )
 
         self.assertEqual(tuple(output.shape), (1, config.hidden_size))
-        self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
+        self.assertTrue(all(isinstance(cache, DeepseekV2LayerCache) for cache in caches))
+        self.assertTrue(all(cache.resident_cache.num_tokens == 2 for cache in caches))
         self.assertEqual(len(wrapper.calls), 4)
+
+    def test_make_layer_cache_preserves_raw_kv_cache_identity(self):
+        kv_cache = object()
+        layer_cache = make_layer_cache(kv_cache)
+
+        self.assertIs(layer_cache.kv_cache, kv_cache)
+        self.assertIsNone(layer_cache.resident_cache)
 
 
 if __name__ == "__main__":

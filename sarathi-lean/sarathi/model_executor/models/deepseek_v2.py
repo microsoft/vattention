@@ -93,6 +93,12 @@ class DeepseekV2MLAProjectionWeights:
     o_proj: torch.Tensor
 
 
+@dataclass(frozen=True)
+class DeepseekV2LayerCache:
+    kv_cache: object
+    resident_cache: Optional[DeepseekV2MLAResidentCache] = None
+
+
 DeepseekV2AttentionBackend = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, Optional[DeepseekV2MLAResidentCache], float],
     torch.Tensor,
@@ -208,6 +214,34 @@ def make_projection_weights(
         kv_up_proj=kv_up_proj,
         o_proj=o_proj,
     )
+
+
+def make_layer_cache(
+    kv_cache: object,
+    resident_cache: Optional[DeepseekV2MLAResidentCache] = None,
+) -> DeepseekV2LayerCache:
+    return DeepseekV2LayerCache(
+        kv_cache=kv_cache,
+        resident_cache=resident_cache,
+    )
+
+
+def resolve_layer_cache(
+    layer_cache_or_kv_cache,
+    resident_cache: Optional[DeepseekV2MLAResidentCache] = None,
+) -> Tuple[object, Optional[DeepseekV2MLAResidentCache]]:
+    if isinstance(layer_cache_or_kv_cache, DeepseekV2LayerCache):
+        if resident_cache is not None and layer_cache_or_kv_cache.resident_cache is not None:
+            raise ValueError(
+                "resident_cache must not be provided separately when layer_cache already carries one"
+            )
+        return (
+            layer_cache_or_kv_cache.kv_cache,
+            layer_cache_or_kv_cache.resident_cache
+            if resident_cache is None
+            else resident_cache,
+        )
+    return layer_cache_or_kv_cache, resident_cache
 
 
 def project_mla_from_hidden_states(
@@ -542,17 +576,19 @@ class DeepseekV2MLAAttention(nn.Module):
         attention_wrapper=None,
         cache: Optional[DeepseekV2MLAResidentCache] = None,
         softmax_scale: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
-        return mla_attention_with_wrapper(
+    ) -> Tuple[torch.Tensor, DeepseekV2LayerCache]:
+        runtime_kv_cache, cache = resolve_layer_cache(kv_cache, cache)
+        output, next_cache = mla_attention_with_wrapper(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
             mla_dims=self.mla_dims,
-            kv_cache=kv_cache,
+            kv_cache=runtime_kv_cache,
             layer_id=layer_id,
             attention_wrapper=attention_wrapper,
             cache=cache,
             softmax_scale=softmax_scale,
         )
+        return output, make_layer_cache(runtime_kv_cache, next_cache)
 
     def forward_hidden_states_contiguous_batched(
         self,
@@ -615,10 +651,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         attention_wrapper=None,
         cache: Optional[DeepseekV2MLAResidentCache] = None,
         softmax_scale: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+    ) -> Tuple[torch.Tensor, DeepseekV2LayerCache]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        attn_output, cache = self.self_attn.forward_hidden_states_with_attention_wrapper(
+        attn_output, layer_cache = self.self_attn.forward_hidden_states_with_attention_wrapper(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
             kv_cache=kv_cache,
@@ -629,7 +665,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
         hidden_states = residual + attn_output
         hidden_states = self.post_attention_layernorm(hidden_states)
-        return hidden_states, cache
+        return hidden_states, layer_cache
 
 
 class DeepseekV2Model(nn.Module):
@@ -713,7 +749,7 @@ class DeepseekV2Model(nn.Module):
         attention_wrapper=None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2LayerCache, ...]]:
         if len(projection_weights) != self.num_layers:
             raise ValueError("projection_weights must provide one entry per local layer")
         if len(kv_caches) != self.num_layers:
@@ -778,7 +814,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         attention_wrapper=None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2LayerCache, ...]]:
         return self.model.forward_with_attention_wrapper(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
