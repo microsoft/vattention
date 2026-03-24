@@ -406,6 +406,91 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             )
         )
 
+    def test_causal_lm_scaffold_loader_accepts_bare_layer_prefixes(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "norm.weight": torch.full((config.hidden_size,), 1.5),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for layer_idx in range(model.model.num_layers):
+            projection_weights = self._make_projection_weights(dims)
+            state_dict[f"layers.{layer_idx}.input_layernorm.weight"] = torch.full(
+                (config.hidden_size,),
+                2.0 + layer_idx,
+            )
+            state_dict[f"layers.{layer_idx}.post_attention_layernorm.weight"] = torch.full(
+                (config.hidden_size,),
+                3.0 + layer_idx,
+            )
+            prefix = f"layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + layer_idx
+            state_dict[f"{prefix}.kv_latent_proj.weight"] = (
+                projection_weights.kv_latent_proj + layer_idx
+            )
+            state_dict[f"{prefix}.k_rope_proj.weight"] = (
+                projection_weights.k_rope_proj + layer_idx
+            )
+            state_dict[f"{prefix}.kv_up_proj.weight"] = (
+                projection_weights.kv_up_proj + layer_idx
+            )
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + layer_idx
+            mlp_prefix = f"layers.{layer_idx}.mlp"
+            mlp_weights = make_mlp_weights(
+                gate_proj=torch.full((config.hidden_size, 4), 1.0 + layer_idx),
+                up_proj=torch.full((config.hidden_size, 4), 2.0 + layer_idx),
+                down_proj=torch.full((4, config.hidden_size), 3.0 + layer_idx),
+                hidden_size=config.hidden_size,
+            )
+            state_dict[f"{mlp_prefix}.gate_proj.weight"] = mlp_weights.gate_proj
+            state_dict[f"{mlp_prefix}.up_proj.weight"] = mlp_weights.up_proj
+            state_dict[f"{mlp_prefix}.down_proj.weight"] = mlp_weights.down_proj
+
+        model.load_weights(state_dict)
+
+        self.assertTrue(
+            torch.allclose(
+                model.model.norm.weight,
+                torch.full((config.hidden_size,), 1.5),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layers[0].input_layernorm.weight,
+                torch.full((config.hidden_size,), 2.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layers[1].post_attention_layernorm.weight,
+                torch.full((config.hidden_size,), 4.0),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[1].q_proj,
+                self._make_projection_weights(dims).q_proj + 1,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_mlp_weights[0].gate_proj,
+                torch.full((config.hidden_size, 4), 1.0),
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

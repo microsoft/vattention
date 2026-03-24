@@ -1139,6 +1139,21 @@ class DeepseekV2ForCausalLM(nn.Module):
                 return tensor
         return None
 
+    @staticmethod
+    def _candidate_layer_prefixes(
+        layer_idx: int,
+        layer_offset: int,
+        suffix: str,
+    ) -> Tuple[str, ...]:
+        local_idx = layer_idx
+        global_idx = layer_offset + layer_idx
+        return (
+            f"model.layers.{local_idx}.{suffix}",
+            f"model.layers.{global_idx}.{suffix}",
+            f"layers.{local_idx}.{suffix}",
+            f"layers.{global_idx}.{suffix}",
+        )
+
     def load_scaffold_state_dict(
         self,
         state_dict: Mapping[str, torch.Tensor],
@@ -1206,12 +1221,16 @@ class DeepseekV2ForCausalLM(nn.Module):
                 self.lm_head.weight.data.copy_(lm_head_weight)
 
         for layer_idx, layer in enumerate(self.model.layers):
-            local_prefix = f"model.layers.{layer_idx}"
-            global_prefix = f"model.layers.{self.model.layer_offset + layer_idx}"
             input_norm_weight = self._get_scaffold_tensor(
                 state_dict,
-                f"{local_prefix}.input_layernorm.weight",
-                f"{global_prefix}.input_layernorm.weight",
+                *(
+                    f"{prefix}.weight"
+                    for prefix in self._candidate_layer_prefixes(
+                        layer_idx,
+                        self.model.layer_offset,
+                        "input_layernorm",
+                    )
+                ),
             )
             if input_norm_weight is not None:
                 if tuple(input_norm_weight.shape) != (hidden_size,):
@@ -1222,8 +1241,14 @@ class DeepseekV2ForCausalLM(nn.Module):
 
             post_attn_norm_weight = self._get_scaffold_tensor(
                 state_dict,
-                f"{local_prefix}.post_attention_layernorm.weight",
-                f"{global_prefix}.post_attention_layernorm.weight",
+                *(
+                    f"{prefix}.weight"
+                    for prefix in self._candidate_layer_prefixes(
+                        layer_idx,
+                        self.model.layer_offset,
+                        "post_attention_layernorm",
+                    )
+                ),
             )
             if post_attn_norm_weight is not None:
                 if tuple(post_attn_norm_weight.shape) != (hidden_size,):
@@ -1232,9 +1257,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     )
                 layer.post_attention_layernorm.weight.data.copy_(post_attn_norm_weight)
 
-            projection_prefixes = (
-                f"{local_prefix}.self_attn",
-                f"{global_prefix}.self_attn",
+            projection_prefixes = self._candidate_layer_prefixes(
+                layer_idx,
+                self.model.layer_offset,
+                "self_attn",
             )
             projection_tensors = {
                 "q_proj": self._get_scaffold_tensor(
@@ -1277,9 +1303,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                 )
             )
 
-            mlp_prefixes = (
-                f"{local_prefix}.mlp",
-                f"{global_prefix}.mlp",
+            mlp_prefixes = self._candidate_layer_prefixes(
+                layer_idx,
+                self.model.layer_offset,
+                "mlp",
             )
             mlp_tensors = {
                 "gate_proj": self._get_scaffold_tensor(
