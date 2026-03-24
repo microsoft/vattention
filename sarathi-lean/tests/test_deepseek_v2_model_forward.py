@@ -721,6 +721,81 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
         self.assertEqual(tuple(model.compute_logits(hidden_states).shape), (2, config.vocab_size))
         self.assertEqual(len(logits_caches), len(caches))
 
+    def test_causal_lm_prefill_and_decode_tokens_match_full_contiguous_logits(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        model.set_scaffold_weights(
+            projection_weights=tuple(
+                self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+            ),
+            mlp_weights=tuple(
+                self._make_mlp_weights(config.hidden_size)
+                for _ in range(model.model.num_layers)
+            ),
+        )
+
+        prompt_token_ids = torch.tensor([1, 3], dtype=torch.long)
+        decode_token_ids = torch.tensor([5], dtype=torch.long)
+        full_token_ids = torch.tensor([1, 3, 5], dtype=torch.long)
+
+        prefill_logits, caches = model.prefill_tokens(prompt_token_ids)
+        decode_logits, decode_caches = model.decode_tokens(
+            decode_token_ids,
+            caches=caches,
+        )
+        full_logits, full_caches = model.forward_logits(hidden_states=full_token_ids)
+
+        self.assertEqual(tuple(prefill_logits.shape), (2, config.vocab_size))
+        self.assertEqual(tuple(decode_logits.shape), (1, config.vocab_size))
+        self.assertTrue(torch.allclose(decode_logits[0], full_logits[-1], atol=1e-6, rtol=1e-6))
+        self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
+        self.assertTrue(all(cache.num_tokens == 3 for cache in decode_caches))
+        self.assertTrue(
+            all(
+                torch.equal(decode_cache.kv_latent, full_cache.kv_latent)
+                and torch.equal(decode_cache.k_rope, full_cache.k_rope)
+                for decode_cache, full_cache in zip(decode_caches, full_caches)
+            )
+        )
+
+    def test_causal_lm_decode_tokens_requires_non_empty_integer_decode_input_and_caches(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+
+        with self.assertRaises(ValueError):
+            model.prefill_tokens(torch.tensor([[1]], dtype=torch.long))
+
+        with self.assertRaises(ValueError):
+            model.prefill_tokens(torch.tensor([], dtype=torch.long))
+
+        with self.assertRaises(ValueError):
+            model.decode_tokens(torch.tensor([1.0]), caches=(object(),))
+
+        with self.assertRaises(ValueError):
+            model.decode_tokens(torch.tensor([1], dtype=torch.long), caches=None)
+
     def test_causal_lm_forward_logits_with_attention_wrapper_accepts_token_ids(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
             set_pipeline_model_parallel_rank,

@@ -1094,11 +1094,26 @@ class DeepseekV2Model(nn.Module):
 
 class DeepseekV2ForCausalLM(nn.Module):
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        *,
+        tensor_parallel_world_size: Optional[int] = None,
+        pipeline_parallel_world_size: Optional[int] = None,
+        pipeline_parallel_rank: Optional[int] = None,
+    ):
         super().__init__()
         self.config = config
-        self.model = DeepseekV2Model(config)
-        self.mla_dims = DeepseekV2MLADims.from_config(config)
+        self.model = DeepseekV2Model(
+            config,
+            tensor_parallel_world_size=tensor_parallel_world_size,
+            pipeline_parallel_world_size=pipeline_parallel_world_size,
+            pipeline_parallel_rank=pipeline_parallel_rank,
+        )
+        self.mla_dims = DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=self.model.tensor_parallel_world_size,
+        )
         self.lm_head = None
         if self.model.is_pipeline_last_stage and getattr(config, "vocab_size", None) is not None:
             self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -1361,6 +1376,21 @@ class DeepseekV2ForCausalLM(nn.Module):
             raise ValueError("hidden_states must have shape [tokens, hidden_size]")
         return self.lm_head(hidden_states)
 
+    @staticmethod
+    def _validate_token_ids(token_ids: torch.Tensor) -> None:
+        if token_ids.dtype not in (torch.int32, torch.int64, torch.long):
+            raise ValueError("token_ids must be an integer tensor")
+        if token_ids.ndim != 1:
+            raise ValueError("token_ids must have shape [tokens]")
+        if token_ids.numel() == 0:
+            raise ValueError("token_ids must contain at least one token")
+
+    @staticmethod
+    def _caches_are_layer_caches(caches) -> bool:
+        if not isinstance(caches, tuple):
+            return False
+        return all(isinstance(cache, DeepseekV2LayerCache) for cache in caches)
+
     def forward_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1418,6 +1448,68 @@ class DeepseekV2ForCausalLM(nn.Module):
             softmax_scale=softmax_scale,
         )
         return self.compute_logits(hidden_states), caches
+
+    def prefill_tokens(
+        self,
+        token_ids: torch.Tensor,
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        softmax_scale: Optional[float] = None,
+        kv_caches: Optional[Tuple[object, ...]] = None,
+        attention_wrapper=None,
+    ):
+        self._validate_token_ids(token_ids)
+        if kv_caches is not None:
+            return self.forward_logits_with_attention_wrapper(
+                hidden_states=token_ids,
+                kv_caches=kv_caches,
+                projection_weights=projection_weights,
+                mlp_weights=mlp_weights,
+                attention_wrapper=attention_wrapper,
+                softmax_scale=softmax_scale,
+            )
+        return self.forward_logits(
+            hidden_states=token_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+            softmax_scale=softmax_scale,
+        )
+
+    def decode_tokens(
+        self,
+        token_ids: torch.Tensor,
+        caches,
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        softmax_scale: Optional[float] = None,
+        kv_caches: Optional[Tuple[object, ...]] = None,
+        attention_wrapper=None,
+    ):
+        self._validate_token_ids(token_ids)
+        if caches is None:
+            raise ValueError("caches must be provided for decode_tokens")
+        if kv_caches is not None:
+            resident_caches = caches
+            runtime_kv_caches = kv_caches
+            if self._caches_are_layer_caches(caches):
+                runtime_kv_caches = caches
+                resident_caches = None
+            return self.forward_logits_with_attention_wrapper(
+                hidden_states=token_ids,
+                kv_caches=runtime_kv_caches,
+                projection_weights=projection_weights,
+                mlp_weights=mlp_weights,
+                attention_wrapper=attention_wrapper,
+                caches=resident_caches,
+                softmax_scale=softmax_scale,
+            )
+        return self.forward_logits(
+            hidden_states=token_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+            caches=caches,
+            softmax_scale=softmax_scale,
+        )
 
     def make_runtime_mla_kv_caches(
         self,

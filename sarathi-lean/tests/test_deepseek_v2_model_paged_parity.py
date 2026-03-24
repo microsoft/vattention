@@ -185,9 +185,11 @@ class DeepseekV2ModelPagedParityTests(unittest.TestCase):
 
     def _make_config(self):
         return types.SimpleNamespace(
+            vocab_size=16,
             hidden_size=6,
             num_attention_heads=4,
             num_hidden_layers=4,
+            rms_norm_eps=1e-6,
             q_lora_rank=None,
             kv_lora_rank=3,
             qk_nope_head_dim=2,
@@ -252,6 +254,47 @@ class DeepseekV2ModelPagedParityTests(unittest.TestCase):
                 [0.0, 1.0, 0.0, 2.0, 0.0, 1.0],
             ]
         )
+
+    def _make_mlp_weights(self, hidden_size):
+        return deepseek_module.make_mlp_weights(
+            gate_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0],
+                    [1.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.5, 1.0, 0.0],
+                    [0.5, 0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.5, 0.5],
+                ]
+            ),
+            up_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.5, 0.0],
+                    [0.0, 1.0, 0.0, 0.5],
+                    [0.5, 0.0, 1.0, 0.0],
+                    [0.0, 0.5, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 0.5],
+                    [0.0, 1.0, 0.5, 0.0],
+                ]
+            ),
+            down_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+                    [0.0, 1.0, 0.5, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
+                    [0.5, 0.0, 0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            hidden_size=hidden_size,
+        )
+
+    def _set_embedding_and_lm_head_weights(self, model):
+        weight = torch.arange(
+            model.config.vocab_size * model.config.hidden_size,
+            dtype=torch.float32,
+        ).view(model.config.vocab_size, model.config.hidden_size) / 1000.0
+        model.model.embed_tokens.weight.data.copy_(weight)
+        model.lm_head.weight.data.copy_(weight)
 
     def _make_wrapper(self):
         wrapper = wrapper_module.VAttentionFlashAttentionWrapper()
@@ -374,6 +417,93 @@ class DeepseekV2ModelPagedParityTests(unittest.TestCase):
             all(
                 torch.equal(wrapper_cache.resident_cache.kv_latent, contiguous_cache.kv_latent)
                 for wrapper_cache, contiguous_cache in zip(wrapper_caches, contiguous_caches)
+            )
+        )
+
+    def test_causal_lm_prefill_and_decode_tokens_match_full_paged_logits(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        self._set_embedding_and_lm_head_weights(model)
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        model.set_scaffold_weights(
+            projection_weights=tuple(
+                self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+            ),
+            mlp_weights=tuple(
+                self._make_mlp_weights(config.hidden_size)
+                for _ in range(model.model.num_layers)
+            ),
+        )
+        runtime_caches = model.make_runtime_mla_kv_caches(
+            batch_size=1,
+            max_seq_len=4,
+            device=torch.device("cpu"),
+        )
+        wrapper = self._make_wrapper()
+
+        prompt_token_ids = torch.tensor([1, 3], dtype=torch.long)
+        decode_token_ids = torch.tensor([5], dtype=torch.long)
+        full_token_ids = torch.tensor([1, 3, 5], dtype=torch.long)
+
+        wrapper.set_mla_runtime_metadata(
+            prefill_query_lens=[2],
+            prefill_cache_lens=[0],
+            batch_index=[0],
+            batch_index_gen=[],
+        )
+        prefill_logits, layer_caches = model.prefill_tokens(
+            prompt_token_ids,
+            kv_caches=runtime_caches,
+            attention_wrapper=wrapper,
+        )
+
+        wrapper.set_mla_runtime_metadata(
+            prefill_query_lens=[],
+            prefill_cache_lens=[],
+            decode_cache_lens=[2],
+            batch_index=[],
+            batch_index_gen=[0],
+        )
+        decode_logits, next_layer_caches = model.decode_tokens(
+            decode_token_ids,
+            caches=layer_caches,
+            kv_caches=runtime_caches,
+            attention_wrapper=wrapper,
+        )
+        full_logits, full_caches = model.forward_logits(hidden_states=full_token_ids)
+
+        self.assertEqual(tuple(prefill_logits.shape), (2, config.vocab_size))
+        self.assertEqual(tuple(decode_logits.shape), (1, config.vocab_size))
+        self.assertTrue(torch.allclose(decode_logits[0], full_logits[-1], atol=1e-6, rtol=1e-6))
+        self.assertTrue(
+            all(layer_cache.resident_cache.num_tokens == 2 for layer_cache in layer_caches)
+        )
+        self.assertTrue(
+            all(layer_cache.resident_cache.num_tokens == 3 for layer_cache in next_layer_caches)
+        )
+        self.assertTrue(
+            all(
+                torch.equal(layer_cache.resident_cache.kv_latent, full_cache.kv_latent)
+                and torch.equal(layer_cache.resident_cache.k_rope, full_cache.k_rope)
+                for layer_cache, full_cache in zip(next_layer_caches, full_caches)
             )
         )
 
