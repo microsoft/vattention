@@ -148,6 +148,12 @@ summarize_vattention_cache_sweep_matrix = (
 validate_vattention_cache_sweep_matrix = (
     cache_engine_module.validate_vattention_cache_sweep_matrix
 )
+summarize_vattention_cache_validation_suite = (
+    cache_engine_module.summarize_vattention_cache_validation_suite
+)
+validate_vattention_cache_validation_suite = (
+    cache_engine_module.validate_vattention_cache_validation_suite
+)
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -482,6 +488,65 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
             max_largest_reclaim_bytes=96,
         )
 
+        self.assertTrue(passing["is_valid"])
+        self.assertEqual(passing["violations"], ())
+        self.assertFalse(failing["is_valid"])
+        self.assertEqual(
+            tuple(violation["metric"] for violation in failing["violations"]),
+            (
+                "max_peak_persistent_bytes",
+                "max_largest_growth_bytes",
+                "max_largest_reclaim_bytes",
+                "min_free_blocks_overall",
+            ),
+        )
+
+    def test_cache_usage_validation_suite_aggregates_and_validates_matrices(self):
+        suite_summary = summarize_vattention_cache_validation_suite(
+            (
+                {
+                    "matrix_name": "prompt_matrix",
+                    "max_peak_persistent_bytes": 128,
+                    "min_free_blocks_overall": 6,
+                    "max_largest_growth_bytes": 128,
+                    "max_largest_reclaim_bytes": 128,
+                },
+                {
+                    "matrix_name": "overlap_matrix",
+                    "max_peak_persistent_bytes": 160,
+                    "min_free_blocks_overall": 5,
+                    "max_largest_growth_bytes": 96,
+                    "max_largest_reclaim_bytes": 128,
+                },
+            )
+        )
+
+        passing = validate_vattention_cache_validation_suite(
+            suite_summary,
+            max_peak_persistent_bytes=160,
+            min_free_blocks_overall=5,
+            max_largest_growth_bytes=128,
+            max_largest_reclaim_bytes=128,
+        )
+        failing = validate_vattention_cache_validation_suite(
+            suite_summary,
+            max_peak_persistent_bytes=128,
+            min_free_blocks_overall=6,
+            max_largest_growth_bytes=96,
+            max_largest_reclaim_bytes=96,
+        )
+
+        self.assertEqual(suite_summary["num_matrices"], 2)
+        self.assertEqual(
+            suite_summary["matrix_names"],
+            ("prompt_matrix", "overlap_matrix"),
+        )
+        self.assertEqual(suite_summary["max_peak_persistent_bytes"], 160)
+        self.assertEqual(suite_summary["min_free_blocks_overall"], 5)
+        self.assertEqual(suite_summary["max_largest_growth_bytes"], 128)
+        self.assertEqual(suite_summary["max_largest_reclaim_bytes"], 128)
+        self.assertEqual(suite_summary["matrix_with_max_peak_bytes"], "overlap_matrix")
+        self.assertEqual(suite_summary["matrix_with_min_free_blocks"], "overlap_matrix")
         self.assertTrue(passing["is_valid"])
         self.assertEqual(passing["violations"], ())
         self.assertFalse(failing["is_valid"])

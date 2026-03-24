@@ -1046,6 +1046,56 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertTrue(validation["is_valid"])
         self.assertEqual(validation["violations"], ())
 
+    def test_worker_can_validate_multiple_mla_runtime_matrices_as_one_suite(self):
+        matrix_summaries = (
+            {
+                "matrix_name": "prompt_matrix",
+                "max_peak_persistent_bytes": 128,
+                "min_free_blocks_overall": 6,
+                "max_largest_growth_bytes": 128,
+                "max_largest_reclaim_bytes": 128,
+            },
+            {
+                "matrix_name": "overlap_matrix",
+                "max_peak_persistent_bytes": 160,
+                "min_free_blocks_overall": 5,
+                "max_largest_growth_bytes": 96,
+                "max_largest_reclaim_bytes": 128,
+            },
+            {
+                "matrix_name": "decode_pressure_matrix",
+                "max_peak_persistent_bytes": 96,
+                "min_free_blocks_overall": 7,
+                "max_largest_growth_bytes": 32,
+                "max_largest_reclaim_bytes": 96,
+            },
+        )
+
+        suite_summary = self.cache_engine_module.summarize_vattention_cache_validation_suite(
+            matrix_summaries
+        )
+        validation = self.cache_engine_module.validate_vattention_cache_validation_suite(
+            suite_summary,
+            max_peak_persistent_bytes=160,
+            min_free_blocks_overall=5,
+            max_largest_growth_bytes=128,
+            max_largest_reclaim_bytes=128,
+        )
+
+        self.assertEqual(suite_summary["num_matrices"], 3)
+        self.assertEqual(
+            suite_summary["matrix_names"],
+            ("prompt_matrix", "overlap_matrix", "decode_pressure_matrix"),
+        )
+        self.assertEqual(suite_summary["max_peak_persistent_bytes"], 160)
+        self.assertEqual(suite_summary["min_free_blocks_overall"], 5)
+        self.assertEqual(suite_summary["max_largest_growth_bytes"], 128)
+        self.assertEqual(suite_summary["max_largest_reclaim_bytes"], 128)
+        self.assertEqual(suite_summary["matrix_with_max_peak_bytes"], "overlap_matrix")
+        self.assertEqual(suite_summary["matrix_with_min_free_blocks"], "overlap_matrix")
+        self.assertTrue(validation["is_valid"])
+        self.assertEqual(validation["violations"], ())
+
 
 if __name__ == "__main__":
     unittest.main()

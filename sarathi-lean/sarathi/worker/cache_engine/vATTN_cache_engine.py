@@ -314,6 +314,107 @@ def validate_vattention_cache_sweep_matrix(
     }
 
 
+def summarize_vattention_cache_validation_suite(matrix_summaries) -> dict:
+    matrix_summaries = tuple(matrix_summaries)
+    if not matrix_summaries:
+        return {
+            "num_matrices": 0,
+            "matrix_names": (),
+            "max_peak_persistent_bytes": 0,
+            "min_free_blocks_overall": None,
+            "max_largest_growth_bytes": 0,
+            "max_largest_reclaim_bytes": 0,
+            "matrix_with_max_peak_bytes": None,
+            "matrix_with_min_free_blocks": None,
+        }
+
+    def _matrix_name(summary):
+        return summary.get("matrix_name")
+
+    max_peak_summary = max(
+        matrix_summaries,
+        key=lambda summary: summary["max_peak_persistent_bytes"],
+    )
+    free_block_summaries = [
+        summary for summary in matrix_summaries
+        if summary.get("min_free_blocks_overall") is not None
+    ]
+    min_free_summary = (
+        min(free_block_summaries, key=lambda summary: summary["min_free_blocks_overall"])
+        if free_block_summaries
+        else None
+    )
+    return {
+        "num_matrices": len(matrix_summaries),
+        "matrix_names": tuple(_matrix_name(summary) for summary in matrix_summaries),
+        "max_peak_persistent_bytes": max(
+            summary["max_peak_persistent_bytes"] for summary in matrix_summaries
+        ),
+        "min_free_blocks_overall": (
+            None if min_free_summary is None else min_free_summary["min_free_blocks_overall"]
+        ),
+        "max_largest_growth_bytes": max(
+            summary["max_largest_growth_bytes"] for summary in matrix_summaries
+        ),
+        "max_largest_reclaim_bytes": max(
+            summary["max_largest_reclaim_bytes"] for summary in matrix_summaries
+        ),
+        "matrix_with_max_peak_bytes": _matrix_name(max_peak_summary),
+        "matrix_with_min_free_blocks": (
+            None if min_free_summary is None else _matrix_name(min_free_summary)
+        ),
+    }
+
+
+def validate_vattention_cache_validation_suite(
+    suite_summary,
+    *,
+    max_peak_persistent_bytes=None,
+    min_free_blocks_overall=None,
+    max_largest_growth_bytes=None,
+    max_largest_reclaim_bytes=None,
+):
+    violations = []
+
+    def _check_upper_bound(key, expected):
+        if expected is None:
+            return
+        observed = suite_summary.get(key)
+        if observed is not None and observed > expected:
+            violations.append(
+                {
+                    "metric": key,
+                    "constraint": "<=",
+                    "expected": expected,
+                    "observed": observed,
+                }
+            )
+
+    def _check_lower_bound(key, expected):
+        if expected is None:
+            return
+        observed = suite_summary.get(key)
+        if observed is None or observed < expected:
+            violations.append(
+                {
+                    "metric": key,
+                    "constraint": ">=",
+                    "expected": expected,
+                    "observed": observed,
+                }
+            )
+
+    _check_upper_bound("max_peak_persistent_bytes", max_peak_persistent_bytes)
+    _check_upper_bound("max_largest_growth_bytes", max_largest_growth_bytes)
+    _check_upper_bound("max_largest_reclaim_bytes", max_largest_reclaim_bytes)
+    _check_lower_bound("min_free_blocks_overall", min_free_blocks_overall)
+
+    return {
+        "is_valid": not violations,
+        "violations": tuple(violations),
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (
