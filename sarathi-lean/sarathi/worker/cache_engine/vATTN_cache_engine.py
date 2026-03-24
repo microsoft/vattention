@@ -9,6 +9,7 @@ from sarathi.logger import init_logger
 from sarathi.model_executor.attention import get_attention_wrapper
 from sarathi.utils import in_wsl
 from sarathi.worker.cache_engine.base_cache_engine import BaseCacheEngine
+from sarathi.worker.cache_engine.vattention_init import dispatch_init_kvcache
 import vattention
 from sarathi.model_executor.attention import get_attention_wrapper
 logger = init_logger(__name__)
@@ -54,12 +55,9 @@ class vATTNCacheEngine(BaseCacheEngine):
         return vattention.num_free_kvblocks()
 
     def _init_kvcache_from_spec(self):
-        init_request = self.init_spec.get_extension_init_request()
-        init_mode = init_request["init_mode"]
-        if init_mode == "legacy_dense_kv":
-            return vattention.init_kvcache(*init_request["legacy_args"])
-        raise NotImplementedError(
-            f"vAttention extension init mode '{init_mode}' is not wired yet"
+        return dispatch_init_kvcache(
+            vattention,
+            self.init_spec.get_extension_init_request(),
         )
 
     def allocate_gpu_cache(self) -> List[torch.Tensor]:
