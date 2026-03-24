@@ -110,6 +110,15 @@ class DeepseekV2MLPWeights:
 
 
 @dataclass(frozen=True)
+class DeepseekV2MoEWeights:
+    gate: torch.Tensor
+    experts: Tuple[DeepseekV2MLPWeights, ...]
+    shared_experts: Optional[DeepseekV2MLPWeights] = None
+    top_k: int = 1
+    norm_topk_prob: bool = True
+
+
+@dataclass(frozen=True)
 class DeepseekV2LayerCache:
     kv_cache: object
     resident_cache: Optional[DeepseekV2MLAResidentCache] = None
@@ -332,6 +341,68 @@ def apply_mlp(
     gate = torch.nn.functional.silu(hidden_states @ mlp_weights.gate_proj)
     up = hidden_states @ mlp_weights.up_proj
     return (gate * up) @ mlp_weights.down_proj
+
+
+def make_moe_weights(
+    gate: torch.Tensor,
+    experts: Tuple[DeepseekV2MLPWeights, ...],
+    *,
+    shared_experts: Optional[DeepseekV2MLPWeights] = None,
+    top_k: int = 1,
+    norm_topk_prob: bool = True,
+    hidden_size: int,
+) -> DeepseekV2MoEWeights:
+    if gate.ndim != 2 or gate.shape[1] != hidden_size:
+        raise ValueError("gate must have shape [num_experts, hidden_size]")
+    if len(experts) == 0:
+        raise ValueError("experts must provide at least one routed expert")
+    if gate.shape[0] != len(experts):
+        raise ValueError("gate rows must match the number of routed experts")
+    if top_k <= 0 or top_k > len(experts):
+        raise ValueError("top_k must be between 1 and the number of routed experts")
+    return DeepseekV2MoEWeights(
+        gate=gate,
+        experts=experts,
+        shared_experts=shared_experts,
+        top_k=top_k,
+        norm_topk_prob=norm_topk_prob,
+    )
+
+
+def apply_moe(
+    hidden_states: torch.Tensor,
+    moe_weights: DeepseekV2MoEWeights,
+) -> torch.Tensor:
+    if hidden_states.ndim != 2 or hidden_states.shape[1] != moe_weights.gate.shape[1]:
+        raise ValueError("hidden_states must have shape [tokens, hidden_size]")
+
+    gate_scores = hidden_states @ moe_weights.gate.t()
+    if gate_scores.ndim != 2:
+        raise ValueError("gate scores must have shape [tokens, num_experts]")
+    routing_probs = torch.softmax(gate_scores, dim=-1)
+    topk_probs, topk_indices = torch.topk(
+        routing_probs,
+        k=moe_weights.top_k,
+        dim=-1,
+    )
+    if moe_weights.norm_topk_prob:
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
+
+    output = hidden_states.new_zeros(hidden_states.shape)
+    for expert_idx, expert_weights in enumerate(moe_weights.experts):
+        expert_output = apply_mlp(hidden_states, expert_weights)
+        expert_mask = topk_indices == expert_idx
+        if not expert_mask.any():
+            continue
+        expert_prob = (topk_probs * expert_mask.to(dtype=topk_probs.dtype)).sum(
+            dim=-1,
+            keepdim=True,
+        )
+        output = output + expert_output * expert_prob
+
+    if moe_weights.shared_experts is not None:
+        output = output + apply_mlp(hidden_states, moe_weights.shared_experts)
+    return output
 
 
 def make_layer_cache(
