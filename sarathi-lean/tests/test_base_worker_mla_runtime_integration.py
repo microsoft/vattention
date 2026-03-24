@@ -460,6 +460,7 @@ class _InstalledWrapperExecutionModelRunner:
         self.load_calls = []
         self.prefill_calls = []
         self.decode_calls = []
+        self.generate_calls = []
 
     def load_model_weights(self, *args, **kwargs):
         self.load_calls.append((args, kwargs))
@@ -513,6 +514,25 @@ class _InstalledWrapperExecutionModelRunner:
         return self.model.decode_tokens(
             token_ids,
             caches=caches,
+            kv_caches=tuple(gpu_cache),
+            attention_wrapper=self.attention_wrapper,
+            softmax_scale=model_kwargs.get("softmax_scale"),
+            mlp_weights=model_kwargs.get("mlp_weights"),
+        )
+
+    def run_greedy_generation(self, token_ids, max_new_tokens, gpu_cache, model_kwargs=None):
+        self.generate_calls.append(
+            {
+                "token_ids": token_ids,
+                "max_new_tokens": max_new_tokens,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        return self.model.generate_greedy(
+            token_ids,
+            max_new_tokens=max_new_tokens,
             kv_caches=tuple(gpu_cache),
             attention_wrapper=self.attention_wrapper,
             softmax_scale=model_kwargs.get("softmax_scale"),
@@ -1094,6 +1114,90 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
                 layer_cache.resident_cache.kv_latent.shape == full_cache.kv_latent.shape
                 and layer_cache.resident_cache.k_rope.shape == full_cache.k_rope.shape
                 for layer_cache, full_cache in zip(next_layer_caches, full_caches)
+            )
+        )
+
+    def test_worker_greedy_generation_matches_loaded_paged_scaffold_model_helper(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = self.deepseek_module.DeepseekV2ForCausalLM(config)
+        dims = self.deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size) for _ in range(model.model.num_layers)
+        )
+        scaffold_state_dict = self._make_scaffold_state_dict(
+            config,
+            projection_weights,
+            mlp_weights,
+            include_embed=True,
+            include_lm_head=True,
+        )
+        worker_gpu_cache = model.make_runtime_mla_kv_caches(
+            batch_size=1,
+            max_seq_len=6,
+            device=torch.device("cpu"),
+        )
+        direct_gpu_cache = model.make_runtime_mla_kv_caches(
+            batch_size=1,
+            max_seq_len=6,
+            device=torch.device("cpu"),
+        )
+        wrapper = self._make_wrapper()
+        model_runner = _InstalledWrapperExecutionModelRunner(
+            model=model,
+            hidden_states=self._make_hidden_states(),
+            attention_wrapper=wrapper,
+        )
+        worker = self._make_worker(
+            model_runner=model_runner,
+            gpu_cache=worker_gpu_cache,
+            cache_usage_stats=None,
+        )
+        worker.load_model_weights(scaffold_state_dict)
+
+        prompt_token_ids = torch.tensor([1, 3], dtype=torch.long)
+        generated_tokens, final_logits, final_caches = (
+            worker.generate_greedy_with_installed_attention_wrapper(
+                prompt_token_ids,
+                max_new_tokens=3,
+                softmax_scale=0.25,
+            )
+        )
+        direct_generated_tokens, direct_final_logits, direct_final_caches = model.generate_greedy(
+            prompt_token_ids,
+            max_new_tokens=3,
+            kv_caches=direct_gpu_cache,
+            attention_wrapper=wrapper,
+            softmax_scale=0.25,
+        )
+
+        self.assertTrue(torch.equal(generated_tokens, direct_generated_tokens))
+        self.assertTrue(torch.allclose(final_logits, direct_final_logits, atol=1e-6, rtol=1e-6))
+        self.assertEqual(len(model_runner.generate_calls), 1)
+        self.assertEqual(model_runner.generate_calls[0]["model_kwargs"], {"softmax_scale": 0.25})
+        self.assertTrue(
+            all(layer_cache.resident_cache.num_tokens == 4 for layer_cache in final_caches)
+        )
+        self.assertTrue(
+            all(
+                layer_cache.resident_cache.kv_latent.shape == direct_cache.resident_cache.kv_latent.shape
+                and layer_cache.resident_cache.k_rope.shape == direct_cache.resident_cache.k_rope.shape
+                for layer_cache, direct_cache in zip(final_caches, direct_final_caches)
             )
         )
 

@@ -219,6 +219,7 @@ class _RecordingModel:
         self.wrapper_calls = []
         self.prefill_calls = []
         self.decode_calls = []
+        self.generate_calls = []
         self.lm_head = None
 
     def __call__(self, **kwargs):
@@ -236,6 +237,16 @@ class _RecordingModel:
     def decode_tokens(self, token_ids, caches, **kwargs):
         self.decode_calls.append({"token_ids": token_ids, "caches": caches, **kwargs})
         return "decode"
+
+    def generate_greedy(self, token_ids, max_new_tokens, **kwargs):
+        self.generate_calls.append(
+            {
+                "token_ids": token_ids,
+                "max_new_tokens": max_new_tokens,
+                **kwargs,
+            }
+        )
+        return "generate"
 
 
 class ModelRunnerMLADispatchTests(unittest.TestCase):
@@ -625,6 +636,26 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
         self.assertEqual(runner.model.decode_calls[0]["kv_caches"], ("cache",))
         self.assertEqual(runner.model.decode_calls[0]["attention_wrapper"], ATTENTION_WRAPPER)
         self.assertEqual(runner.model.decode_calls[0]["softmax_scale"], 0.25)
+
+    def test_run_greedy_generation_uses_model_generate_entrypoint(self):
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.model = _RecordingModel()
+
+        output = runner.run_greedy_generation(
+            torch.tensor([1, 3], dtype=torch.long),
+            max_new_tokens=2,
+            gpu_cache=("cache",),
+            model_kwargs={"mlp_weights": ("mlp",), "softmax_scale": 0.5},
+        )
+
+        self.assertEqual(output, "generate")
+        self.assertEqual(len(runner.model.generate_calls), 1)
+        self.assertEqual(runner.model.generate_calls[0]["token_ids"].tolist(), [1, 3])
+        self.assertEqual(runner.model.generate_calls[0]["max_new_tokens"], 2)
+        self.assertEqual(runner.model.generate_calls[0]["kv_caches"], ("cache",))
+        self.assertEqual(runner.model.generate_calls[0]["attention_wrapper"], ATTENTION_WRAPPER)
+        self.assertEqual(runner.model.generate_calls[0]["mlp_weights"], ("mlp",))
+        self.assertEqual(runner.model.generate_calls[0]["softmax_scale"], 0.5)
 
 
 if __name__ == "__main__":

@@ -386,3 +386,35 @@ class ModelRunner:
             call_kwargs["kv_caches"] = gpu_cache
             call_kwargs["attention_wrapper"] = get_attention_wrapper()
         return self.model.decode_tokens(token_ids, caches=caches, **call_kwargs)
+
+    def run_greedy_generation(
+        self,
+        token_ids: torch.Tensor,
+        max_new_tokens: int,
+        gpu_cache=None,
+        model_kwargs: Optional[dict] = None,
+    ):
+        if not hasattr(self.model, "generate_greedy"):
+            raise AttributeError("model does not implement generate_greedy")
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        projection_weights = model_kwargs.pop("projection_weights", None)
+        mlp_weights = model_kwargs.pop("mlp_weights", None)
+        softmax_scale = model_kwargs.pop("softmax_scale", None)
+        if model_kwargs:
+            raise ValueError(
+                "Unsupported model_kwargs for greedy token generation: "
+                + ", ".join(sorted(model_kwargs.keys()))
+            )
+        call_kwargs = {
+            "projection_weights": projection_weights,
+            "mlp_weights": mlp_weights,
+            "softmax_scale": softmax_scale,
+        }
+        if gpu_cache is not None:
+            call_kwargs["kv_caches"] = gpu_cache
+            call_kwargs["attention_wrapper"] = get_attention_wrapper()
+        return self.model.generate_greedy(
+            token_ids,
+            max_new_tokens=max_new_tokens,
+            **call_kwargs,
+        )

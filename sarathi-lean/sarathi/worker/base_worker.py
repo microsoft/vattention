@@ -375,6 +375,27 @@ class BaseWorker:
         )
 
     @synchronized
+    def generate_greedy_with_installed_attention_wrapper(
+        self,
+        token_ids: torch.Tensor,
+        max_new_tokens: int,
+        *,
+        mlp_weights=None,
+        softmax_scale: Optional[float] = None,
+    ):
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.model_runner.run_greedy_generation(
+            token_ids,
+            max_new_tokens,
+            self.gpu_cache,
+            model_kwargs=(model_runner_kwargs or None),
+        )
+
+    @synchronized
     def get_metrics_store(self) -> MetricsStore:
         return self.metrics_store
 

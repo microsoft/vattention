@@ -187,6 +187,7 @@ class _FakeModelRunner:
         self.load_calls = []
         self.prefill_calls = []
         self.decode_calls = []
+        self.generate_calls = []
 
     def run(self, seq_metadata_list, gpu_cache, model_kwargs=None):
         self.calls.append(
@@ -222,6 +223,17 @@ class _FakeModelRunner:
             }
         )
         return ("decode-logits", "decode-caches")
+
+    def run_greedy_generation(self, token_ids, max_new_tokens, gpu_cache, model_kwargs=None):
+        self.generate_calls.append(
+            {
+                "token_ids": token_ids,
+                "max_new_tokens": max_new_tokens,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        return ("generated-token-ids", "final-logits", "final-caches")
 
 
 class _FakeMetricsStore:
@@ -364,6 +376,32 @@ class BaseWorkerMLADispatchTests(unittest.TestCase):
                     "caches": ("resident",),
                     "gpu_cache": ("gpu-cache",),
                     "model_kwargs": {"softmax_scale": 0.5},
+                }
+            ],
+        )
+
+    def test_generate_greedy_with_installed_attention_wrapper_forwards_to_model_runner(self):
+        worker, _ = self._make_worker()
+
+        output = worker.generate_greedy_with_installed_attention_wrapper(
+            token_ids="prompt-token-ids",
+            max_new_tokens=3,
+            mlp_weights=("mlp",),
+            softmax_scale=0.25,
+        )
+
+        self.assertEqual(output, ("generated-token-ids", "final-logits", "final-caches"))
+        self.assertEqual(
+            worker.model_runner.generate_calls,
+            [
+                {
+                    "token_ids": "prompt-token-ids",
+                    "max_new_tokens": 3,
+                    "gpu_cache": ("gpu-cache",),
+                    "model_kwargs": {
+                        "mlp_weights": ("mlp",),
+                        "softmax_scale": 0.25,
+                    },
                 }
             ],
         )
