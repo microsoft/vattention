@@ -40,6 +40,7 @@ class ModelRunner:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.cache_config = cache_config
         self.device = device
         self.rank = rank
 
@@ -175,10 +176,17 @@ class ModelRunner:
             context_len = seq_metadata.seq.get_len()
             position = context_len - 1
             input_positions.append(position)
-        # Optimization: Pad the input length to be a multiple of 8.
-        # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
-        input_tokens = pad_to_alignment(input_tokens, multiple_of=8)
-        input_positions = pad_to_alignment(input_positions, multiple_of=8)
+        is_mla_vattention = (
+            AttentionBackend.is_vATTN(self.model_config.attention_backend)
+            and hasattr(self.model_config, "is_mla_model")
+            and self.model_config.is_mla_model()
+        )
+        if not is_mla_vattention:
+            # Optimization: Pad the input length to be a multiple of 8.
+            # MLA/vATTN uses exact token counts for wrapper metadata, so
+            # padding there would desynchronize runtime cache writes.
+            input_tokens = pad_to_alignment(input_tokens, multiple_of=8)
+            input_positions = pad_to_alignment(input_positions, multiple_of=8)
 
         # Convert to tensors.
         tokens_tensor = torch.tensor(input_tokens, dtype=torch.long, device=self.device)
@@ -280,8 +288,15 @@ class ModelRunner:
         total_gpu_memory = get_gpu_memory()
         # print(f"peak_memory: {peak_memory}, total_gpu_memory: {total_gpu_memory}")
         physical_memory = int(total_gpu_memory * gpu_memory_utilization - peak_memory)
+        cache_block_arg = (
+            self.cache_config.page_size
+            if AttentionBackend.is_vATTN(self.model_config.attention_backend)
+            else block_size
+        )
         cache_block_size = get_cache_engine(self.model_config.attention_backend).get_cache_block_size(
-            block_size, self.model_config, self.parallel_config
+            cache_block_arg,
+            self.model_config,
+            self.parallel_config,
         )
         num_gpu_blocks = int(
             physical_memory // cache_block_size
@@ -326,6 +341,13 @@ class ModelRunner:
 
         with self._sampler_e2e_timer:
             if self.sampler is not None:
+                model_output = output
+                if (
+                    isinstance(model_output, tuple)
+                    and len(model_output) == 2
+                    and torch.is_tensor(model_output[0])
+                ):
+                    output = model_output[0]
                 output = self.sampler(output, seq_metadata_list)
 
         get_attention_wrapper().end_forward()

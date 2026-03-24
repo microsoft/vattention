@@ -266,12 +266,12 @@ class DeepseekV2RuntimeCacheIntegrationTests(unittest.TestCase):
             ),
             k_rope_proj=torch.tensor(
                 [
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
                 ]
             ),
             kv_up_proj=torch.tensor(
@@ -323,7 +323,7 @@ class DeepseekV2RuntimeCacheIntegrationTests(unittest.TestCase):
 
         self.assertEqual(len(caches), model.num_layers)
         self.assertEqual(tuple(caches[0].kv_latent.shape), (3, 5, 3))
-        self.assertEqual(tuple(caches[0].k_rope.shape), (3, 5, 2, 1))
+        self.assertEqual(tuple(caches[0].k_rope.shape), (3, 5, 1))
 
     def test_model_consumes_cache_engine_formatted_component_runtime_caches(self):
         config = self._make_config()
@@ -341,7 +341,7 @@ class DeepseekV2RuntimeCacheIntegrationTests(unittest.TestCase):
             self._make_projection_weights(dims) for _ in range(model.num_layers)
         )
         kv_latent = torch.zeros(1, 4, model.num_layers, dims.kv_lora_rank)
-        k_rope = torch.zeros(1, 4, model.num_layers, dims.num_heads * dims.qk_rope_head_dim)
+        k_rope = torch.zeros(1, 4, model.num_layers, dims.qk_rope_head_dim)
         cache_spec = types.SimpleNamespace(
             architecture=self.cache_engine_module.CacheArchitecture.MLA,
             num_layers=model.num_layers,

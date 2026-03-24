@@ -589,12 +589,12 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             ),
             k_rope_proj=torch.tensor(
                 [
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
                 ]
             ),
             kv_up_proj=torch.tensor(
@@ -733,7 +733,7 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             1,
             4,
             model.num_layers,
-            dims.num_heads * dims.qk_rope_head_dim,
+            dims.qk_rope_head_dim,
         )
         cache_spec = types.SimpleNamespace(
             architecture=self.cache_engine_module.CacheArchitecture.MLA,
@@ -963,7 +963,7 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             1,
             4,
             model.model.num_layers,
-            dims.num_heads * dims.qk_rope_head_dim,
+            dims.qk_rope_head_dim,
         )
         cache_spec = types.SimpleNamespace(
             architecture=self.cache_engine_module.CacheArchitecture.MLA,

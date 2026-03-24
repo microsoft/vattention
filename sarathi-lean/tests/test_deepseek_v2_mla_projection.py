@@ -111,12 +111,12 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
             ),
             k_rope_proj=torch.tensor(
                 [
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
                 ]
             ),
             kv_up_proj=torch.tensor(
@@ -165,7 +165,7 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
             kv_latent_proj=torch.zeros(dims.hidden_size, dims.kv_lora_rank),
             kv_a_layernorm_weight=torch.ones(dims.kv_lora_rank),
             k_rope_proj=torch.zeros(
-                dims.hidden_size, dims.num_heads * dims.qk_rope_head_dim
+                dims.hidden_size, dims.qk_rope_head_dim
             ),
             kv_up_proj=torch.zeros(
                 dims.kv_lora_rank, dims.kv_up_proj_output_dim_local
@@ -217,12 +217,12 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
             kv_a_layernorm_weight=torch.tensor([1.0, 0.5, 2.0]),
             k_rope_proj=torch.tensor(
                 [
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
                 ]
             ),
             kv_up_proj=torch.tensor(
@@ -304,7 +304,7 @@ class DeepseekV2MLAProjectionTests(unittest.TestCase):
 
         self.assertEqual(tuple(query_states.shape), (2, dims.q_proj_output_dim_local))
         self.assertEqual(tuple(cache.kv_latent.shape), (2, dims.kv_lora_rank))
-        self.assertEqual(tuple(cache.k_rope.shape), (2, dims.num_heads, dims.qk_rope_head_dim))
+        self.assertEqual(tuple(cache.k_rope.shape), (2, dims.qk_rope_head_dim))
         self.assertTrue(
             torch.equal(
                 cache.kv_latent,

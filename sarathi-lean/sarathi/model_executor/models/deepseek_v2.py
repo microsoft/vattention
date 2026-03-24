@@ -76,8 +76,8 @@ class DeepseekV2MLAResidentCache:
     def __post_init__(self):
         if self.kv_latent.ndim != 2:
             raise ValueError("kv_latent must have shape [tokens, kv_lora_rank]")
-        if self.k_rope.ndim != 3:
-            raise ValueError("k_rope must have shape [tokens, num_heads, qk_rope_head_dim]")
+        if self.k_rope.ndim != 2:
+            raise ValueError("k_rope must have shape [tokens, qk_rope_head_dim]")
         if self.kv_latent.shape[0] != self.k_rope.shape[0]:
             raise ValueError("kv_latent and k_rope must agree on token count")
 
@@ -183,11 +183,11 @@ def make_resident_cache(
 ) -> DeepseekV2MLAResidentCache:
     if kv_latent.ndim != 2 or kv_latent.shape[1] != mla_dims.kv_lora_rank:
         raise ValueError("kv_latent must have shape [tokens, kv_lora_rank]")
-    if k_rope.ndim != 3:
-        raise ValueError("k_rope must have shape [tokens, num_heads, qk_rope_head_dim]")
-    expected_k_rope_shape = (kv_latent.shape[0], mla_dims.num_heads, mla_dims.qk_rope_head_dim)
+    if k_rope.ndim != 2:
+        raise ValueError("k_rope must have shape [tokens, qk_rope_head_dim]")
+    expected_k_rope_shape = (kv_latent.shape[0], mla_dims.qk_rope_head_dim)
     if tuple(k_rope.shape) != expected_k_rope_shape:
-        raise ValueError("k_rope shape does not match local MLA rope dimensions")
+        raise ValueError("k_rope shape does not match MLA rope dimensions")
     return DeepseekV2MLAResidentCache(kv_latent=kv_latent, k_rope=k_rope)
 
 
@@ -226,7 +226,8 @@ def reconstruct_dense_kv(
         [mla_dims.qk_nope_head_dim, mla_dims.v_head_dim],
         dim=-1,
     )
-    key = torch.cat([k_nope, cache.k_rope], dim=-1)
+    k_rope = cache.k_rope.unsqueeze(1).expand(-1, mla_dims.num_heads, -1)
+    key = torch.cat([k_nope, k_rope], dim=-1)
     return key, value
 
 
@@ -254,10 +255,7 @@ def make_projection_weights(
         expected_q_b_proj = None
     expected_kv_latent_proj = (mla_dims.hidden_size, mla_dims.kv_lora_rank)
     expected_kv_a_layernorm_weight = (mla_dims.kv_lora_rank,)
-    expected_k_rope_proj = (
-        mla_dims.hidden_size,
-        mla_dims.num_heads * mla_dims.qk_rope_head_dim,
-    )
+    expected_k_rope_proj = (mla_dims.hidden_size, mla_dims.qk_rope_head_dim)
     expected_kv_up_proj = (
         mla_dims.kv_lora_rank,
         mla_dims.kv_up_proj_output_dim_local,
@@ -431,7 +429,6 @@ def make_component_mla_kv_cache(
         k_rope=torch.zeros(
             batch_size,
             max_seq_len,
-            mla_dims.num_heads,
             mla_dims.qk_rope_head_dim,
             device=device,
             dtype=dtype,
@@ -534,7 +531,6 @@ def project_mla_from_hidden_states(
         kv_latent = kv_latent * torch.rsqrt(variance + 1e-6)
         kv_latent = kv_latent * projection_weights.kv_a_layernorm_weight
     k_rope = hidden_states @ projection_weights.k_rope_proj
-    k_rope = k_rope.view(-1, mla_dims.num_heads, mla_dims.qk_rope_head_dim)
     return query_states, make_resident_cache(kv_latent, k_rope, mla_dims)
 
 
@@ -1608,14 +1604,12 @@ class DeepseekV2ForCausalLM(nn.Module):
                 projection_tensors["kv_latent_proj"],
                 expected_shape=(hidden_size, layer.self_attn.mla_dims.kv_lora_rank),
             )
-            projection_tensors["k_rope_proj"] = self._coerce_and_slice_tensor_parallel_linear_weight(
+            projection_tensors["k_rope_proj"] = self._coerce_linear_weight_layout(
                 projection_tensors["k_rope_proj"],
-                expected_local_shape=(
+                expected_shape=(
                     hidden_size,
-                    layer.self_attn.mla_dims.num_heads
-                    * layer.self_attn.mla_dims.qk_rope_head_dim,
+                    layer.self_attn.mla_dims.qk_rope_head_dim,
                 ),
-                shard_dim=1,
             )
             projection_tensors["kv_up_proj"] = self._coerce_and_slice_tensor_parallel_linear_weight(
                 projection_tensors["kv_up_proj"],
@@ -1988,7 +1982,7 @@ class DeepseekV2ForCausalLM(nn.Module):
 
         local_shape = (
             hidden_size,
-            mla_dims.kv_lora_rank + mla_dims.num_heads * mla_dims.qk_rope_head_dim,
+            mla_dims.kv_lora_rank + mla_dims.qk_rope_head_dim,
         )
         tensor = self._coerce_linear_weight_layout(
             tensor,
@@ -2003,8 +1997,7 @@ class DeepseekV2ForCausalLM(nn.Module):
 
         global_shape = (
             hidden_size,
-            mla_dims.kv_lora_rank
-            + mla_dims.total_num_heads * mla_dims.qk_rope_head_dim,
+            mla_dims.kv_lora_rank + mla_dims.qk_rope_head_dim,
         )
         tensor = self._coerce_linear_weight_layout(
             tensor,
@@ -2014,9 +2007,8 @@ class DeepseekV2ForCausalLM(nn.Module):
             return tensor, tensor
 
         kv_latent_proj = tensor[:, : mla_dims.kv_lora_rank].contiguous()
-        rope_width_local = mla_dims.num_heads * mla_dims.qk_rope_head_dim
-        rope_start = mla_dims.kv_lora_rank + self._get_tensor_model_parallel_rank() * rope_width_local
-        rope_end = rope_start + rope_width_local
+        rope_start = mla_dims.kv_lora_rank
+        rope_end = rope_start + mla_dims.qk_rope_head_dim
         k_rope_proj = tensor[:, rope_start:rope_end].contiguous()
         return kv_latent_proj, k_rope_proj
 

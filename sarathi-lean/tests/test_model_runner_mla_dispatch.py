@@ -133,7 +133,7 @@ def _install_runner_stubs():
     attention_module = types.ModuleType("sarathi.model_executor.attention")
     attention_module.get_attention_wrapper = lambda: attention_wrapper
     attention_module.AttentionBackend = types.SimpleNamespace(
-        is_vATTN=lambda backend: False
+        is_vATTN=lambda backend: str(backend).upper() == "FA_VATTN"
     )
     sys.modules["sarathi.model_executor.attention"] = attention_module
 
@@ -249,6 +249,20 @@ class _RecordingModel:
         return "generate"
 
 
+class _RecordingSampler:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, hidden_states, seq_metadata_list):
+        self.calls.append(
+            {
+                "hidden_states": hidden_states,
+                "seq_metadata_list": seq_metadata_list,
+            }
+        )
+        return "sampled"
+
+
 class ModelRunnerMLADispatchTests(unittest.TestCase):
     def setUp(self):
         ATTENTION_WRAPPER.begin_calls.clear()
@@ -291,12 +305,12 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
             ),
             k_rope_proj=torch.tensor(
                 [
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
                 ]
             ),
             kv_up_proj=torch.tensor(
@@ -465,6 +479,75 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
                 model_kwargs={"unexpected": 1},
             )
 
+    def test_prepare_inputs_skips_alignment_padding_for_mla_vattention(self):
+        class _PromptSeq:
+            def get_next_prompt_chunk_token_ids(self, prompt_chunk_len):
+                self._last_prompt_chunk_len = prompt_chunk_len
+                return [1, 3][:prompt_chunk_len]
+
+            def get_num_prompt_tokens_processed(self):
+                return 0
+
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.device = torch.device("cpu")
+        runner.model_config = types.SimpleNamespace(
+            attention_backend="FA_VATTN",
+            is_mla_model=lambda: True,
+        )
+
+        seq_metadata = types.SimpleNamespace(
+            is_prompt=True,
+            prompt_chunk_len=2,
+            seq=_PromptSeq(),
+        )
+
+        original_pad = model_runner_module.pad_to_alignment
+        model_runner_module.pad_to_alignment = (
+            lambda values, multiple_of=8: values
+            + [0] * ((multiple_of - len(values) % multiple_of) % multiple_of)
+        )
+        try:
+            tokens, positions = runner._prepare_inputs([seq_metadata])
+        finally:
+            model_runner_module.pad_to_alignment = original_pad
+
+        self.assertEqual(tokens.tolist(), [1, 3])
+        self.assertEqual(positions.tolist(), [0, 1])
+
+    def test_prepare_inputs_keeps_alignment_padding_for_non_mla_paths(self):
+        class _PromptSeq:
+            def get_next_prompt_chunk_token_ids(self, prompt_chunk_len):
+                return [1, 3][:prompt_chunk_len]
+
+            def get_num_prompt_tokens_processed(self):
+                return 0
+
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.device = torch.device("cpu")
+        runner.model_config = types.SimpleNamespace(
+            attention_backend="flash_attention",
+            is_mla_model=lambda: False,
+        )
+
+        seq_metadata = types.SimpleNamespace(
+            is_prompt=True,
+            prompt_chunk_len=2,
+            seq=_PromptSeq(),
+        )
+
+        original_pad = model_runner_module.pad_to_alignment
+        model_runner_module.pad_to_alignment = (
+            lambda values, multiple_of=8: values
+            + [0] * ((multiple_of - len(values) % multiple_of) % multiple_of)
+        )
+        try:
+            tokens, positions = runner._prepare_inputs([seq_metadata])
+        finally:
+            model_runner_module.pad_to_alignment = original_pad
+
+        self.assertEqual(tokens.tolist(), [1, 3, 0, 0, 0, 0, 0, 0])
+        self.assertEqual(positions.tolist(), [0, 1, 0, 0, 0, 0, 0, 0])
+
     def test_runner_can_execute_loaded_deepseek_scaffold_via_run(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
             set_pipeline_model_parallel_rank,
@@ -525,6 +608,41 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
         self.assertEqual(len(ATTENTION_WRAPPER.begin_calls), 1)
         self.assertEqual(ATTENTION_WRAPPER.begin_calls[0], ["seq-md"])
         self.assertEqual(ATTENTION_WRAPPER.end_call_count, 1)
+
+    def test_run_unwraps_hidden_states_before_sampler_when_model_returns_cache_tuple(self):
+        class _NullTimer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.model = _RecordingModel()
+        runner.sampler = _RecordingSampler()
+        runner._prepare_inputs_e2e_timer = _NullTimer()
+        runner._model_execution_e2e_timer = _NullTimer()
+        runner._sampler_e2e_timer = _NullTimer()
+        runner._prepare_inputs = lambda seq_metadata_list: (
+            torch.tensor([1, 3], dtype=torch.long),
+            torch.tensor([0, 1], dtype=torch.long),
+        )
+        runner._execute_model = lambda **kwargs: (
+            torch.tensor([[0.1, 0.2], [0.3, 0.4]], dtype=torch.float32),
+            ("cache",),
+        )
+
+        output = runner.run(seq_metadata_list=["seq-md"], gpu_cache=("gpu-cache",))
+
+        self.assertEqual(output, "sampled")
+        self.assertEqual(len(runner.sampler.calls), 1)
+        self.assertTrue(
+            torch.equal(
+                runner.sampler.calls[0]["hidden_states"],
+                torch.tensor([[0.1, 0.2], [0.3, 0.4]], dtype=torch.float32),
+            )
+        )
+        self.assertEqual(runner.sampler.calls[0]["seq_metadata_list"], ["seq-md"])
 
     def test_runner_can_execute_pipeline_last_stage_loaded_scaffold_with_global_layers(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (

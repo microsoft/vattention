@@ -90,8 +90,8 @@ class DeepseekV2ContiguousAttentionTests(unittest.TestCase):
         )
         k_rope = torch.tensor(
             [
-                [[0.5], [1.5]],
-                [[2.5], [3.5]],
+                [0.5],
+                [2.5],
             ]
         )
         kv_up_proj_weight = torch.tensor(
@@ -116,7 +116,7 @@ class DeepseekV2ContiguousAttentionTests(unittest.TestCase):
 
         self.assertEqual(tuple(output.shape), (2, dims.o_proj_input_dim_local))
         self.assertEqual(tuple(cache.kv_latent.shape), (2, dims.kv_lora_rank))
-        self.assertEqual(tuple(cache.k_rope.shape), (2, dims.num_heads, dims.qk_rope_head_dim))
+        self.assertEqual(tuple(cache.k_rope.shape), (2, dims.qk_rope_head_dim))
         self.assertTrue(torch.isfinite(output).all())
 
     def test_decode_attention_appends_cache_and_only_emits_new_token_output(self):

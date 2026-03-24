@@ -221,12 +221,12 @@ class DeepseekV2ModelPagedParityTests(unittest.TestCase):
             ),
             k_rope_proj=torch.tensor(
                 [
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
-                    [1.0, 0.0],
-                    [0.0, 1.0],
-                    [0.0, 0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
+                    [1.0],
+                    [0.0],
+                    [0.0],
                 ]
             ),
             kv_up_proj=torch.tensor(

@@ -606,6 +606,30 @@ class ModelConfig:
             mla_qk_rope_head_dim=mla_spec.qk_rope_head_dim if is_mla else None,
         )
 
+    def get_vattention_pages_per_kvblock(
+        self,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        num_components = len(self.get_cache_component_specs(parallel_config))
+        if megacache:
+            return num_components
+        return self.get_num_layers(parallel_config) * num_components
+
+    def get_vattention_cache_block_size_bytes(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        return (
+            page_size
+            * self.get_vattention_pages_per_kvblock(
+                parallel_config,
+                megacache=megacache,
+            )
+        )
+
     def get_vattention_init_spec(
         self,
         *,

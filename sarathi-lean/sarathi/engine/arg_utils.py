@@ -19,6 +19,8 @@ from sarathi.config import (
     VLLMSchedulerConfig,
 )
 
+VATTN_DEFAULT_PAGE_SIZE = 2 * 1024 * 1024
+
 
 @dataclass
 class EngineArgs:
@@ -151,6 +153,8 @@ class EngineArgs:
         page_size = -1 if AttentionBackend.is_vLLM(self.attention_backend) else self.block_size
         block_size = self.block_size
         if AttentionBackend.is_vATTN(self.attention_backend):
+            if model_config.get_cache_architecture().value == "mla":
+                page_size = VATTN_DEFAULT_PAGE_SIZE
             megacache = "megacache" in self.attention_backend.lower()
             block_size = model_config.get_cache_layout(
                 page_size,

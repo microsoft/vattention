@@ -580,12 +580,7 @@ def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
             return [
                 DeepseekV2ComponentMLAKVCache(
                     kv_latent=kv_latent_cache[:, :, layer_idx, :],
-                    k_rope=k_rope_cache[:, :, layer_idx, :].view(
-                        kv_latent_cache.shape[0],
-                        kv_latent_cache.shape[1],
-                        num_q_heads_local,
-                        cache_spec.mla_qk_rope_head_dim,
-                    ),
+                    k_rope=k_rope_cache[:, :, layer_idx, :],
                 )
                 for layer_idx in range(cache_spec.num_layers)
             ]
@@ -614,12 +609,7 @@ def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
         return [
             DeepseekV2ComponentMLAKVCache(
                 kv_latent=kv_latent_cache,
-                k_rope=k_rope_cache.view(
-                    kv_latent_cache.shape[0],
-                    kv_latent_cache.shape[1],
-                    num_q_heads_local,
-                    cache_spec.mla_qk_rope_head_dim,
-                ),
+                k_rope=k_rope_cache,
             )
             for kv_latent_cache, k_rope_cache in zip(kv_latent_caches, k_rope_caches)
         ]
@@ -702,7 +692,6 @@ class vATTNCacheEngine(BaseCacheEngine):
         
         kv_cache = self._init_kvcache_from_spec()
         cache_list = format_vattention_gpu_cache(self.cache_spec, kv_cache, self.device)
-        vattention.reserve_physical_pages(self.cache_mem_size)
         
         print(f"[PYTHON TRACE] Reserving Physical Memory: {self.cache_mem_size / (1024**2):.2f} MB")
         vattention.reserve_physical_pages(self.cache_mem_size)
@@ -849,7 +838,12 @@ class vATTNCacheEngine(BaseCacheEngine):
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
-        return model_config.get_cache_block_size_bytes(block_size, parallel_config)
+        megacache = "megacache" in model_config.attention_backend.lower()
+        return model_config.get_vattention_cache_block_size_bytes(
+            block_size,
+            parallel_config,
+            megacache=megacache,
+        )
 
     def cleanup_kvcache(self):
         # this is required to ensure UVM module is not holding on to the memory

@@ -709,6 +709,75 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             32 * per_token_local,
         )
 
+    def test_mla_vattention_pages_per_kvblock_tracks_component_pages(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+
+        self.assertEqual(
+            model_config.get_vattention_pages_per_kvblock(
+                parallel_config,
+                megacache=False,
+            ),
+            40,
+        )
+        self.assertEqual(
+            model_config.get_vattention_pages_per_kvblock(
+                parallel_config,
+                megacache=True,
+            ),
+            2,
+        )
+
+    def test_mla_vattention_cache_block_size_uses_page_backed_bytes(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+        page_size = 2 * 1024 * 1024
+
+        self.assertEqual(
+            model_config.get_vattention_cache_block_size_bytes(
+                page_size,
+                parallel_config,
+                megacache=False,
+            ),
+            40 * page_size,
+        )
+        self.assertEqual(
+            model_config.get_vattention_cache_block_size_bytes(
+                page_size,
+                parallel_config,
+                megacache=True,
+            ),
+            2 * page_size,
+        )
+
     def test_mla_cache_layout_packages_all_derived_fields(self):
         hf_config = types.SimpleNamespace(
             model_type="deepseek_v2",

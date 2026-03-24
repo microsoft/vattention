@@ -114,12 +114,12 @@ def make_projection_weights(deepseek_module, dims, *, device, dtype, query_mode=
         ),
         k_rope_proj=torch.tensor(
             [
-                [1.0, 0.0],
-                [0.0, 1.0],
-                [0.0, 0.0],
-                [1.0, 0.0],
-                [0.0, 1.0],
-                [0.0, 0.0],
+                [1.0],
+                [0.0],
+                [0.0],
+                [1.0],
+                [0.0],
+                [0.0],
             ],
             device=device,
             dtype=dtype,
@@ -291,7 +291,7 @@ def build_scaffold_state_dict(
         kv_a_proj_with_mqa = torch.cat(
             [
                 layer_projection_weights.kv_latent_proj,
-                expand_tp_shard(layer_projection_weights.k_rope_proj, shard_dim=1),
+                layer_projection_weights.k_rope_proj,
             ],
             dim=1,
         )
