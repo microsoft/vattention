@@ -56,6 +56,7 @@ DeepseekV2DecoderLayer = deepseek_module.DeepseekV2DecoderLayer
 DeepseekV2Model = deepseek_module.DeepseekV2Model
 DeepseekV2ForCausalLM = deepseek_module.DeepseekV2ForCausalLM
 make_mlp_weights = deepseek_module.make_mlp_weights
+make_moe_weights = deepseek_module.make_moe_weights
 make_projection_weights = deepseek_module.make_projection_weights
 
 
@@ -237,6 +238,32 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
             hidden_size=hidden_size,
         )
 
+    def _make_moe_weights(self, hidden_size):
+        base = self._make_mlp_weights(hidden_size)
+        expert1 = make_mlp_weights(
+            gate_proj=base.gate_proj * 2.0,
+            up_proj=base.up_proj * 2.0,
+            down_proj=base.down_proj * 2.0,
+            hidden_size=hidden_size,
+        )
+        shared = make_mlp_weights(
+            gate_proj=base.gate_proj * 0.5,
+            up_proj=base.up_proj * 0.5,
+            down_proj=base.down_proj * 0.5,
+            hidden_size=hidden_size,
+        )
+        return make_moe_weights(
+            gate=torch.tensor(
+                [
+                    [2.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0, 0.0, 0.0],
+                ]
+            ),
+            experts=(base, expert1),
+            shared_experts=shared,
+            hidden_size=hidden_size,
+        )
+
     def test_decoder_layer_runs_attention_only_reference_forward(self):
         config = self._make_config()
         dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
@@ -275,6 +302,29 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(mlp_output).all())
         self.assertTrue(torch.allclose(baseline_cache.kv_latent, mlp_cache.kv_latent))
         self.assertFalse(torch.allclose(mlp_output, baseline_output))
+
+    def test_decoder_layer_applies_moe_block_when_weights_are_provided(self):
+        config = self._make_config()
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        layer = DeepseekV2DecoderLayer(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        moe_weights = self._make_moe_weights(config.hidden_size)
+        hidden_states = self._make_hidden_states()
+
+        baseline_output, baseline_cache = layer(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+        )
+        moe_output, moe_cache = layer(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            moe_weights=moe_weights,
+        )
+
+        self.assertEqual(tuple(moe_output.shape), (2, config.hidden_size))
+        self.assertEqual(moe_cache.num_tokens, 2)
+        self.assertTrue(torch.allclose(baseline_cache.kv_latent, moe_cache.kv_latent))
+        self.assertFalse(torch.allclose(moe_output, baseline_output))
 
     def test_model_forward_runs_all_local_layers_and_returns_cache_tuple(self):
         config = self._make_config()
@@ -383,6 +433,30 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
         model.set_scaffold_weights(
             projection_weights=projection_weights,
             mlp_weights=mlp_weights,
+        )
+
+        output, caches = model(hidden_states=self._make_hidden_states())
+
+        self.assertEqual(tuple(output.shape), (2, config.hidden_size))
+        self.assertEqual(len(caches), model.num_layers)
+        self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
+
+    def test_model_forward_uses_installed_moe_weights(self):
+        config = self._make_config()
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        model = DeepseekV2Model(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=2,
+            pipeline_parallel_rank=0,
+        )
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.num_layers)
+        )
+        moe_weights = (None, self._make_moe_weights(config.hidden_size))
+        model.set_scaffold_weights(
+            projection_weights=projection_weights,
+            moe_weights=moe_weights,
         )
 
         output, caches = model(hidden_states=self._make_hidden_states())

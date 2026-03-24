@@ -971,9 +971,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         projection_weights: DeepseekV2MLAProjectionWeights,
         mlp_weights: Optional[DeepseekV2MLPWeights] = None,
+        moe_weights: Optional[DeepseekV2MoEWeights] = None,
         cache: Optional[DeepseekV2MLAResidentCache] = None,
         softmax_scale: Optional[float] = None,
     ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        if mlp_weights is not None and moe_weights is not None:
+            raise ValueError("mlp_weights and moe_weights are mutually exclusive")
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         attn_output, cache = self.self_attn.forward_hidden_states_contiguous(
@@ -986,6 +989,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         if mlp_weights is not None:
             hidden_states = hidden_states + apply_mlp(hidden_states, mlp_weights)
+        elif moe_weights is not None:
+            hidden_states = hidden_states + apply_moe(hidden_states, moe_weights)
         return hidden_states, cache
 
     def forward_with_attention_wrapper(
@@ -994,10 +999,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         projection_weights: DeepseekV2MLAProjectionWeights,
         kv_cache,
         mlp_weights: Optional[DeepseekV2MLPWeights] = None,
+        moe_weights: Optional[DeepseekV2MoEWeights] = None,
         attention_wrapper=None,
         cache: Optional[DeepseekV2MLAResidentCache] = None,
         softmax_scale: Optional[float] = None,
     ) -> Tuple[torch.Tensor, DeepseekV2LayerCache]:
+        if mlp_weights is not None and moe_weights is not None:
+            raise ValueError("mlp_weights and moe_weights are mutually exclusive")
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         attn_output, layer_cache = self.self_attn.forward_hidden_states_with_attention_wrapper(
@@ -1013,6 +1021,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         if mlp_weights is not None:
             hidden_states = hidden_states + apply_mlp(hidden_states, mlp_weights)
+        elif moe_weights is not None:
+            hidden_states = hidden_states + apply_moe(hidden_states, moe_weights)
         return hidden_states, layer_cache
 
 
@@ -1079,6 +1089,7 @@ class DeepseekV2Model(nn.Module):
             Tuple[DeepseekV2MLAProjectionWeights, ...]
         ] = None
         self.layer_mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None
+        self.layer_moe_weights: Optional[Tuple[Optional[DeepseekV2MoEWeights], ...]] = None
 
     def _prepare_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.dtype in (torch.int32, torch.int64, torch.long):
@@ -1097,6 +1108,7 @@ class DeepseekV2Model(nn.Module):
         self,
         projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        moe_weights: Optional[Tuple[Optional[DeepseekV2MoEWeights], ...]] = None,
     ) -> None:
         if len(projection_weights) != self.num_layers:
             raise ValueError("projection_weights must provide one entry per local layer")
@@ -1104,16 +1116,30 @@ class DeepseekV2Model(nn.Module):
             mlp_weights = tuple(None for _ in range(self.num_layers))
         if len(mlp_weights) != self.num_layers:
             raise ValueError("mlp_weights must provide one entry per local layer")
+        if moe_weights is None:
+            moe_weights = tuple(None for _ in range(self.num_layers))
+        if len(moe_weights) != self.num_layers:
+            raise ValueError("moe_weights must provide one entry per local layer")
+        for layer_idx, (layer_mlp_weights, layer_moe_weights) in enumerate(
+            zip(mlp_weights, moe_weights)
+        ):
+            if layer_mlp_weights is not None and layer_moe_weights is not None:
+                raise ValueError(
+                    f"layer {layer_idx} cannot install both dense MLP and MoE weights"
+                )
         self.layer_projection_weights = tuple(projection_weights)
         self.layer_mlp_weights = tuple(mlp_weights)
+        self.layer_moe_weights = tuple(moe_weights)
 
     def _resolve_scaffold_weights(
         self,
         projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]],
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]],
+        moe_weights: Optional[Tuple[Optional[DeepseekV2MoEWeights], ...]],
     ) -> Tuple[
         Tuple[DeepseekV2MLAProjectionWeights, ...],
         Tuple[Optional[DeepseekV2MLPWeights], ...],
+        Tuple[Optional[DeepseekV2MoEWeights], ...],
     ]:
         if projection_weights is None:
             projection_weights = self.layer_projection_weights
@@ -1130,19 +1156,34 @@ class DeepseekV2Model(nn.Module):
             mlp_weights = tuple(None for _ in range(self.num_layers))
         if len(mlp_weights) != self.num_layers:
             raise ValueError("mlp_weights must provide one entry per local layer")
-        return tuple(projection_weights), tuple(mlp_weights)
+        if moe_weights is None:
+            moe_weights = self.layer_moe_weights
+        if moe_weights is None:
+            moe_weights = tuple(None for _ in range(self.num_layers))
+        if len(moe_weights) != self.num_layers:
+            raise ValueError("moe_weights must provide one entry per local layer")
+        for layer_idx, (layer_mlp_weights, layer_moe_weights) in enumerate(
+            zip(mlp_weights, moe_weights)
+        ):
+            if layer_mlp_weights is not None and layer_moe_weights is not None:
+                raise ValueError(
+                    f"layer {layer_idx} cannot use both dense MLP and MoE weights"
+                )
+        return tuple(projection_weights), tuple(mlp_weights), tuple(moe_weights)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        moe_weights: Optional[Tuple[Optional[DeepseekV2MoEWeights], ...]] = None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
     ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
-        projection_weights, mlp_weights = self._resolve_scaffold_weights(
+        projection_weights, mlp_weights, moe_weights = self._resolve_scaffold_weights(
             projection_weights,
             mlp_weights,
+            moe_weights,
         )
         if caches is None:
             caches = tuple(None for _ in range(self.num_layers))
@@ -1151,16 +1192,24 @@ class DeepseekV2Model(nn.Module):
 
         hidden_states = self._prepare_hidden_states(hidden_states)
         next_caches = []
-        for layer, layer_projection_weights, layer_mlp_weights, layer_cache in zip(
+        for (
+            layer,
+            layer_projection_weights,
+            layer_mlp_weights,
+            layer_moe_weights,
+            layer_cache,
+        ) in zip(
             self.layers,
             projection_weights,
             mlp_weights,
+            moe_weights,
             caches,
         ):
             hidden_states, next_cache = layer(
                 hidden_states=hidden_states,
                 projection_weights=layer_projection_weights,
                 mlp_weights=layer_mlp_weights,
+                moe_weights=layer_moe_weights,
                 cache=layer_cache,
                 softmax_scale=softmax_scale,
             )
@@ -1175,13 +1224,15 @@ class DeepseekV2Model(nn.Module):
         kv_caches: Tuple[object, ...],
         projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        moe_weights: Optional[Tuple[Optional[DeepseekV2MoEWeights], ...]] = None,
         attention_wrapper=None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
     ) -> Tuple[torch.Tensor, Tuple[DeepseekV2LayerCache, ...]]:
-        projection_weights, mlp_weights = self._resolve_scaffold_weights(
+        projection_weights, mlp_weights, moe_weights = self._resolve_scaffold_weights(
             projection_weights,
             mlp_weights,
+            moe_weights,
         )
         if len(kv_caches) != self.num_layers:
             raise ValueError("kv_caches must provide one entry per local layer")
@@ -1192,10 +1243,18 @@ class DeepseekV2Model(nn.Module):
 
         hidden_states = self._prepare_hidden_states(hidden_states)
         next_caches = []
-        for layer, layer_projection_weights, layer_mlp_weights, layer_kv_cache, layer_cache in zip(
+        for (
+            layer,
+            layer_projection_weights,
+            layer_mlp_weights,
+            layer_moe_weights,
+            layer_kv_cache,
+            layer_cache,
+        ) in zip(
             self.layers,
             projection_weights,
             mlp_weights,
+            moe_weights,
             kv_caches,
             caches,
         ):
@@ -1203,6 +1262,7 @@ class DeepseekV2Model(nn.Module):
                 hidden_states=hidden_states,
                 projection_weights=layer_projection_weights,
                 mlp_weights=layer_mlp_weights,
+                moe_weights=layer_moe_weights,
                 kv_cache=layer_kv_cache,
                 attention_wrapper=attention_wrapper,
                 cache=layer_cache,
@@ -1262,10 +1322,12 @@ class DeepseekV2ForCausalLM(nn.Module):
         self,
         projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        moe_weights: Optional[Tuple[Optional[DeepseekV2MoEWeights], ...]] = None,
     ) -> None:
         self.model.set_scaffold_weights(
             projection_weights=projection_weights,
             mlp_weights=mlp_weights,
+            moe_weights=moe_weights,
         )
 
     @staticmethod
