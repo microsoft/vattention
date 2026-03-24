@@ -200,6 +200,26 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertEqual(result["final_logits_shape"], [1, 16])
         self.assertTrue(all(token_count == 4 for token_count in result["cache_token_counts"]))
 
+    def test_compare_scaffold_smoke_matches_contiguous_and_paged_generation(self):
+        result = self.smoke_module.compare_scaffold_smoke(
+            prompt_token_ids=(1, 3),
+            max_new_tokens=3,
+        )
+
+        self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["prompt_token_ids"], [1, 3])
+        self.assertTrue(result["generated_tokens_match"])
+        self.assertTrue(result["final_logits_match"])
+        self.assertTrue(result["cache_token_counts_match"])
+        self.assertEqual(len(result["generated_token_ids"]), 3)
+        self.assertEqual(result["generated_token_ids"], result["paged_generated_token_ids"])
+        self.assertTrue(
+            all(token_count == 4 for token_count in result["contiguous_cache_token_counts"])
+        )
+        self.assertTrue(
+            all(token_count == 4 for token_count in result["paged_cache_token_counts"])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

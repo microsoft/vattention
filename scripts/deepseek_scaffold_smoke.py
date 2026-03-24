@@ -143,7 +143,7 @@ def build_scaffold_state_dict(model, projection_weights, mlp_weights):
     return state_dict
 
 
-def run_scaffold_smoke(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
+def _run_scaffold_smoke_artifacts(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
         set_pipeline_model_parallel_world_size,
@@ -202,9 +202,18 @@ def run_scaffold_smoke(mode="contiguous", prompt_token_ids=(1, 3), max_new_token
         max_new_tokens=max_new_tokens,
         **generate_kwargs,
     )
+    return generated_token_ids, final_logits, final_caches
+
+
+def run_scaffold_smoke(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
+    generated_token_ids, final_logits, final_caches = _run_scaffold_smoke_artifacts(
+        mode=mode,
+        prompt_token_ids=prompt_token_ids,
+        max_new_tokens=max_new_tokens,
+    )
     return {
         "mode": mode,
-        "prompt_token_ids": prompt_token_ids.tolist(),
+        "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": generated_token_ids.tolist(),
         "final_logits_shape": list(final_logits.shape),
         "cache_token_counts": [
@@ -214,22 +223,58 @@ def run_scaffold_smoke(mode="contiguous", prompt_token_ids=(1, 3), max_new_token
     }
 
 
+def compare_scaffold_smoke(prompt_token_ids=(1, 3), max_new_tokens=3):
+    contiguous_tokens, contiguous_logits, contiguous_caches = _run_scaffold_smoke_artifacts(
+        mode="contiguous",
+        prompt_token_ids=prompt_token_ids,
+        max_new_tokens=max_new_tokens,
+    )
+    paged_tokens, paged_logits, paged_caches = _run_scaffold_smoke_artifacts(
+        mode="paged",
+        prompt_token_ids=prompt_token_ids,
+        max_new_tokens=max_new_tokens,
+    )
+
+    contiguous_cache_counts = [cache.num_tokens for cache in contiguous_caches]
+    paged_cache_counts = [cache.resident_cache.num_tokens for cache in paged_caches]
+    return {
+        "mode": "compare",
+        "prompt_token_ids": list(prompt_token_ids),
+        "generated_token_ids": contiguous_tokens.tolist(),
+        "paged_generated_token_ids": paged_tokens.tolist(),
+        "generated_tokens_match": torch.equal(contiguous_tokens, paged_tokens),
+        "final_logits_match": torch.allclose(
+            contiguous_logits,
+            paged_logits,
+            atol=1e-6,
+            rtol=1e-6,
+        ),
+        "contiguous_cache_token_counts": contiguous_cache_counts,
+        "paged_cache_token_counts": paged_cache_counts,
+        "cache_token_counts_match": contiguous_cache_counts == paged_cache_counts,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("contiguous", "paged"),
+        choices=("contiguous", "paged", "compare"),
         default="contiguous",
     )
     parser.add_argument("--max-new-tokens", type=int, default=3)
     args = parser.parse_args()
 
+    if args.mode == "compare":
+        output = compare_scaffold_smoke(max_new_tokens=args.max_new_tokens)
+    else:
+        output = run_scaffold_smoke(
+            mode=args.mode,
+            max_new_tokens=args.max_new_tokens,
+        )
     print(
         json.dumps(
-            run_scaffold_smoke(
-                mode=args.mode,
-                max_new_tokens=args.max_new_tokens,
-            ),
+            output,
             indent=2,
             sort_keys=True,
         )
