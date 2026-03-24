@@ -368,25 +368,32 @@ def write_scaffold_hf_directory(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     config_path = output_path / "config.json"
+    config_payload = {
+        "model_type": "deepseek_v2",
+        "vocab_size": model.config.vocab_size,
+        "hidden_size": model.config.hidden_size,
+        "num_attention_heads": model.config.num_attention_heads,
+        "num_hidden_layers": model.config.num_hidden_layers,
+        "tensor_parallel_world_size": model.model.tensor_parallel_world_size,
+        "pipeline_parallel_world_size": model.model.pipeline_parallel_world_size,
+        "pipeline_parallel_rank": model.model.pipeline_parallel_rank,
+        "q_lora_rank": model.config.q_lora_rank,
+        "kv_lora_rank": model.config.kv_lora_rank,
+        "qk_nope_head_dim": model.config.qk_nope_head_dim,
+        "qk_rope_head_dim": model.config.qk_rope_head_dim,
+        "v_head_dim": model.config.v_head_dim,
+        "first_k_dense_replace": getattr(model.config, "first_k_dense_replace", None),
+        "n_routed_experts": getattr(model.config, "n_routed_experts", None),
+        "n_shared_experts": getattr(model.config, "n_shared_experts", None),
+        "num_experts_per_tok": getattr(model.config, "num_experts_per_tok", None),
+        "norm_topk_prob": getattr(model.config, "norm_topk_prob", None),
+    }
+    config_payload = {
+        key: value for key, value in config_payload.items() if value is not None
+    }
     config_path.write_text(
         json.dumps(
-            {
-                "model_type": "deepseek_v2",
-                "vocab_size": model.config.vocab_size,
-                "hidden_size": model.config.hidden_size,
-                "num_attention_heads": model.config.num_attention_heads,
-                "num_hidden_layers": model.config.num_hidden_layers,
-                "q_lora_rank": model.config.q_lora_rank,
-                "kv_lora_rank": model.config.kv_lora_rank,
-                "qk_nope_head_dim": model.config.qk_nope_head_dim,
-                "qk_rope_head_dim": model.config.qk_rope_head_dim,
-                "v_head_dim": model.config.v_head_dim,
-                "first_k_dense_replace": getattr(model.config, "first_k_dense_replace", None),
-                "n_routed_experts": getattr(model.config, "n_routed_experts", None),
-                "n_shared_experts": getattr(model.config, "n_shared_experts", None),
-                "num_experts_per_tok": getattr(model.config, "num_experts_per_tok", None),
-                "norm_topk_prob": getattr(model.config, "norm_topk_prob", None),
-            },
+            config_payload,
             indent=2,
             sort_keys=True,
         )

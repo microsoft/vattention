@@ -486,11 +486,13 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
                 output_dir=tmpdir,
             )
             index = json.loads((Path(checkpoint_dir) / "model.safetensors.index.json").read_text())
+            config_json = json.loads((Path(checkpoint_dir) / "config.json").read_text())
             self.assertTrue((Path(checkpoint_dir) / "config.json").exists())
             self.assertTrue((Path(checkpoint_dir) / "model-00001-of-00002.safetensors").exists())
             self.assertTrue((Path(checkpoint_dir) / "model-00002-of-00002.safetensors").exists())
             self.assertIn("embed_tokens.weight", index["weight_map"])
             self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", index["weight_map"])
+            self.assertEqual(config_json["tensor_parallel_world_size"], 2)
 
     def test_write_scaffold_checkpoint_loads_back_into_runtime_device(self):
         deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
@@ -652,6 +654,24 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
 
         self.assertEqual(result["mode"], "compare")
         self.assertEqual(result["checkpoint_layout"], "hf_dir")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["generated_tokens_match"])
+        self.assertTrue(result["final_logits_match"])
+        self.assertTrue(result["cache_token_counts_match"])
+
+    def test_compare_scaffold_smoke_matches_hf_directory_q_lora_moe_generation(self):
+        result = self.smoke_module.compare_scaffold_smoke(
+            prompt_token_ids=(1, 3),
+            max_new_tokens=3,
+            checkpoint_layout="hf_dir",
+            query_mode="q_lora",
+            mlp_mode="moe",
+        )
+
+        self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["checkpoint_layout"], "hf_dir")
+        self.assertEqual(result["query_mode"], "q_lora")
+        self.assertEqual(result["mlp_mode"], "moe")
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["generated_tokens_match"])
         self.assertTrue(result["final_logits_match"])

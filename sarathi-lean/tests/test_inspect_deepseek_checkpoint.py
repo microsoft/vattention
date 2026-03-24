@@ -143,6 +143,9 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertTrue(result["has_kv_b_proj"])
         self.assertFalse(result["has_moe"])
         self.assertEqual(result["config_model_type"], "deepseek_v2")
+        self.assertEqual(result["config_tensor_parallel_world_size"], 2)
+        self.assertTrue(result["loadable_scaffold_surface"])
+        self.assertIsNone(result["load_error"])
 
     def test_inspect_checkpoint_reports_supported_q_lora_hf_directory(self):
         model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
@@ -164,6 +167,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertFalse(result["has_q_proj"])
         self.assertTrue(result["has_q_lora"])
         self.assertEqual(result["config_q_lora_rank"], 2)
+        self.assertTrue(result["loadable_scaffold_surface"])
 
     def test_inspect_checkpoint_reports_supported_bounded_moe_surface(self):
         model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
@@ -187,6 +191,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertEqual(result["config_first_k_dense_replace"], 1)
         self.assertEqual(result["config_n_routed_experts"], 4)
         self.assertEqual(result["moe_layer_indices"], [1, 2, 3])
+        self.assertTrue(result["loadable_scaffold_surface"])
 
     def test_inspect_checkpoint_reports_incomplete_moe_blocker(self):
         model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
@@ -220,6 +225,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(result["has_moe"])
         self.assertIn("missing_routed_expert_weights", result["blockers"])
+        self.assertIsNone(result["loadable_scaffold_surface"])
 
 
 if __name__ == "__main__":

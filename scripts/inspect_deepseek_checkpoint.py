@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+from types import SimpleNamespace
 
 from sarathi.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM
 from sarathi.model_executor.weight_utils import convert_pyslice_to_tensor, hf_model_weights_iterator
@@ -19,10 +20,10 @@ def _load_weight_names_and_config(checkpoint_path):
         state_dict = {}
         for name, tensor in hf_model_weights_iterator(checkpoint_path, load_format="auto"):
             state_dict[name] = convert_pyslice_to_tensor(tensor)
-        return tuple(sorted(state_dict.keys())), config
+        return state_dict, config
 
     state_dict = DeepseekV2ForCausalLM._load_state_dict_file(checkpoint_path)
-    return tuple(sorted(state_dict.keys())), config
+    return state_dict, config
 
 
 def _extract_layer_indices(names):
@@ -48,7 +49,8 @@ def _layer_has_name(names, layer_idx, suffix):
 
 
 def inspect_deepseek_checkpoint(checkpoint_path):
-    names, config = _load_weight_names_and_config(checkpoint_path)
+    state_dict, config = _load_weight_names_and_config(checkpoint_path)
+    names = tuple(sorted(state_dict.keys()))
     layer_indices = _extract_layer_indices(names)
 
     has_q_proj = _has_name(names, ".self_attn.q_proj.weight")
@@ -85,6 +87,9 @@ def inspect_deepseek_checkpoint(checkpoint_path):
     config_first_k_dense_replace = None if config is None else config.get("first_k_dense_replace")
     config_n_routed_experts = None if config is None else config.get("n_routed_experts")
     config_n_shared_experts = None if config is None else config.get("n_shared_experts")
+    config_tensor_parallel_world_size = (
+        None if config is None else config.get("tensor_parallel_world_size")
+    )
 
     status = "supported_non_moe_surface"
     blockers = []
@@ -137,6 +142,24 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         if not blockers:
             status = "supported_bounded_moe_surface"
 
+    loadable_scaffold_surface = None
+    load_error = None
+    if config is not None and not blockers:
+        try:
+            model = DeepseekV2ForCausalLM(
+                SimpleNamespace(**config),
+                tensor_parallel_world_size=config.get("tensor_parallel_world_size", 1),
+                pipeline_parallel_world_size=config.get("pipeline_parallel_world_size", 1),
+                pipeline_parallel_rank=config.get("pipeline_parallel_rank", 0),
+            )
+            model.load_weights(state_dict)
+            loadable_scaffold_surface = True
+        except Exception as exc:
+            status = "blocked"
+            blockers.append("scaffold_load_failed")
+            loadable_scaffold_surface = False
+            load_error = str(exc)
+
     return {
         "status": status,
         "checkpoint_path": checkpoint_path,
@@ -145,6 +168,7 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         "config_first_k_dense_replace": config_first_k_dense_replace,
         "config_n_routed_experts": config_n_routed_experts,
         "config_n_shared_experts": config_n_shared_experts,
+        "config_tensor_parallel_world_size": config_tensor_parallel_world_size,
         "has_q_proj": has_q_proj,
         "has_q_lora": has_q_lora,
         "has_combined_kv": has_combined_kv,
@@ -153,6 +177,8 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         "has_dense_mlp": has_dense_mlp,
         "has_moe": has_moe,
         "moe_layer_indices": list(moe_layer_indices),
+        "loadable_scaffold_surface": loadable_scaffold_surface,
+        "load_error": load_error,
         "blockers": blockers,
         "num_tensors": len(names),
     }
