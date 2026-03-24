@@ -84,6 +84,14 @@ class DeepseekV2MLAResidentCache:
         return self.kv_latent.shape[0]
 
 
+@dataclass(frozen=True)
+class DeepseekV2MLAProjectionWeights:
+    q_proj: torch.Tensor
+    kv_latent_proj: torch.Tensor
+    k_rope_proj: torch.Tensor
+    kv_up_proj: torch.Tensor
+
+
 def split_query_projection(
     query_states: torch.Tensor,
     mla_dims: DeepseekV2MLADims,
@@ -157,6 +165,54 @@ def reconstruct_dense_kv(
     return key, value
 
 
+def make_projection_weights(
+    q_proj: torch.Tensor,
+    kv_latent_proj: torch.Tensor,
+    k_rope_proj: torch.Tensor,
+    kv_up_proj: torch.Tensor,
+    mla_dims: DeepseekV2MLADims,
+) -> DeepseekV2MLAProjectionWeights:
+    expected_q_proj = (mla_dims.hidden_size, mla_dims.q_proj_output_dim_local)
+    expected_kv_latent_proj = (mla_dims.hidden_size, mla_dims.kv_lora_rank)
+    expected_k_rope_proj = (
+        mla_dims.hidden_size,
+        mla_dims.num_heads * mla_dims.qk_rope_head_dim,
+    )
+    expected_kv_up_proj = (
+        mla_dims.kv_lora_rank,
+        mla_dims.kv_up_proj_output_dim_local,
+    )
+    if tuple(q_proj.shape) != expected_q_proj:
+        raise ValueError("q_proj shape does not match local MLA query projection size")
+    if tuple(kv_latent_proj.shape) != expected_kv_latent_proj:
+        raise ValueError("kv_latent_proj shape does not match local MLA latent projection size")
+    if tuple(k_rope_proj.shape) != expected_k_rope_proj:
+        raise ValueError("k_rope_proj shape does not match local MLA rope projection size")
+    if tuple(kv_up_proj.shape) != expected_kv_up_proj:
+        raise ValueError("kv_up_proj shape does not match local MLA up-projection size")
+    return DeepseekV2MLAProjectionWeights(
+        q_proj=q_proj,
+        kv_latent_proj=kv_latent_proj,
+        k_rope_proj=k_rope_proj,
+        kv_up_proj=kv_up_proj,
+    )
+
+
+def project_mla_from_hidden_states(
+    hidden_states: torch.Tensor,
+    projection_weights: DeepseekV2MLAProjectionWeights,
+    mla_dims: DeepseekV2MLADims,
+) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+    if hidden_states.ndim != 2 or hidden_states.shape[1] != mla_dims.hidden_size:
+        raise ValueError("hidden_states must have shape [tokens, hidden_size]")
+
+    query_states = hidden_states @ projection_weights.q_proj
+    kv_latent = hidden_states @ projection_weights.kv_latent_proj
+    k_rope = hidden_states @ projection_weights.k_rope_proj
+    k_rope = k_rope.view(-1, mla_dims.num_heads, mla_dims.qk_rope_head_dim)
+    return query_states, make_resident_cache(kv_latent, k_rope, mla_dims)
+
+
 def contiguous_mla_attention_forward(
     query_states: torch.Tensor,
     new_kv_latent: torch.Tensor,
@@ -186,6 +242,29 @@ def contiguous_mla_attention_forward(
     attn_weights = torch.softmax(scores, dim=-1)
     output = torch.einsum("hts,shv->thv", attn_weights, value)
     return output.reshape(query.shape[0], -1), full_cache
+
+
+def contiguous_mla_attention_from_hidden_states(
+    hidden_states: torch.Tensor,
+    projection_weights: DeepseekV2MLAProjectionWeights,
+    mla_dims: DeepseekV2MLADims,
+    cache: Optional[DeepseekV2MLAResidentCache] = None,
+    softmax_scale: Optional[float] = None,
+) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+    query_states, new_cache = project_mla_from_hidden_states(
+        hidden_states,
+        projection_weights,
+        mla_dims,
+    )
+    return contiguous_mla_attention_forward(
+        query_states=query_states,
+        new_kv_latent=new_cache.kv_latent,
+        new_k_rope=new_cache.k_rope,
+        kv_up_proj_weight=projection_weights.kv_up_proj,
+        mla_dims=mla_dims,
+        cache=cache,
+        softmax_scale=softmax_scale,
+    )
 
 
 class DeepseekV2MLAAttention(nn.Module):
@@ -228,6 +307,32 @@ class DeepseekV2MLAAttention(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         return reconstruct_dense_kv(cache, kv_up_proj_weight, self.mla_dims)
 
+    def make_projection_weights(
+        self,
+        q_proj: torch.Tensor,
+        kv_latent_proj: torch.Tensor,
+        k_rope_proj: torch.Tensor,
+        kv_up_proj: torch.Tensor,
+    ) -> DeepseekV2MLAProjectionWeights:
+        return make_projection_weights(
+            q_proj=q_proj,
+            kv_latent_proj=kv_latent_proj,
+            k_rope_proj=k_rope_proj,
+            kv_up_proj=kv_up_proj,
+            mla_dims=self.mla_dims,
+        )
+
+    def project_from_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: DeepseekV2MLAProjectionWeights,
+    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        return project_mla_from_hidden_states(
+            hidden_states,
+            projection_weights,
+            self.mla_dims,
+        )
+
     def forward_contiguous(
         self,
         query_states: torch.Tensor,
@@ -242,6 +347,21 @@ class DeepseekV2MLAAttention(nn.Module):
             new_kv_latent=new_kv_latent,
             new_k_rope=new_k_rope,
             kv_up_proj_weight=kv_up_proj_weight,
+            mla_dims=self.mla_dims,
+            cache=cache,
+            softmax_scale=softmax_scale,
+        )
+
+    def forward_hidden_states_contiguous(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: DeepseekV2MLAProjectionWeights,
+        cache: Optional[DeepseekV2MLAResidentCache] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        return contiguous_mla_attention_from_hidden_states(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
             mla_dims=self.mla_dims,
             cache=cache,
             softmax_scale=softmax_scale,
