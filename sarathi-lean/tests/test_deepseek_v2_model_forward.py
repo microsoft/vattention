@@ -796,6 +796,78 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             model.decode_tokens(torch.tensor([1], dtype=torch.long), caches=None)
 
+    def test_causal_lm_generate_greedy_matches_manual_contiguous_decode_loop(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        model.set_scaffold_weights(
+            projection_weights=tuple(
+                self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+            ),
+            mlp_weights=tuple(
+                self._make_mlp_weights(config.hidden_size)
+                for _ in range(model.model.num_layers)
+            ),
+        )
+
+        prompt_token_ids = torch.tensor([1, 3], dtype=torch.long)
+        generated_tokens, final_logits, final_caches = model.generate_greedy(
+            prompt_token_ids,
+            max_new_tokens=3,
+        )
+
+        manual_logits, manual_caches = model.prefill_tokens(prompt_token_ids)
+        manual_tokens = []
+        next_token = torch.argmax(manual_logits[-1], dim=-1).to(dtype=prompt_token_ids.dtype).view(1)
+        manual_tokens.append(next_token)
+        for _ in range(2):
+            manual_logits, manual_caches = model.decode_tokens(
+                next_token,
+                caches=manual_caches,
+            )
+            next_token = torch.argmax(manual_logits[-1], dim=-1).to(dtype=prompt_token_ids.dtype).view(1)
+            manual_tokens.append(next_token)
+
+        self.assertEqual(tuple(generated_tokens.shape), (3,))
+        self.assertTrue(torch.equal(generated_tokens, torch.cat(manual_tokens, dim=0)))
+        self.assertTrue(torch.allclose(final_logits, manual_logits, atol=1e-6, rtol=1e-6))
+        self.assertTrue(all(cache.num_tokens == 4 for cache in final_caches))
+        self.assertTrue(
+            all(
+                torch.equal(final_cache.kv_latent, manual_cache.kv_latent)
+                and torch.equal(final_cache.k_rope, manual_cache.k_rope)
+                for final_cache, manual_cache in zip(final_caches, manual_caches)
+            )
+        )
+
+    def test_causal_lm_generate_greedy_validates_max_new_tokens(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+
+        with self.assertRaises(ValueError):
+            model.generate_greedy(torch.tensor([1], dtype=torch.long), max_new_tokens=-1)
+
     def test_causal_lm_forward_logits_with_attention_wrapper_accepts_token_ids(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
             set_pipeline_model_parallel_rank,

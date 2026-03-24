@@ -507,6 +507,97 @@ class DeepseekV2ModelPagedParityTests(unittest.TestCase):
             )
         )
 
+    def test_causal_lm_generate_greedy_matches_manual_paged_decode_loop(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        self._set_embedding_and_lm_head_weights(model)
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        model.set_scaffold_weights(
+            projection_weights=tuple(
+                self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+            ),
+            mlp_weights=tuple(
+                self._make_mlp_weights(config.hidden_size)
+                for _ in range(model.model.num_layers)
+            ),
+        )
+
+        prompt_token_ids = torch.tensor([1, 3], dtype=torch.long)
+        runtime_caches = model.make_runtime_mla_kv_caches(
+            batch_size=1,
+            max_seq_len=6,
+            device=torch.device("cpu"),
+        )
+        wrapper = self._make_wrapper()
+
+        generated_tokens, final_logits, final_caches = model.generate_greedy(
+            prompt_token_ids,
+            max_new_tokens=3,
+            kv_caches=runtime_caches,
+            attention_wrapper=wrapper,
+        )
+
+        manual_runtime_caches = model.make_runtime_mla_kv_caches(
+            batch_size=1,
+            max_seq_len=6,
+            device=torch.device("cpu"),
+        )
+        wrapper.set_mla_runtime_metadata(
+            prefill_query_lens=[2],
+            prefill_cache_lens=[0],
+            batch_index=[0],
+            batch_index_gen=[],
+        )
+        manual_logits, manual_caches = model.prefill_tokens(
+            prompt_token_ids,
+            kv_caches=manual_runtime_caches,
+            attention_wrapper=wrapper,
+        )
+        manual_tokens = []
+        next_token = torch.argmax(manual_logits[-1], dim=-1).to(dtype=prompt_token_ids.dtype).view(1)
+        manual_tokens.append(next_token)
+        for decode_cache_len in (2, 3):
+            wrapper.set_mla_runtime_metadata(
+                prefill_query_lens=[],
+                prefill_cache_lens=[],
+                decode_cache_lens=[decode_cache_len],
+                batch_index=[],
+                batch_index_gen=[0],
+            )
+            manual_logits, manual_caches = model.decode_tokens(
+                next_token,
+                caches=manual_caches,
+                kv_caches=manual_runtime_caches,
+                attention_wrapper=wrapper,
+            )
+            next_token = torch.argmax(manual_logits[-1], dim=-1).to(dtype=prompt_token_ids.dtype).view(1)
+            manual_tokens.append(next_token)
+
+        self.assertEqual(tuple(generated_tokens.shape), (3,))
+        self.assertTrue(torch.equal(generated_tokens, torch.cat(manual_tokens, dim=0)))
+        self.assertTrue(torch.allclose(final_logits, manual_logits, atol=1e-6, rtol=1e-6))
+        self.assertTrue(
+            all(layer_cache.resident_cache.num_tokens == 4 for layer_cache in final_caches)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

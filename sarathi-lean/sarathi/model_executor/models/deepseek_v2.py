@@ -1391,6 +1391,31 @@ class DeepseekV2ForCausalLM(nn.Module):
             return False
         return all(isinstance(cache, DeepseekV2LayerCache) for cache in caches)
 
+    @staticmethod
+    def _set_single_batch_wrapper_metadata(
+        attention_wrapper,
+        *,
+        prompt_len: int = 0,
+        cache_len: Optional[int] = None,
+    ) -> None:
+        if attention_wrapper is None or not hasattr(attention_wrapper, "set_mla_runtime_metadata"):
+            return
+        if prompt_len > 0:
+            attention_wrapper.set_mla_runtime_metadata(
+                prefill_query_lens=[prompt_len],
+                prefill_cache_lens=[0 if cache_len is None else cache_len],
+                batch_index=[0],
+                batch_index_gen=[],
+            )
+            return
+        attention_wrapper.set_mla_runtime_metadata(
+            prefill_query_lens=[],
+            prefill_cache_lens=[],
+            decode_cache_lens=[] if cache_len is None else [cache_len],
+            batch_index=[],
+            batch_index_gen=[] if cache_len is None else [0],
+        )
+
     def forward_logits(
         self,
         hidden_states: torch.Tensor,
@@ -1502,7 +1527,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 attention_wrapper=attention_wrapper,
                 caches=resident_caches,
                 softmax_scale=softmax_scale,
-            )
+        )
         return self.forward_logits(
             hidden_states=token_ids,
             projection_weights=projection_weights,
@@ -1510,6 +1535,66 @@ class DeepseekV2ForCausalLM(nn.Module):
             caches=caches,
             softmax_scale=softmax_scale,
         )
+
+    def generate_greedy(
+        self,
+        token_ids: torch.Tensor,
+        max_new_tokens: int,
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        softmax_scale: Optional[float] = None,
+        kv_caches: Optional[Tuple[object, ...]] = None,
+        attention_wrapper=None,
+    ):
+        self._validate_token_ids(token_ids)
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative")
+        if kv_caches is not None:
+            self._set_single_batch_wrapper_metadata(
+                attention_wrapper,
+                prompt_len=token_ids.numel(),
+                cache_len=0,
+            )
+
+        logits, caches = self.prefill_tokens(
+            token_ids,
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+            softmax_scale=softmax_scale,
+            kv_caches=kv_caches,
+            attention_wrapper=attention_wrapper,
+        )
+        if max_new_tokens == 0:
+            empty = token_ids.new_empty((0,))
+            return empty, logits, caches
+
+        generated_tokens = []
+        next_token = torch.argmax(logits[-1], dim=-1).to(dtype=token_ids.dtype).view(1)
+        generated_tokens.append(next_token)
+        current_logits = logits[-1:].clone()
+        current_context_len = token_ids.numel()
+
+        for _ in range(max_new_tokens - 1):
+            if kv_caches is not None:
+                self._set_single_batch_wrapper_metadata(
+                    attention_wrapper,
+                    prompt_len=0,
+                    cache_len=current_context_len,
+                )
+            current_logits, caches = self.decode_tokens(
+                next_token,
+                caches=caches,
+                projection_weights=projection_weights,
+                mlp_weights=mlp_weights,
+                softmax_scale=softmax_scale,
+                kv_caches=kv_caches,
+                attention_wrapper=attention_wrapper,
+            )
+            next_token = torch.argmax(current_logits[-1], dim=-1).to(dtype=token_ids.dtype).view(1)
+            generated_tokens.append(next_token)
+            current_context_len += 1
+
+        return torch.cat(generated_tokens, dim=0), current_logits, caches
 
     def make_runtime_mla_kv_caches(
         self,
