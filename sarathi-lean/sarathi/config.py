@@ -29,6 +29,17 @@ class CacheLayout:
 
 
 @dataclass(frozen=True)
+class MLAAttentionSpec:
+    q_lora_rank: Optional[int]
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    q_head_dim: int
+    resident_cache_dim: int
+
+
+@dataclass(frozen=True)
 class VAttentionCacheSpec:
     architecture: CacheArchitecture
     megacache: bool
@@ -205,11 +216,46 @@ class ModelConfig:
             raise ValueError("kv_lora_rank is not defined for this model")
         return kv_lora_rank
 
+    def get_mla_q_lora_rank(self) -> Optional[int]:
+        return getattr(self.hf_config, "q_lora_rank", None)
+
+    def get_mla_qk_nope_head_dim(self) -> int:
+        qk_nope_head_dim = getattr(self.hf_config, "qk_nope_head_dim", None)
+        if qk_nope_head_dim is None:
+            raise ValueError("qk_nope_head_dim is not defined for this model")
+        return qk_nope_head_dim
+
     def get_mla_qk_rope_head_dim(self) -> int:
         qk_rope_head_dim = getattr(self.hf_config, "qk_rope_head_dim", None)
         if qk_rope_head_dim is None:
             raise ValueError("qk_rope_head_dim is not defined for this model")
         return qk_rope_head_dim
+
+    def get_mla_v_head_dim(self) -> int:
+        v_head_dim = getattr(self.hf_config, "v_head_dim", None)
+        if v_head_dim is None:
+            raise ValueError("v_head_dim is not defined for this model")
+        return v_head_dim
+
+    def get_mla_q_head_dim(self) -> int:
+        return self.get_mla_qk_nope_head_dim() + self.get_mla_qk_rope_head_dim()
+
+    def get_mla_resident_cache_dim(self) -> int:
+        return self.get_mla_kv_lora_rank() + self.get_mla_qk_rope_head_dim()
+
+    def get_mla_attention_spec(self) -> MLAAttentionSpec:
+        if not self.is_mla_model():
+            raise ValueError("MLA attention spec is only defined for MLA models")
+
+        return MLAAttentionSpec(
+            q_lora_rank=self.get_mla_q_lora_rank(),
+            kv_lora_rank=self.get_mla_kv_lora_rank(),
+            qk_nope_head_dim=self.get_mla_qk_nope_head_dim(),
+            qk_rope_head_dim=self.get_mla_qk_rope_head_dim(),
+            v_head_dim=self.get_mla_v_head_dim(),
+            q_head_dim=self.get_mla_q_head_dim(),
+            resident_cache_dim=self.get_mla_resident_cache_dim(),
+        )
 
     def get_cached_token_bytes_per_layer(
         self,
@@ -218,9 +264,7 @@ class ModelConfig:
         dtype_size = torch.tensor([], dtype=self.dtype).element_size()
 
         if self.get_cache_architecture() == CacheArchitecture.MLA:
-            return dtype_size * (
-                self.get_mla_kv_lora_rank() + self.get_mla_qk_rope_head_dim()
-            )
+            return dtype_size * self.get_mla_resident_cache_dim()
 
         num_kv_heads = self.get_num_kv_heads(parallel_config)
         head_size = self.get_head_size()
@@ -318,6 +362,7 @@ class ModelConfig:
         )
         dtype_size = torch.tensor([], dtype=self.dtype).element_size()
         is_mla = self.get_cache_architecture() == CacheArchitecture.MLA
+        mla_spec = self.get_mla_attention_spec() if is_mla else None
         return VAttentionCacheSpec(
             architecture=layout.architecture,
             megacache=layout.megacache,
@@ -330,8 +375,8 @@ class ModelConfig:
             num_layers=self.get_num_layers(parallel_config),
             num_kv_heads=self.get_num_kv_heads(parallel_config),
             head_size=self.get_head_size(),
-            mla_kv_lora_rank=self.get_mla_kv_lora_rank() if is_mla else None,
-            mla_qk_rope_head_dim=self.get_mla_qk_rope_head_dim() if is_mla else None,
+            mla_kv_lora_rank=mla_spec.kv_lora_rank if is_mla else None,
+            mla_qk_rope_head_dim=mla_spec.qk_rope_head_dim if is_mla else None,
         )
 
     def get_vattention_init_spec(

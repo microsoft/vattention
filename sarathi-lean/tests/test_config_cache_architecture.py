@@ -66,6 +66,7 @@ def _load_config_module():
 config_module = _load_config_module()
 CacheArchitecture = config_module.CacheArchitecture
 CacheLayout = config_module.CacheLayout
+MLAAttentionSpec = config_module.MLAAttentionSpec
 ModelConfig = config_module.ModelConfig
 ParallelConfig = config_module.ParallelConfig
 VAttentionCacheSpec = config_module.VAttentionCacheSpec
@@ -98,15 +99,59 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             model_type="deepseek_v2",
             hidden_size=5120,
             num_attention_heads=128,
+            q_lora_rank=None,
             kv_lora_rank=512,
+            qk_nope_head_dim=128,
             qk_rope_head_dim=64,
+            v_head_dim=128,
         )
         model_config = self._make_model_config(hf_config=hf_config)
 
         self.assertTrue(model_config.is_mla_model())
         self.assertEqual(model_config.get_cache_architecture(), CacheArchitecture.MLA)
+        self.assertIsNone(model_config.get_mla_q_lora_rank())
         self.assertEqual(model_config.get_mla_kv_lora_rank(), 512)
+        self.assertEqual(model_config.get_mla_qk_nope_head_dim(), 128)
         self.assertEqual(model_config.get_mla_qk_rope_head_dim(), 64)
+        self.assertEqual(model_config.get_mla_v_head_dim(), 128)
+        self.assertEqual(model_config.get_mla_q_head_dim(), 192)
+        self.assertEqual(model_config.get_mla_resident_cache_dim(), 576)
+
+    def test_mla_attention_spec_packages_deepseek_dimensions(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+
+        spec = model_config.get_mla_attention_spec()
+
+        self.assertIsInstance(spec, MLAAttentionSpec)
+        self.assertIsNone(spec.q_lora_rank)
+        self.assertEqual(spec.kv_lora_rank, 512)
+        self.assertEqual(spec.qk_nope_head_dim, 128)
+        self.assertEqual(spec.qk_rope_head_dim, 64)
+        self.assertEqual(spec.v_head_dim, 128)
+        self.assertEqual(spec.q_head_dim, 192)
+        self.assertEqual(spec.resident_cache_dim, 576)
+
+    def test_dense_models_do_not_expose_mla_attention_spec(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+
+        with self.assertRaises(ValueError):
+            model_config.get_mla_attention_spec()
 
     def test_dense_kv_cached_bytes_per_layer_uses_local_kv_heads(self):
         hf_config = types.SimpleNamespace(
@@ -319,8 +364,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
+            q_lora_rank=None,
             kv_lora_rank=512,
+            qk_nope_head_dim=128,
             qk_rope_head_dim=64,
+            v_head_dim=128,
         )
         model_config = self._make_model_config(hf_config=hf_config)
         parallel_config = ParallelConfig(
@@ -345,8 +393,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
+            q_lora_rank=None,
             kv_lora_rank=512,
+            qk_nope_head_dim=128,
             qk_rope_head_dim=64,
+            v_head_dim=128,
         )
         model_config = self._make_model_config(hf_config=hf_config)
         parallel_config = ParallelConfig(
@@ -377,8 +428,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
+            q_lora_rank=None,
             kv_lora_rank=512,
+            qk_nope_head_dim=128,
             qk_rope_head_dim=64,
+            v_head_dim=128,
         )
         model_config = self._make_model_config(hf_config=hf_config)
         parallel_config = ParallelConfig(
@@ -398,8 +452,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
+            q_lora_rank=None,
             kv_lora_rank=512,
+            qk_nope_head_dim=128,
             qk_rope_head_dim=64,
+            v_head_dim=128,
         )
         model_config = self._make_model_config(hf_config=hf_config)
         parallel_config = ParallelConfig(
@@ -432,8 +489,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
+            q_lora_rank=None,
             kv_lora_rank=512,
+            qk_nope_head_dim=128,
             qk_rope_head_dim=64,
+            v_head_dim=128,
         )
         model_config = self._make_model_config(hf_config=hf_config)
         parallel_config = ParallelConfig(
@@ -470,8 +530,11 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             hidden_size=5120,
             num_attention_heads=128,
             num_hidden_layers=60,
+            q_lora_rank=None,
             kv_lora_rank=512,
+            qk_nope_head_dim=128,
             qk_rope_head_dim=64,
+            v_head_dim=128,
         )
         model_config = self._make_model_config(hf_config=hf_config)
         parallel_config = ParallelConfig(
