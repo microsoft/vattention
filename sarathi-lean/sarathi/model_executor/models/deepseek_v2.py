@@ -273,6 +273,34 @@ def contiguous_mla_attention_from_hidden_states(
     )
 
 
+def batched_contiguous_mla_attention_from_hidden_states(
+    hidden_states: Tuple[torch.Tensor, ...],
+    projection_weights: DeepseekV2MLAProjectionWeights,
+    mla_dims: DeepseekV2MLADims,
+    caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+    softmax_scale: Optional[float] = None,
+) -> Tuple[Tuple[torch.Tensor, ...], Tuple[DeepseekV2MLAResidentCache, ...]]:
+    if caches is None:
+        caches = tuple(None for _ in hidden_states)
+    if len(hidden_states) != len(caches):
+        raise ValueError("hidden_states and caches must have the same batch length")
+
+    outputs = []
+    next_caches = []
+    for seq_hidden_states, seq_cache in zip(hidden_states, caches):
+        seq_output, seq_next_cache = contiguous_mla_attention_from_hidden_states(
+            hidden_states=seq_hidden_states,
+            projection_weights=projection_weights,
+            mla_dims=mla_dims,
+            cache=seq_cache,
+            softmax_scale=softmax_scale,
+        )
+        seq_output = seq_output @ projection_weights.o_proj
+        outputs.append(seq_output)
+        next_caches.append(seq_next_cache)
+    return tuple(outputs), tuple(next_caches)
+
+
 class DeepseekV2MLAAttention(nn.Module):
 
     def __init__(
@@ -367,11 +395,27 @@ class DeepseekV2MLAAttention(nn.Module):
         cache: Optional[DeepseekV2MLAResidentCache] = None,
         softmax_scale: Optional[float] = None,
     ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
-        return contiguous_mla_attention_from_hidden_states(
+        output, cache = contiguous_mla_attention_from_hidden_states(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
             mla_dims=self.mla_dims,
             cache=cache,
+            softmax_scale=softmax_scale,
+        )
+        return output @ projection_weights.o_proj, cache
+
+    def forward_hidden_states_contiguous_batched(
+        self,
+        hidden_states: Tuple[torch.Tensor, ...],
+        projection_weights: DeepseekV2MLAProjectionWeights,
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[Tuple[torch.Tensor, ...], Tuple[DeepseekV2MLAResidentCache, ...]]:
+        return batched_contiguous_mla_attention_from_hidden_states(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            mla_dims=self.mla_dims,
+            caches=caches,
             softmax_scale=softmax_scale,
         )
 
@@ -407,7 +451,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             cache=cache,
             softmax_scale=softmax_scale,
         )
-        attn_output = attn_output @ projection_weights.o_proj
         hidden_states = residual + attn_output
         hidden_states = self.post_attention_layernorm(hidden_states)
         return hidden_states, cache
