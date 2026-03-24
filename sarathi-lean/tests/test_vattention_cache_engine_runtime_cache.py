@@ -224,7 +224,12 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
             ),
         )
 
-        usage = summarize_vattention_cache_usage(cache_spec, [3, 0, 2])
+        usage = summarize_vattention_cache_usage(
+            cache_spec,
+            [3, 0, 2],
+            free_blocks=7,
+            seq_to_batch_idx={11: 2, 10: 0},
+        )
 
         self.assertEqual(usage["architecture"], "mla")
         self.assertEqual(usage["persistent_tokens"], 5)
@@ -233,6 +238,10 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(usage["page_buffer_token_bytes"], 16)
         self.assertEqual(usage["cache_components"], ("kv_latent", "k_rope"))
         self.assertTrue(usage["uses_component_resident_cache"])
+        self.assertEqual(usage["active_batch_indices"], (0, 2))
+        self.assertEqual(usage["active_request_count"], 2)
+        self.assertEqual(usage["free_blocks"], 7)
+        self.assertEqual(usage["seq_to_batch_idx"], {10: 0, 11: 2})
 
     def test_dense_cache_usage_summary_remains_non_mla(self):
         cache_spec = types.SimpleNamespace(
@@ -251,6 +260,51 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(usage["persistent_tokens"], 3)
         self.assertEqual(usage["persistent_bytes"], 192)
         self.assertFalse(usage["uses_component_resident_cache"])
+        self.assertEqual(usage["active_batch_indices"], (0, 1))
+        self.assertEqual(usage["active_request_count"], 2)
+        self.assertIsNone(usage["free_blocks"])
+        self.assertIsNone(usage["seq_to_batch_idx"])
+
+    def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
+        engine = cache_engine_module.vATTNCacheEngine.__new__(
+            cache_engine_module.vATTNCacheEngine
+        )
+        engine.cache_spec = types.SimpleNamespace(
+            architecture=CacheArchitecture.MLA,
+            cached_token_bytes_local=32,
+            page_buffer_token_bytes=16,
+            cache_components=(
+                types.SimpleNamespace(name="kv_latent"),
+                types.SimpleNamespace(name="k_rope"),
+            ),
+        )
+        engine.curr_seq_lens = [3, 0, 2]
+        engine.seq_to_batch_idx = {21: 2, 20: 0}
+        engine.num_free_blocks = lambda: 5
+
+        usage = engine.get_cache_usage_stats()
+
+        self.assertEqual(usage["persistent_tokens"], 5)
+        self.assertEqual(usage["free_blocks"], 5)
+        self.assertEqual(usage["active_batch_indices"], (0, 2))
+        self.assertEqual(usage["active_request_count"], 2)
+        self.assertEqual(usage["seq_to_batch_idx"], {20: 0, 21: 2})
+
+    def test_free_request_updates_runtime_state_for_accounting(self):
+        freed_batch_indices = []
+        cache_engine_module.vattention.free_batch_idx = freed_batch_indices.append
+
+        engine = cache_engine_module.vATTNCacheEngine.__new__(
+            cache_engine_module.vATTNCacheEngine
+        )
+        engine.curr_seq_lens = [4, 2, 0]
+        engine.seq_to_batch_idx = {100: 0, 200: 1}
+
+        engine.free_request(100)
+
+        self.assertEqual(freed_batch_indices, [0])
+        self.assertEqual(engine.curr_seq_lens, [0, 2, 0])
+        self.assertEqual(engine.seq_to_batch_idx, {200: 1})
 
 
 if __name__ == "__main__":

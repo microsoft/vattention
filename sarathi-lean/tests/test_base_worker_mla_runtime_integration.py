@@ -517,6 +517,10 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
                 "page_buffer_token_bytes": 16,
                 "cache_components": ("kv_latent", "k_rope"),
                 "uses_component_resident_cache": True,
+                "active_batch_indices": (0,),
+                "active_request_count": 1,
+                "free_blocks": None,
+                "seq_to_batch_idx": None,
             },
         )
         self.assertEqual(len(self.flash_calls), model.num_layers)

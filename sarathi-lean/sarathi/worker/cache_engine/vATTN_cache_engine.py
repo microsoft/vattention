@@ -18,8 +18,17 @@ logger = init_logger(__name__)
 KVCache = Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-def summarize_vattention_cache_usage(cache_spec, seq_lens) -> dict:
+def summarize_vattention_cache_usage(
+    cache_spec,
+    seq_lens,
+    *,
+    free_blocks=None,
+    seq_to_batch_idx=None,
+) -> dict:
     persistent_tokens = sum(max(int(seq_len), 0) for seq_len in seq_lens)
+    active_batch_indices = tuple(
+        batch_idx for batch_idx, seq_len in enumerate(seq_lens) if int(seq_len) > 0
+    )
     architecture = (
         cache_spec.architecture.value
         if hasattr(cache_spec.architecture, "value")
@@ -37,6 +46,14 @@ def summarize_vattention_cache_usage(cache_spec, seq_lens) -> dict:
         "page_buffer_token_bytes": cache_spec.page_buffer_token_bytes,
         "cache_components": cache_components,
         "uses_component_resident_cache": cache_spec.architecture == CacheArchitecture.MLA,
+        "active_batch_indices": active_batch_indices,
+        "active_request_count": len(active_batch_indices),
+        "free_blocks": free_blocks,
+        "seq_to_batch_idx": (
+            dict(sorted(seq_to_batch_idx.items()))
+            if seq_to_batch_idx is not None
+            else None
+        ),
     }
 
 
@@ -243,7 +260,12 @@ class vATTNCacheEngine(BaseCacheEngine):
         return self.attn_context_lens
 
     def get_cache_usage_stats(self) -> dict:
-        return summarize_vattention_cache_usage(self.cache_spec, self.curr_seq_lens)
+        return summarize_vattention_cache_usage(
+            self.cache_spec,
+            self.curr_seq_lens,
+            free_blocks=self.num_free_blocks(),
+            seq_to_batch_idx=self.seq_to_batch_idx,
+        )
 
     @staticmethod
     def get_cache_block_size(
