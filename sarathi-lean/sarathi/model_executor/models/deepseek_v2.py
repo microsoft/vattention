@@ -90,6 +90,7 @@ class DeepseekV2MLAProjectionWeights:
     kv_latent_proj: torch.Tensor
     k_rope_proj: torch.Tensor
     kv_up_proj: torch.Tensor
+    o_proj: torch.Tensor
 
 
 def split_query_projection(
@@ -170,6 +171,7 @@ def make_projection_weights(
     kv_latent_proj: torch.Tensor,
     k_rope_proj: torch.Tensor,
     kv_up_proj: torch.Tensor,
+    o_proj: torch.Tensor,
     mla_dims: DeepseekV2MLADims,
 ) -> DeepseekV2MLAProjectionWeights:
     expected_q_proj = (mla_dims.hidden_size, mla_dims.q_proj_output_dim_local)
@@ -182,6 +184,7 @@ def make_projection_weights(
         mla_dims.kv_lora_rank,
         mla_dims.kv_up_proj_output_dim_local,
     )
+    expected_o_proj = (mla_dims.o_proj_input_dim_local, mla_dims.hidden_size)
     if tuple(q_proj.shape) != expected_q_proj:
         raise ValueError("q_proj shape does not match local MLA query projection size")
     if tuple(kv_latent_proj.shape) != expected_kv_latent_proj:
@@ -190,11 +193,14 @@ def make_projection_weights(
         raise ValueError("k_rope_proj shape does not match local MLA rope projection size")
     if tuple(kv_up_proj.shape) != expected_kv_up_proj:
         raise ValueError("kv_up_proj shape does not match local MLA up-projection size")
+    if tuple(o_proj.shape) != expected_o_proj:
+        raise ValueError("o_proj shape does not match local MLA output projection size")
     return DeepseekV2MLAProjectionWeights(
         q_proj=q_proj,
         kv_latent_proj=kv_latent_proj,
         k_rope_proj=k_rope_proj,
         kv_up_proj=kv_up_proj,
+        o_proj=o_proj,
     )
 
 
@@ -313,12 +319,14 @@ class DeepseekV2MLAAttention(nn.Module):
         kv_latent_proj: torch.Tensor,
         k_rope_proj: torch.Tensor,
         kv_up_proj: torch.Tensor,
+        o_proj: torch.Tensor,
     ) -> DeepseekV2MLAProjectionWeights:
         return make_projection_weights(
             q_proj=q_proj,
             kv_latent_proj=kv_latent_proj,
             k_rope_proj=k_rope_proj,
             kv_up_proj=kv_up_proj,
+            o_proj=o_proj,
             mla_dims=self.mla_dims,
         )
 
@@ -384,11 +392,25 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.input_layernorm = nn.Identity()
         self.post_attention_layernorm = nn.Identity()
 
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError(
-            "DeepSeek-V2 decoder execution is not implemented yet. "
-            "The contiguous MLA attention path and MoE blocks are still pending."
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: DeepseekV2MLAProjectionWeights,
+        cache: Optional[DeepseekV2MLAResidentCache] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        attn_output, cache = self.self_attn.forward_hidden_states_contiguous(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            cache=cache,
+            softmax_scale=softmax_scale,
         )
+        attn_output = attn_output @ projection_weights.o_proj
+        hidden_states = residual + attn_output
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        return hidden_states, cache
 
 
 class DeepseekV2Model(nn.Module):
@@ -434,11 +456,34 @@ class DeepseekV2Model(nn.Module):
             ]
         )
 
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError(
-            "DeepSeek-V2 model execution is not implemented yet. "
-            "The contiguous MLA model path is still pending."
-        )
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+        if len(projection_weights) != self.num_layers:
+            raise ValueError("projection_weights must provide one entry per local layer")
+        if caches is None:
+            caches = tuple(None for _ in range(self.num_layers))
+        if len(caches) != self.num_layers:
+            raise ValueError("caches must provide one entry per local layer")
+
+        next_caches = []
+        for layer, layer_projection_weights, layer_cache in zip(
+            self.layers,
+            projection_weights,
+            caches,
+        ):
+            hidden_states, next_cache = layer(
+                hidden_states=hidden_states,
+                projection_weights=layer_projection_weights,
+                cache=layer_cache,
+                softmax_scale=softmax_scale,
+            )
+            next_caches.append(next_cache)
+        return hidden_states, tuple(next_caches)
 
 
 class DeepseekV2ForCausalLM(nn.Module):
@@ -449,10 +494,18 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.model = DeepseekV2Model(config)
         self.mla_dims = DeepseekV2MLADims.from_config(config)
 
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError(
-            "DeepSeek-V2 causal LM execution is not implemented yet. "
-            "The MLA attention/model runtime path still needs to be added."
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+        return self.model(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            caches=caches,
+            softmax_scale=softmax_scale,
         )
 
     def load_weights(self, *args, **kwargs):
