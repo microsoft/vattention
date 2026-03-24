@@ -310,6 +310,81 @@ def mla_attention_with_backend(
     return output @ projection_weights.o_proj, full_cache
 
 
+def _prepare_mla_attention_tensors(
+    hidden_states: torch.Tensor,
+    projection_weights: DeepseekV2MLAProjectionWeights,
+    mla_dims: DeepseekV2MLADims,
+    cache: Optional[DeepseekV2MLAResidentCache] = None,
+    softmax_scale: Optional[float] = None,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    DeepseekV2MLAResidentCache,
+    Optional[DeepseekV2MLAResidentCache],
+    float,
+]:
+    query_states, new_cache = project_mla_from_hidden_states(
+        hidden_states,
+        projection_weights,
+        mla_dims,
+    )
+    q_nope, q_rope = split_query_projection(query_states, mla_dims)
+    full_cache = append_resident_cache(cache, new_cache)
+    key, value = reconstruct_dense_kv(full_cache, projection_weights.kv_up_proj, mla_dims)
+    query = torch.cat([q_nope, q_rope], dim=-1)
+
+    if softmax_scale is None:
+        softmax_scale = mla_dims.q_head_dim ** -0.5
+
+    return query, key, value, full_cache, cache, softmax_scale
+
+
+def mla_attention_with_wrapper(
+    hidden_states: torch.Tensor,
+    projection_weights: DeepseekV2MLAProjectionWeights,
+    mla_dims: DeepseekV2MLADims,
+    kv_cache,
+    layer_id: Optional[int] = None,
+    attention_wrapper=None,
+    cache: Optional[DeepseekV2MLAResidentCache] = None,
+    softmax_scale: Optional[float] = None,
+) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+    if attention_wrapper is None:
+        from sarathi.model_executor.attention import get_attention_wrapper
+
+        attention_wrapper = get_attention_wrapper()
+
+    query, key, value, full_cache, _, softmax_scale = _prepare_mla_attention_tensors(
+        hidden_states=hidden_states,
+        projection_weights=projection_weights,
+        mla_dims=mla_dims,
+        cache=cache,
+        softmax_scale=softmax_scale,
+    )
+
+    flat_query = query.reshape(query.shape[0], -1)
+    flat_key = key.reshape(key.shape[0], -1)
+    flat_value = value.reshape(value.shape[0], -1)
+    output = attention_wrapper.forward(
+        flat_query,
+        flat_key,
+        flat_value,
+        kv_cache,
+        softmax_scale,
+        layer_id,
+    )
+    if (
+        output.ndim != 2
+        or output.shape[0] != hidden_states.shape[0]
+        or output.shape[1] != mla_dims.o_proj_input_dim_local
+    ):
+        raise ValueError(
+            "attention wrapper must return [tokens, o_proj_input_dim_local]"
+        )
+    return output @ projection_weights.o_proj, full_cache
+
+
 def batched_contiguous_mla_attention_from_hidden_states(
     hidden_states: Tuple[torch.Tensor, ...],
     projection_weights: DeepseekV2MLAProjectionWeights,
@@ -458,6 +533,27 @@ class DeepseekV2MLAAttention(nn.Module):
             softmax_scale=softmax_scale,
         )
 
+    def forward_hidden_states_with_attention_wrapper(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: DeepseekV2MLAProjectionWeights,
+        kv_cache,
+        layer_id: Optional[int] = None,
+        attention_wrapper=None,
+        cache: Optional[DeepseekV2MLAResidentCache] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        return mla_attention_with_wrapper(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            mla_dims=self.mla_dims,
+            kv_cache=kv_cache,
+            layer_id=layer_id,
+            attention_wrapper=attention_wrapper,
+            cache=cache,
+            softmax_scale=softmax_scale,
+        )
+
     def forward_hidden_states_contiguous_batched(
         self,
         hidden_states: Tuple[torch.Tensor, ...],
@@ -479,6 +575,7 @@ class DeepseekV2DecoderLayer(nn.Module):
     def __init__(
         self,
         config,
+        layer_id: Optional[int] = None,
         tensor_parallel_world_size: Optional[int] = None,
     ):
         super().__init__()
@@ -486,6 +583,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             config,
             tensor_parallel_world_size=tensor_parallel_world_size,
         )
+        self.layer_id = layer_id
         # MoE and RMSNorm execution are still pending.
         self.input_layernorm = nn.Identity()
         self.post_attention_layernorm = nn.Identity()
@@ -502,6 +600,30 @@ class DeepseekV2DecoderLayer(nn.Module):
         attn_output, cache = self.self_attn.forward_hidden_states_contiguous(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
+            cache=cache,
+            softmax_scale=softmax_scale,
+        )
+        hidden_states = residual + attn_output
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        return hidden_states, cache
+
+    def forward_with_attention_wrapper(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: DeepseekV2MLAProjectionWeights,
+        kv_cache,
+        attention_wrapper=None,
+        cache: Optional[DeepseekV2MLAResidentCache] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        attn_output, cache = self.self_attn.forward_hidden_states_with_attention_wrapper(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            kv_cache=kv_cache,
+            layer_id=self.layer_id,
+            attention_wrapper=attention_wrapper,
             cache=cache,
             softmax_scale=softmax_scale,
         )
@@ -547,9 +669,10 @@ class DeepseekV2Model(nn.Module):
             [
                 DeepseekV2DecoderLayer(
                     config,
+                    layer_id=self.layer_offset + layer_index,
                     tensor_parallel_world_size=self.tensor_parallel_world_size,
                 )
-                for _ in range(self.num_layers)
+                for layer_index in range(self.num_layers)
             ]
         )
 
@@ -576,6 +699,42 @@ class DeepseekV2Model(nn.Module):
             hidden_states, next_cache = layer(
                 hidden_states=hidden_states,
                 projection_weights=layer_projection_weights,
+                cache=layer_cache,
+                softmax_scale=softmax_scale,
+            )
+            next_caches.append(next_cache)
+        return hidden_states, tuple(next_caches)
+
+    def forward_with_attention_wrapper(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        kv_caches: Tuple[object, ...],
+        attention_wrapper=None,
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+        if len(projection_weights) != self.num_layers:
+            raise ValueError("projection_weights must provide one entry per local layer")
+        if len(kv_caches) != self.num_layers:
+            raise ValueError("kv_caches must provide one entry per local layer")
+        if caches is None:
+            caches = tuple(None for _ in range(self.num_layers))
+        if len(caches) != self.num_layers:
+            raise ValueError("caches must provide one entry per local layer")
+
+        next_caches = []
+        for layer, layer_projection_weights, layer_kv_cache, layer_cache in zip(
+            self.layers,
+            projection_weights,
+            kv_caches,
+            caches,
+        ):
+            hidden_states, next_cache = layer.forward_with_attention_wrapper(
+                hidden_states=hidden_states,
+                projection_weights=layer_projection_weights,
+                kv_cache=layer_kv_cache,
+                attention_wrapper=attention_wrapper,
                 cache=layer_cache,
                 softmax_scale=softmax_scale,
             )
@@ -609,4 +768,22 @@ class DeepseekV2ForCausalLM(nn.Module):
         raise NotImplementedError(
             "DeepSeek-V2 weight loading is not implemented yet. "
             "The MLA attention/model path still needs to be added."
+        )
+
+    def forward_with_attention_wrapper(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        kv_caches: Tuple[object, ...],
+        attention_wrapper=None,
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+        return self.model.forward_with_attention_wrapper(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            kv_caches=kv_caches,
+            attention_wrapper=attention_wrapper,
+            caches=caches,
+            softmax_scale=softmax_scale,
         )
