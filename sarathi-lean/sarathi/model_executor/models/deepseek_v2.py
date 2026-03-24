@@ -1224,6 +1224,27 @@ class DeepseekV2ForCausalLM(nn.Module):
         )
 
     @staticmethod
+    def _has_moe_layer_weights(
+        state_dict: Mapping[str, torch.Tensor],
+        layer_prefixes: Tuple[str, ...],
+    ) -> bool:
+        moe_prefixes = []
+        for prefix in layer_prefixes:
+            moe_prefixes.extend(
+                (
+                    f"{prefix}.gate.weight",
+                    f"{prefix}.shared_experts.gate_proj.weight",
+                    f"{prefix}.shared_experts.up_proj.weight",
+                    f"{prefix}.shared_experts.down_proj.weight",
+                    f"{prefix}.experts.",
+                )
+            )
+        return any(
+            any(name == candidate or name.startswith(candidate) for candidate in moe_prefixes)
+            for name in state_dict
+        )
+
+    @staticmethod
     def _coerce_scaffold_tensor(
         tensor: Optional[torch.Tensor],
         *,
@@ -1472,6 +1493,19 @@ class DeepseekV2ForCausalLM(nn.Module):
                 self.model.layer_offset,
                 "mlp",
             )
+            global_layer_idx = self.model.layer_offset + layer_idx
+            first_k_dense_replace = getattr(self.config, "first_k_dense_replace", None)
+            n_routed_experts = getattr(self.config, "n_routed_experts", 0)
+            if (
+                first_k_dense_replace is not None
+                and n_routed_experts
+                and global_layer_idx >= first_k_dense_replace
+                and self._has_moe_layer_weights(state_dict, mlp_prefixes)
+            ):
+                raise NotImplementedError(
+                    "DeepSeek-V2 MoE weight loading is not implemented yet "
+                    f"(encountered MoE weights for layer {global_layer_idx})"
+                )
             mlp_tensors = {
                 "gate_proj": self._get_scaffold_tensor(
                     state_dict,

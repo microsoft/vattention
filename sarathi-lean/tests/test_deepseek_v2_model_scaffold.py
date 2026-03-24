@@ -88,6 +88,13 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             v_head_dim=2,
         )
 
+    def _make_small_moe_config(self):
+        config = self._make_small_config()
+        config.first_k_dense_replace = 1
+        config.n_routed_experts = 4
+        config.n_shared_experts = 1
+        return config
+
     def _make_projection_weights(self, dims):
         return make_projection_weights(
             q_proj=torch.tensor(
@@ -704,6 +711,53 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
                 projection_weights.k_rope_proj + 1,
             )
         )
+
+    def test_causal_lm_loader_rejects_unsupported_moe_layer_weights(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_moe_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for layer_idx in range(model.model.num_layers):
+            prefix = f"layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + layer_idx
+            state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = torch.cat(
+                [
+                    projection_weights.kv_latent_proj + layer_idx,
+                    projection_weights.k_rope_proj + layer_idx,
+                ],
+                dim=1,
+            )
+            state_dict[f"{prefix}.kv_b_proj.weight"] = projection_weights.kv_up_proj + layer_idx
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + layer_idx
+        state_dict["layers.1.mlp.gate.weight"] = torch.zeros(
+            config.n_routed_experts,
+            config.hidden_size,
+        )
+        state_dict["layers.1.mlp.shared_experts.gate_proj.weight"] = torch.zeros(
+            config.hidden_size,
+            4,
+        )
+        state_dict["layers.1.mlp.experts.0.gate_proj.weight"] = torch.zeros(
+            config.hidden_size,
+            4,
+        )
+
+        with self.assertRaises(NotImplementedError):
+            model.load_weights(state_dict)
 
 
 if __name__ == "__main__":
