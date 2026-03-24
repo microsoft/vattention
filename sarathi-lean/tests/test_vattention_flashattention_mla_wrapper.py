@@ -174,6 +174,18 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
         deepseek_module, wrapper_module = _load_modules(self.flash_calls)
         self.deepseek_module = deepseek_module
         self.wrapper_module = wrapper_module
+        self._original_deepseek_module = sys.modules.get(
+            "sarathi.model_executor.models.deepseek_v2"
+        )
+        sys.modules["sarathi.model_executor.models.deepseek_v2"] = self.deepseek_module
+
+    def tearDown(self):
+        if self._original_deepseek_module is None:
+            sys.modules.pop("sarathi.model_executor.models.deepseek_v2", None)
+        else:
+            sys.modules["sarathi.model_executor.models.deepseek_v2"] = (
+                self._original_deepseek_module
+            )
 
     def _make_config(self):
         return types.SimpleNamespace(
@@ -346,6 +358,96 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
         self.assertEqual(len(self.flash_calls), 1)
         self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
         self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
+
+    def test_forward_mla_writes_prefill_resident_components_to_runtime_cache(self):
+        dims = self.deepseek_module.DeepseekV2MLADims.from_config(
+            self._make_config(),
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = self._make_projection_weights(dims)
+        runtime_cache = self.deepseek_module.make_component_mla_kv_cache(
+            batch_size=2,
+            max_seq_len=4,
+            mla_dims=dims,
+        )
+        wrapper_inputs, _ = self.deepseek_module.prepare_mla_wrapper_inputs(
+            hidden_states=self._make_hidden_states(),
+            projection_weights=projection_weights,
+            mla_dims=dims,
+            kv_cache=runtime_cache,
+            layer_id=8,
+        )
+        wrapper = self._make_wrapper()
+        wrapper.prefill_query_lens = [2]
+        wrapper.prefill_cache_lens = [0]
+        wrapper.decode_cache_lens = None
+        wrapper.batch_index = torch.tensor([1], dtype=torch.int32)
+        wrapper.batch_index_gen = torch.tensor([], dtype=torch.int32)
+
+        wrapper.forward_mla(wrapper_inputs)
+
+        self.assertTrue(
+            torch.equal(
+                runtime_cache.kv_latent[1, :2],
+                wrapper_inputs.new_resident_cache.kv_latent,
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                runtime_cache.k_rope[1, :2],
+                wrapper_inputs.new_resident_cache.k_rope,
+            )
+        )
+
+    def test_forward_mla_reads_decode_prefix_from_component_runtime_cache(self):
+        dims = self.deepseek_module.DeepseekV2MLADims.from_config(
+            self._make_config(),
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = self._make_projection_weights(dims)
+        runtime_cache = self.deepseek_module.make_component_mla_kv_cache(
+            batch_size=1,
+            max_seq_len=4,
+            mla_dims=dims,
+        )
+        _, prefill_cache = self.deepseek_module.prepare_mla_wrapper_inputs(
+            hidden_states=self._make_hidden_states()[:1],
+            projection_weights=projection_weights,
+            mla_dims=dims,
+            kv_cache=runtime_cache,
+            layer_id=10,
+        )
+        self.deepseek_module.write_component_mla_kv_cache(
+            runtime_cache,
+            batch_idx=0,
+            token_offset=0,
+            resident_cache=prefill_cache,
+        )
+        wrapper_inputs, _ = self.deepseek_module.prepare_mla_wrapper_inputs(
+            hidden_states=self._make_hidden_states()[1:],
+            projection_weights=projection_weights,
+            mla_dims=dims,
+            kv_cache=runtime_cache,
+            layer_id=10,
+        )
+        wrapper = self._make_wrapper()
+        wrapper.prefill_query_lens = []
+        wrapper.prefill_cache_lens = []
+        wrapper.decode_cache_lens = torch.tensor([1], dtype=torch.int32)
+        wrapper.batch_index = torch.tensor([], dtype=torch.int32)
+        wrapper.batch_index_gen = torch.tensor([0], dtype=torch.int32)
+
+        wrapper.forward_mla(wrapper_inputs)
+
+        self.assertEqual(len(self.flash_calls), 1)
+        self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
+        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
+        self.assertTrue(
+            torch.equal(
+                runtime_cache.kv_latent[0, 1:2],
+                wrapper_inputs.new_resident_cache.kv_latent,
+            )
+        )
 
 
 if __name__ == "__main__":

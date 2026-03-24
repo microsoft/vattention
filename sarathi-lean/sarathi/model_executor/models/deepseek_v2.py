@@ -100,6 +100,12 @@ class DeepseekV2LayerCache:
 
 
 @dataclass(frozen=True)
+class DeepseekV2ComponentMLAKVCache:
+    kv_latent: torch.Tensor
+    k_rope: torch.Tensor
+
+
+@dataclass(frozen=True)
 class DeepseekV2MLAWrapperInputs:
     query: torch.Tensor
     kv_cache: object
@@ -236,6 +242,61 @@ def make_layer_cache(
         kv_cache=kv_cache,
         resident_cache=resident_cache,
     )
+
+
+def make_component_mla_kv_cache(
+    batch_size: int,
+    max_seq_len: int,
+    mla_dims: DeepseekV2MLADims,
+    *,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> DeepseekV2ComponentMLAKVCache:
+    return DeepseekV2ComponentMLAKVCache(
+        kv_latent=torch.zeros(
+            batch_size,
+            max_seq_len,
+            mla_dims.kv_lora_rank,
+            device=device,
+            dtype=dtype,
+        ),
+        k_rope=torch.zeros(
+            batch_size,
+            max_seq_len,
+            mla_dims.num_heads,
+            mla_dims.qk_rope_head_dim,
+            device=device,
+            dtype=dtype,
+        ),
+    )
+
+
+def is_component_mla_kv_cache(kv_cache: object) -> bool:
+    return isinstance(kv_cache, DeepseekV2ComponentMLAKVCache)
+
+
+def read_component_mla_kv_cache(
+    kv_cache: DeepseekV2ComponentMLAKVCache,
+    batch_idx: int,
+    seq_len: int,
+) -> Optional[DeepseekV2MLAResidentCache]:
+    if seq_len == 0:
+        return None
+    return DeepseekV2MLAResidentCache(
+        kv_latent=kv_cache.kv_latent[batch_idx, :seq_len].clone(),
+        k_rope=kv_cache.k_rope[batch_idx, :seq_len].clone(),
+    )
+
+
+def write_component_mla_kv_cache(
+    kv_cache: DeepseekV2ComponentMLAKVCache,
+    batch_idx: int,
+    token_offset: int,
+    resident_cache: DeepseekV2MLAResidentCache,
+) -> None:
+    next_offset = token_offset + resident_cache.num_tokens
+    kv_cache.kv_latent[batch_idx, token_offset:next_offset].copy_(resident_cache.kv_latent)
+    kv_cache.k_rope[batch_idx, token_offset:next_offset].copy_(resident_cache.k_rope)
 
 
 def resolve_layer_cache(

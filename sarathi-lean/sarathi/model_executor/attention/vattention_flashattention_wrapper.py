@@ -247,8 +247,12 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
     def forward_mla(self, wrapper_inputs) -> torch.Tensor:
         from sarathi.model_executor.models.deepseek_v2 import (
             append_resident_cache,
+            is_component_mla_kv_cache,
+            get_layer_cache_kv_handle,
+            read_component_mla_kv_cache,
             reconstruct_dense_kv,
             resolve_layer_cache,
+            write_component_mla_kv_cache,
         )
 
         assert self.is_metadata_initialized, "Metadata is not initialized."
@@ -268,18 +272,31 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
         query_lens = self.prefill_query_lens + [1] * len(decode_cache_lens)
         past_lens = self.prefill_cache_lens + decode_cache_lens
 
-        _, past_resident_cache = resolve_layer_cache(
+        runtime_kv_cache, past_resident_cache = resolve_layer_cache(
             wrapper_inputs.kv_cache,
             wrapper_inputs.past_resident_cache,
         )
+        runtime_kv_cache = get_layer_cache_kv_handle(runtime_kv_cache)
         current_cache_chunks = _split_resident_cache_by_lengths(
             wrapper_inputs.new_resident_cache,
             query_lens,
         )
-        past_cache_chunks = _split_resident_cache_by_lengths(
-            past_resident_cache,
-            past_lens,
-        )
+
+        if is_component_mla_kv_cache(runtime_kv_cache):
+            batch_indices = self.batch_index.tolist() if self.batch_index is not None else []
+            decode_batch_indices = (
+                self.batch_index_gen.tolist() if self.batch_index_gen is not None else []
+            )
+            all_batch_indices = batch_indices[: len(self.prefill_query_lens)] + decode_batch_indices
+            past_cache_chunks = tuple(
+                read_component_mla_kv_cache(runtime_kv_cache, batch_idx, past_len)
+                for batch_idx, past_len in zip(all_batch_indices, past_lens)
+            )
+        else:
+            past_cache_chunks = _split_resident_cache_by_lengths(
+                past_resident_cache,
+                past_lens,
+            )
 
         output = torch.empty(
             wrapper_inputs.query.shape[0],
@@ -288,11 +305,29 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
             dtype=wrapper_inputs.query.dtype,
         )
         token_offset = 0
-        for query_len, past_cache, current_cache in zip(
+        if is_component_mla_kv_cache(runtime_kv_cache):
+            batch_indices = self.batch_index.tolist() if self.batch_index is not None else []
+            decode_batch_indices = (
+                self.batch_index_gen.tolist() if self.batch_index_gen is not None else []
+            )
+            all_batch_indices = batch_indices[: len(self.prefill_query_lens)] + decode_batch_indices
+        else:
+            all_batch_indices = [None for _ in query_lens]
+
+        for query_len, past_len, batch_idx, past_cache, current_cache in zip(
             query_lens,
+            past_lens,
+            all_batch_indices,
             past_cache_chunks,
             current_cache_chunks,
         ):
+            if is_component_mla_kv_cache(runtime_kv_cache):
+                write_component_mla_kv_cache(
+                    runtime_kv_cache,
+                    batch_idx,
+                    past_len,
+                    current_cache,
+                )
             full_cache = append_resident_cache(past_cache, current_cache)
             key, value = reconstruct_dense_kv(
                 full_cache,
