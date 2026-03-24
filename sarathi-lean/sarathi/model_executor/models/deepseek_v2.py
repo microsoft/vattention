@@ -1284,6 +1284,40 @@ class DeepseekV2ForCausalLM(nn.Module):
                     *(f"{prefix}.o_proj.weight" for prefix in projection_prefixes),
                 ),
             }
+            kv_a_proj_with_mqa = self._get_scaffold_tensor(
+                state_dict,
+                *(f"{prefix}.kv_a_proj_with_mqa.weight" for prefix in projection_prefixes),
+            )
+            if (
+                projection_tensors["kv_latent_proj"] is None
+                and projection_tensors["k_rope_proj"] is None
+                and kv_a_proj_with_mqa is not None
+            ):
+                expected_shape = (
+                    hidden_size,
+                    layer.self_attn.mla_dims.kv_lora_rank
+                    + layer.self_attn.mla_dims.num_heads
+                    * layer.self_attn.mla_dims.qk_rope_head_dim,
+                )
+                if tuple(kv_a_proj_with_mqa.shape) != expected_shape:
+                    raise ValueError(
+                        "kv_a_proj_with_mqa.weight shape does not match combined MLA resident projection size"
+                    )
+                kv_latent_width = layer.self_attn.mla_dims.kv_lora_rank
+                projection_tensors["kv_latent_proj"] = kv_a_proj_with_mqa[
+                    :,
+                    :kv_latent_width,
+                ]
+                projection_tensors["k_rope_proj"] = kv_a_proj_with_mqa[
+                    :,
+                    kv_latent_width:,
+                ]
+            kv_b_proj = self._get_scaffold_tensor(
+                state_dict,
+                *(f"{prefix}.kv_b_proj.weight" for prefix in projection_prefixes),
+            )
+            if projection_tensors["kv_up_proj"] is None and kv_b_proj is not None:
+                projection_tensors["kv_up_proj"] = kv_b_proj
             missing_projection_keys = [
                 name for name, tensor in projection_tensors.items() if tensor is None
             ]
