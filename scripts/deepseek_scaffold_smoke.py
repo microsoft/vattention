@@ -481,6 +481,23 @@ def resolve_checkpoint_format(checkpoint_format, checkpoint_layout):
     return checkpoint_format
 
 
+def _make_loader_model_config(checkpoint_path, config, dtype):
+    return SimpleNamespace(
+        model=checkpoint_path,
+        hf_config=SimpleNamespace(**vars(config)),
+        dtype=dtype,
+        load_format="auto",
+        download_dir=None,
+        revision=None,
+    )
+
+
+def _load_model_via_model_loader(checkpoint_path, config, dtype):
+    from sarathi.model_executor.model_loader import get_model
+
+    return get_model(_make_loader_model_config(checkpoint_path, config, dtype))
+
+
 def _run_scaffold_smoke_artifacts(
     mode="contiguous",
     prompt_token_ids=(1, 3),
@@ -490,6 +507,7 @@ def _run_scaffold_smoke_artifacts(
     checkpoint_layout="single_file",
     mlp_mode="dense",
     output_dir=None,
+    use_model_loader=False,
 ):
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
@@ -595,7 +613,10 @@ def _run_scaffold_smoke_artifacts(
             )
         else:
             raise ValueError(f"Unsupported checkpoint layout: {checkpoint_layout}")
-        model.load_weights(checkpoint_path)
+        if use_model_loader:
+            model = _load_model_via_model_loader(checkpoint_path, config, dtype)
+        else:
+            model.load_weights(checkpoint_path)
 
         prompt_token_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=device)
         generate_kwargs = {}
@@ -738,6 +759,64 @@ def compare_scaffold_smoke(
     }
 
 
+def compare_loader_scaffold_smoke(
+    prompt_token_ids=(1, 3),
+    max_new_tokens=3,
+    checkpoint_format="pt",
+    query_mode="direct",
+    checkpoint_layout="single_file",
+    mlp_mode="dense",
+    output_dir=None,
+):
+    checkpoint_format = resolve_checkpoint_format(checkpoint_format, checkpoint_layout)
+    direct_tokens, direct_logits, direct_caches, checkpoint_path = _run_scaffold_smoke_artifacts(
+        mode="contiguous",
+        prompt_token_ids=prompt_token_ids,
+        max_new_tokens=max_new_tokens,
+        checkpoint_format=checkpoint_format,
+        query_mode=query_mode,
+        checkpoint_layout=checkpoint_layout,
+        mlp_mode=mlp_mode,
+        output_dir=output_dir,
+        use_model_loader=False,
+    )
+    loader_tokens, loader_logits, loader_caches, _ = _run_scaffold_smoke_artifacts(
+        mode="contiguous",
+        prompt_token_ids=prompt_token_ids,
+        max_new_tokens=max_new_tokens,
+        checkpoint_format=checkpoint_format,
+        query_mode=query_mode,
+        checkpoint_layout=checkpoint_layout,
+        mlp_mode=mlp_mode,
+        output_dir=output_dir,
+        use_model_loader=True,
+    )
+    direct_cache_counts = [cache.num_tokens for cache in direct_caches]
+    loader_cache_counts = [cache.num_tokens for cache in loader_caches]
+    return {
+        "mode": "loader_compare",
+        "checkpoint_format": checkpoint_format,
+        "checkpoint_layout": checkpoint_layout,
+        "query_mode": query_mode,
+        "mlp_mode": mlp_mode,
+        "checkpoint_path": checkpoint_path if output_dir is not None else None,
+        "status": "ok",
+        "prompt_token_ids": list(prompt_token_ids),
+        "generated_token_ids": direct_tokens.tolist(),
+        "loader_generated_token_ids": loader_tokens.tolist(),
+        "generated_tokens_match": torch.equal(direct_tokens, loader_tokens),
+        "final_logits_match": torch.allclose(
+            direct_logits,
+            loader_logits,
+            atol=1e-6,
+            rtol=1e-6,
+        ),
+        "direct_cache_token_counts": direct_cache_counts,
+        "loader_cache_token_counts": loader_cache_counts,
+        "cache_token_counts_match": direct_cache_counts == loader_cache_counts,
+    }
+
+
 def validate_scaffold_smoke_compare(
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
@@ -771,7 +850,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("contiguous", "paged", "compare"),
+        choices=("contiguous", "paged", "compare", "loader_compare"),
         default="contiguous",
     )
     parser.add_argument("--max-new-tokens", type=int, default=3)
@@ -816,6 +895,15 @@ def main():
             mlp_mode=args.mlp_mode,
             output_dir=args.output_dir,
         )
+    elif args.mode == "loader_compare":
+        output = compare_loader_scaffold_smoke(
+            max_new_tokens=args.max_new_tokens,
+            checkpoint_format=args.checkpoint_format,
+            query_mode=args.query_mode,
+            checkpoint_layout=args.checkpoint_layout,
+            mlp_mode=args.mlp_mode,
+            output_dir=args.output_dir,
+        )
     else:
         output = run_scaffold_smoke(
             mode=args.mode,
@@ -833,7 +921,7 @@ def main():
             sort_keys=True,
         )
     )
-    if args.mode == "compare" and args.require_match:
+    if args.mode in ("compare", "loader_compare") and args.require_match:
         if output.get("status") == "blocked":
             print(
                 f"scaffold smoke compare blocked: {output['error']}",
