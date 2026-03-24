@@ -8,6 +8,7 @@ import torch.nn as nn
 from sarathi.model_executor.parallel_utils.parallel_state import (
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_world_size,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from sarathi.model_executor.weight_utils import (
@@ -1565,89 +1566,76 @@ class DeepseekV2ForCausalLM(nn.Module):
                 state_dict,
                 *(f"{prefix}.kv_a_proj_with_mqa.weight" for prefix in projection_prefixes),
             )
-            kv_a_proj_with_mqa = self._coerce_linear_weight_layout(
-                kv_a_proj_with_mqa,
-                expected_shape=(
-                    hidden_size,
-                    layer.self_attn.mla_dims.kv_lora_rank
-                    + layer.self_attn.mla_dims.num_heads
-                    * layer.self_attn.mla_dims.qk_rope_head_dim,
-                ),
+            kv_a_proj_with_mqa_kv_latent_proj, kv_a_proj_with_mqa_k_rope_proj = (
+                self._split_combined_kv_a_proj_with_mqa_weight(
+                    kv_a_proj_with_mqa,
+                    hidden_size=hidden_size,
+                    mla_dims=layer.self_attn.mla_dims,
+                )
             )
             if (
                 projection_tensors["kv_latent_proj"] is None
                 and projection_tensors["k_rope_proj"] is None
-                and kv_a_proj_with_mqa is not None
+                and kv_a_proj_with_mqa_kv_latent_proj is not None
+                and kv_a_proj_with_mqa_k_rope_proj is not None
             ):
-                expected_shape = (
-                    hidden_size,
-                    layer.self_attn.mla_dims.kv_lora_rank
-                    + layer.self_attn.mla_dims.num_heads
-                    * layer.self_attn.mla_dims.qk_rope_head_dim,
-                )
-                if tuple(kv_a_proj_with_mqa.shape) != expected_shape:
-                    raise ValueError(
-                        "kv_a_proj_with_mqa.weight shape does not match combined MLA resident projection size"
-                    )
-                kv_latent_width = layer.self_attn.mla_dims.kv_lora_rank
-                projection_tensors["kv_latent_proj"] = kv_a_proj_with_mqa[
-                    :,
-                    :kv_latent_width,
-                ]
-                projection_tensors["k_rope_proj"] = kv_a_proj_with_mqa[
-                    :,
-                    kv_latent_width:,
-                ]
+                projection_tensors["kv_latent_proj"] = kv_a_proj_with_mqa_kv_latent_proj
+                projection_tensors["k_rope_proj"] = kv_a_proj_with_mqa_k_rope_proj
             kv_b_proj = self._get_scaffold_tensor(
                 state_dict,
                 *(f"{prefix}.kv_b_proj.weight" for prefix in projection_prefixes),
             )
             if projection_tensors["kv_up_proj"] is None and kv_b_proj is not None:
                 projection_tensors["kv_up_proj"] = kv_b_proj
-            projection_tensors["q_proj"] = self._coerce_linear_weight_layout(
+            projection_tensors["q_proj"] = self._coerce_and_slice_tensor_parallel_linear_weight(
                 projection_tensors["q_proj"],
-                expected_shape=(
+                expected_local_shape=(
                     hidden_size,
                     layer.self_attn.mla_dims.q_proj_output_dim_local,
                 ),
+                shard_dim=1,
             )
             if layer.self_attn.mla_dims.q_lora_rank is not None:
                 projection_tensors["q_a_proj"] = self._coerce_linear_weight_layout(
                     projection_tensors["q_a_proj"],
                     expected_shape=(hidden_size, layer.self_attn.mla_dims.q_lora_rank),
                 )
-                projection_tensors["q_b_proj"] = self._coerce_linear_weight_layout(
+                projection_tensors["q_b_proj"] = self._coerce_and_slice_tensor_parallel_linear_weight(
                     projection_tensors["q_b_proj"],
-                    expected_shape=(
+                    expected_local_shape=(
                         layer.self_attn.mla_dims.q_lora_rank,
                         layer.self_attn.mla_dims.q_proj_output_dim_local,
                     ),
+                    shard_dim=1,
                 )
             projection_tensors["kv_latent_proj"] = self._coerce_linear_weight_layout(
                 projection_tensors["kv_latent_proj"],
                 expected_shape=(hidden_size, layer.self_attn.mla_dims.kv_lora_rank),
             )
-            projection_tensors["k_rope_proj"] = self._coerce_linear_weight_layout(
+            projection_tensors["k_rope_proj"] = self._coerce_and_slice_tensor_parallel_linear_weight(
                 projection_tensors["k_rope_proj"],
-                expected_shape=(
+                expected_local_shape=(
                     hidden_size,
                     layer.self_attn.mla_dims.num_heads
                     * layer.self_attn.mla_dims.qk_rope_head_dim,
                 ),
+                shard_dim=1,
             )
-            projection_tensors["kv_up_proj"] = self._coerce_linear_weight_layout(
+            projection_tensors["kv_up_proj"] = self._coerce_and_slice_tensor_parallel_linear_weight(
                 projection_tensors["kv_up_proj"],
-                expected_shape=(
+                expected_local_shape=(
                     layer.self_attn.mla_dims.kv_lora_rank,
                     layer.self_attn.mla_dims.kv_up_proj_output_dim_local,
                 ),
+                shard_dim=1,
             )
-            projection_tensors["o_proj"] = self._coerce_linear_weight_layout(
+            projection_tensors["o_proj"] = self._coerce_and_slice_tensor_parallel_linear_weight(
                 projection_tensors["o_proj"],
-                expected_shape=(
+                expected_local_shape=(
                     layer.self_attn.mla_dims.o_proj_input_dim_local,
                     hidden_size,
                 ),
+                shard_dim=0,
             )
             query_uses_q_lora = projection_tensors["q_proj"] is None and any(
                 projection_tensors[name] is not None
@@ -1949,6 +1937,84 @@ class DeepseekV2ForCausalLM(nn.Module):
         if tuple(tensor.t().shape) == expected_shape:
             return tensor.t().contiguous()
         return tensor
+
+    def _coerce_and_slice_tensor_parallel_linear_weight(
+        self,
+        tensor: Optional[torch.Tensor],
+        *,
+        expected_local_shape: Tuple[int, int],
+        shard_dim: int,
+    ) -> Optional[torch.Tensor]:
+        if tensor is None or tensor.ndim != 2:
+            return tensor
+        tensor = self._coerce_linear_weight_layout(
+            tensor,
+            expected_shape=expected_local_shape,
+        )
+        if tuple(tensor.shape) == expected_local_shape:
+            return tensor
+
+        expected_global_shape = list(expected_local_shape)
+        expected_global_shape[shard_dim] *= self.model.tensor_parallel_world_size
+        expected_global_shape = tuple(expected_global_shape)
+        tensor = self._coerce_linear_weight_layout(
+            tensor,
+            expected_shape=expected_global_shape,
+        )
+        if tuple(tensor.shape) != expected_global_shape:
+            return tensor
+
+        shard_size = expected_local_shape[shard_dim]
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_start = tp_rank * shard_size
+        shard_end = shard_start + shard_size
+        if shard_dim == 0:
+            return tensor[shard_start:shard_end, :].contiguous()
+        return tensor[:, shard_start:shard_end].contiguous()
+
+    def _split_combined_kv_a_proj_with_mqa_weight(
+        self,
+        tensor: Optional[torch.Tensor],
+        *,
+        hidden_size: int,
+        mla_dims: DeepseekV2MLADims,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if tensor is None:
+            return None, None
+
+        local_shape = (
+            hidden_size,
+            mla_dims.kv_lora_rank + mla_dims.num_heads * mla_dims.qk_rope_head_dim,
+        )
+        tensor = self._coerce_linear_weight_layout(
+            tensor,
+            expected_shape=local_shape,
+        )
+        if tuple(tensor.shape) == local_shape:
+            kv_latent_width = mla_dims.kv_lora_rank
+            return (
+                tensor[:, :kv_latent_width].contiguous(),
+                tensor[:, kv_latent_width:].contiguous(),
+            )
+
+        global_shape = (
+            hidden_size,
+            mla_dims.kv_lora_rank
+            + mla_dims.total_num_heads * mla_dims.qk_rope_head_dim,
+        )
+        tensor = self._coerce_linear_weight_layout(
+            tensor,
+            expected_shape=global_shape,
+        )
+        if tuple(tensor.shape) != global_shape:
+            return tensor, tensor
+
+        kv_latent_proj = tensor[:, : mla_dims.kv_lora_rank].contiguous()
+        rope_width_local = mla_dims.num_heads * mla_dims.qk_rope_head_dim
+        rope_start = mla_dims.kv_lora_rank + get_tensor_model_parallel_rank() * rope_width_local
+        rope_end = rope_start + rope_width_local
+        k_rope_proj = tensor[:, rope_start:rope_end].contiguous()
+        return kv_latent_proj, k_rope_proj
 
     @classmethod
     def _normalize_mlp_tensor_layouts(

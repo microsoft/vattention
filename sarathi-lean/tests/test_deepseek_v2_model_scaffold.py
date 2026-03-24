@@ -865,6 +865,107 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             (config.hidden_size, 4),
         )
 
+    def test_causal_lm_loader_slices_global_attention_weights_by_tensor_parallel_rank(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_rank,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        rank0_projection_weights = self._make_projection_weights(dims)
+        rank1_projection_weights = make_projection_weights(
+            q_proj=rank0_projection_weights.q_proj + 100.0,
+            kv_latent_proj=rank0_projection_weights.kv_latent_proj + 200.0,
+            kv_a_layernorm_weight=rank0_projection_weights.kv_a_layernorm_weight + 300.0,
+            k_rope_proj=rank0_projection_weights.k_rope_proj + 400.0,
+            kv_up_proj=rank0_projection_weights.kv_up_proj + 500.0,
+            o_proj=rank0_projection_weights.o_proj + 600.0,
+            mla_dims=dims,
+        )
+        combined_global_kv_a = torch.cat(
+            [
+                rank0_projection_weights.kv_latent_proj,
+                rank0_projection_weights.k_rope_proj,
+                rank1_projection_weights.k_rope_proj,
+            ],
+            dim=1,
+        )
+        state_dict = {
+            "model.embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "model.norm.weight": torch.ones(config.hidden_size),
+        }
+        for layer_idx in range(config.num_hidden_layers):
+            prefix = f"model.layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = torch.cat(
+                [
+                    rank0_projection_weights.q_proj,
+                    rank1_projection_weights.q_proj,
+                ],
+                dim=1,
+            )
+            state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = combined_global_kv_a
+            state_dict[f"{prefix}.kv_b_proj.weight"] = torch.cat(
+                [
+                    rank0_projection_weights.kv_up_proj,
+                    rank1_projection_weights.kv_up_proj,
+                ],
+                dim=1,
+            )
+            state_dict[f"{prefix}.o_proj.weight"] = torch.cat(
+                [
+                    rank0_projection_weights.o_proj,
+                    rank1_projection_weights.o_proj,
+                ],
+                dim=0,
+            )
+
+        for rank, expected_projection_weights in (
+            (0, rank0_projection_weights),
+            (1, rank1_projection_weights),
+        ):
+            set_tensor_model_parallel_rank(rank)
+            model = DeepseekV2ForCausalLM(config)
+            model.load_weights(state_dict)
+
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_projection_weights[0].q_proj,
+                    expected_projection_weights.q_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_projection_weights[0].kv_latent_proj,
+                    rank0_projection_weights.kv_latent_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_projection_weights[0].k_rope_proj,
+                    expected_projection_weights.k_rope_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_projection_weights[0].kv_up_proj,
+                    expected_projection_weights.kv_up_proj,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_projection_weights[0].o_proj,
+                    expected_projection_weights.o_proj,
+                )
+            )
+
     def test_causal_lm_loader_rejects_incomplete_moe_layer_weights(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
             set_pipeline_model_parallel_rank,
