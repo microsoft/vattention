@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Callable, Mapping, Optional, Tuple
 
@@ -8,6 +9,10 @@ from sarathi.model_executor.parallel_utils.parallel_state import (
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_world_size,
     get_tensor_model_parallel_world_size,
+)
+from sarathi.model_executor.weight_utils import (
+    convert_pyslice_to_tensor,
+    hf_model_weights_iterator,
 )
 
 
@@ -1385,6 +1390,33 @@ class DeepseekV2ForCausalLM(nn.Module):
             mlp_weights=tuple(local_mlp_weights),
         )
 
+    @staticmethod
+    def _load_state_dict_file(path: str) -> Mapping[str, torch.Tensor]:
+        if path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+
+            return load_file(path)
+        loaded = torch.load(path, map_location="cpu")
+        if "state_dict" in loaded:
+            loaded = loaded["state_dict"]
+        if not isinstance(loaded, Mapping):
+            raise ValueError("checkpoint file must contain a state-dict mapping")
+        return loaded
+
+    @classmethod
+    def _load_scaffold_state_dict_from_path(
+        cls,
+        model_path: str,
+    ) -> Mapping[str, torch.Tensor]:
+        if os.path.isdir(model_path):
+            state_dict = {}
+            for name, tensor in hf_model_weights_iterator(model_path, load_format="auto"):
+                state_dict[name] = convert_pyslice_to_tensor(tensor)
+            return state_dict
+        if os.path.isfile(model_path):
+            return cls._load_state_dict_file(model_path)
+        raise FileNotFoundError(f"Checkpoint path does not exist: {model_path}")
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1424,6 +1456,16 @@ class DeepseekV2ForCausalLM(nn.Module):
                     + ", ".join(sorted(kwargs.keys()))
                 )
             self.load_scaffold_state_dict(args[0], strict=strict)
+            return
+        if args and isinstance(args[0], (str, os.PathLike)):
+            strict = kwargs.pop("strict", True)
+            if kwargs:
+                raise ValueError(
+                    "Unsupported kwargs for scaffold checkpoint loading: "
+                    + ", ".join(sorted(kwargs.keys()))
+                )
+            state_dict = self._load_scaffold_state_dict_from_path(os.fspath(args[0]))
+            self.load_scaffold_state_dict(state_dict, strict=strict)
             return
         raise NotImplementedError(
             "DeepSeek-V2 weight loading is not implemented yet. "

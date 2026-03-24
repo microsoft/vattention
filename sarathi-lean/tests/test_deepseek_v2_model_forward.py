@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -632,6 +633,52 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
         self.assertEqual(tuple(loaded_output.shape), (2, config.hidden_size))
         self.assertEqual(tuple(loaded_logits.shape), (2, config.vocab_size))
         self.assertTrue(all(cache.num_tokens == 2 for cache in loaded_caches))
+
+    def test_causal_lm_loads_scaffold_checkpoint_from_pt_file(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        reference_model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(reference_model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = tuple(
+            self._make_projection_weights(dims)
+            for _ in range(reference_model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size)
+            for _ in range(reference_model.model.num_layers)
+        )
+        checkpoint_state_dict = self._make_scaffold_state_dict(
+            reference_model,
+            projection_weights,
+            mlp_weights,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "deepseek_scaffold.pt"
+            torch.save(checkpoint_state_dict, checkpoint_path)
+            loaded_model = DeepseekV2ForCausalLM(config)
+            loaded_model.load_weights(str(checkpoint_path))
+
+        input_ids = torch.tensor([1, 4], dtype=torch.long)
+        logits, caches = loaded_model.forward_logits(hidden_states=input_ids)
+
+        self.assertEqual(tuple(logits.shape), (2, config.vocab_size))
+        self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
+        self.assertTrue(
+            torch.allclose(
+                loaded_model.model.layer_projection_weights[0].q_proj,
+                checkpoint_state_dict["model.layers.0.self_attn.q_proj.weight"],
+            )
+        )
 
     def test_loaded_norm_weights_change_scaffold_forward_output(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (

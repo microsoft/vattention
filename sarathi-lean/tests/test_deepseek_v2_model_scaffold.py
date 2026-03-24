@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -543,6 +544,56 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             torch.allclose(
                 model.model.layer_projection_weights[1].kv_up_proj,
                 projection_weights.kv_up_proj + 1,
+            )
+        )
+
+    def test_causal_lm_scaffold_loader_accepts_local_checkpoint_directory(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for layer_idx in range(model.model.num_layers):
+            prefix = f"layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + layer_idx
+            state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = torch.cat(
+                [
+                    projection_weights.kv_latent_proj + layer_idx,
+                    projection_weights.k_rope_proj + layer_idx,
+                ],
+                dim=1,
+            )
+            state_dict[f"{prefix}.kv_b_proj.weight"] = projection_weights.kv_up_proj + layer_idx
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + layer_idx
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "weights.pt"
+            torch.save(state_dict, checkpoint_path)
+            model.load_weights(tmpdir)
+
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].kv_latent_proj,
+                projection_weights.kv_latent_proj,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[1].k_rope_proj,
+                projection_weights.k_rope_proj + 1,
             )
         )
 
