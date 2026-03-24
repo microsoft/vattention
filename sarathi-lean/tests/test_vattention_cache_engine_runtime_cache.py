@@ -157,6 +157,12 @@ validate_vattention_cache_validation_suite = (
 compare_vattention_cache_validation_suite_to_profile = (
     cache_engine_module.compare_vattention_cache_validation_suite_to_profile
 )
+get_vattention_mla_validation_profile = (
+    cache_engine_module.get_vattention_mla_validation_profile
+)
+compare_vattention_cache_validation_suite_to_named_profile = (
+    cache_engine_module.compare_vattention_cache_validation_suite_to_named_profile
+)
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -610,6 +616,32 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
                 "min_free_blocks_overall",
             ),
         )
+
+    def test_cache_usage_named_profile_registry_supports_lookup_and_comparison(self):
+        suite_summary = {
+            "num_matrices": 3,
+            "matrix_names": ("prompt_matrix", "overlap_matrix", "decode_pressure_matrix"),
+            "max_peak_persistent_bytes": 160,
+            "min_free_blocks_overall": 5,
+            "max_largest_growth_bytes": 128,
+            "max_largest_reclaim_bytes": 128,
+            "matrix_with_max_peak_bytes": "overlap_matrix",
+            "matrix_with_min_free_blocks": "overlap_matrix",
+        }
+
+        profile = get_vattention_mla_validation_profile("bounded_mla_suite_v1")
+        report = compare_vattention_cache_validation_suite_to_named_profile(
+            suite_summary,
+            "bounded_mla_suite_v1",
+        )
+
+        self.assertEqual(profile["profile_name"], "bounded_mla_suite_v1")
+        self.assertTrue(report["is_valid"])
+        self.assertEqual(report["profile_name"], "bounded_mla_suite_v1")
+        self.assertEqual(report["expected_profile"], profile)
+
+        with self.assertRaises(KeyError):
+            get_vattention_mla_validation_profile("missing_profile")
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(

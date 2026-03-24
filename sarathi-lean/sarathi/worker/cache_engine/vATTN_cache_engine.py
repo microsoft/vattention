@@ -17,6 +17,16 @@ logger = init_logger(__name__)
 
 KVCache = Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
 
+VATTENTION_MLA_VALIDATION_PROFILES = {
+    "bounded_mla_suite_v1": {
+        "profile_name": "bounded_mla_suite_v1",
+        "max_peak_persistent_bytes": 160,
+        "min_free_blocks_overall": 5,
+        "max_largest_growth_bytes": 128,
+        "max_largest_reclaim_bytes": 128,
+    },
+}
+
 
 def summarize_vattention_cache_usage(
     cache_spec,
@@ -434,6 +444,22 @@ def compare_vattention_cache_validation_suite_to_profile(
         "is_valid": validation["is_valid"],
         "violations": validation["violations"],
     }
+
+
+def get_vattention_mla_validation_profile(profile_name):
+    if profile_name not in VATTENTION_MLA_VALIDATION_PROFILES:
+        raise KeyError(f"Unknown vAttention MLA validation profile: {profile_name}")
+    return dict(VATTENTION_MLA_VALIDATION_PROFILES[profile_name])
+
+
+def compare_vattention_cache_validation_suite_to_named_profile(
+    suite_summary,
+    profile_name,
+):
+    return compare_vattention_cache_validation_suite_to_profile(
+        suite_summary,
+        get_vattention_mla_validation_profile(profile_name),
+    )
 
 
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:

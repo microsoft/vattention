@@ -1108,6 +1108,17 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(profile_report["profile_name"], "bounded_mla_suite_v1")
         self.assertTrue(profile_report["is_valid"])
         self.assertEqual(profile_report["violations"], ())
+        worker = self._make_worker(
+            model_runner=_FakeModelRunner(output="sampler-output"),
+            gpu_cache=("gpu-cache",),
+        )
+        named_profile_report = worker.evaluate_cache_usage_suite_profile(
+            suite_summary,
+            "bounded_mla_suite_v1",
+        )
+        self.assertEqual(named_profile_report["profile_name"], "bounded_mla_suite_v1")
+        self.assertTrue(named_profile_report["is_valid"])
+        self.assertEqual(named_profile_report["violations"], ())
 
 
 if __name__ == "__main__":

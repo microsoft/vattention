@@ -188,6 +188,17 @@ class BaseWorker:
             return None
         return self.cache_engine.get_cache_usage_summary()
 
+    @synchronized
+    def evaluate_cache_usage_suite_profile(self, suite_summary, profile_name):
+        from sarathi.worker.cache_engine.vATTN_cache_engine import (
+            compare_vattention_cache_validation_suite_to_named_profile,
+        )
+
+        return compare_vattention_cache_validation_suite_to_named_profile(
+            suite_summary,
+            profile_name,
+        )
+
     def on_step_completed(
         self, scheduler_outputs: SchedulerOutputs, sampler_outputs: SamplerOutputs
     ) -> None:
