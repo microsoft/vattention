@@ -36,6 +36,22 @@ def _extract_layer_indices(names):
     return tuple(sorted(layer_indices))
 
 
+def _extract_expert_indices(names):
+    expert_indices_by_layer = {}
+    pattern = re.compile(r"(?:^|\.)(?:model\.)?layers\.(\d+)\.mlp\.experts\.(\d+)\.")
+    for name in names:
+        match = pattern.search(name)
+        if match is None:
+            continue
+        layer_idx = int(match.group(1))
+        expert_idx = int(match.group(2))
+        expert_indices_by_layer.setdefault(layer_idx, set()).add(expert_idx)
+    return {
+        layer_idx: tuple(sorted(expert_indices))
+        for layer_idx, expert_indices in expert_indices_by_layer.items()
+    }
+
+
 def _has_name(names, suffix):
     return any(name.endswith(suffix) for name in names)
 
@@ -52,6 +68,7 @@ def inspect_deepseek_checkpoint(checkpoint_path):
     state_dict, config = _load_weight_names_and_config(checkpoint_path)
     names = tuple(sorted(state_dict.keys()))
     layer_indices = _extract_layer_indices(names)
+    expert_indices_by_layer = _extract_expert_indices(names)
 
     has_q_proj = _has_name(names, ".self_attn.q_proj.weight")
     has_q_lora = all(
@@ -90,6 +107,19 @@ def inspect_deepseek_checkpoint(checkpoint_path):
     config_tensor_parallel_world_size = (
         None if config is None else config.get("tensor_parallel_world_size")
     )
+    config_num_hidden_layers = None if config is None else config.get("num_hidden_layers")
+    observed_num_hidden_layers = 0 if not layer_indices else max(layer_indices) + 1
+    observed_q_lora_rank = None
+    if has_q_lora:
+        for name, tensor in state_dict.items():
+            if name.endswith(".self_attn.q_a_proj.weight"):
+                observed_q_lora_rank = tensor.shape[1]
+                break
+    observed_n_routed_experts = None
+    if expert_indices_by_layer:
+        observed_n_routed_experts = max(
+            max(expert_indices) + 1 for expert_indices in expert_indices_by_layer.values()
+        )
 
     status = "supported_non_moe_surface"
     blockers = []
@@ -99,11 +129,32 @@ def inspect_deepseek_checkpoint(checkpoint_path):
     if not has_combined_kv or not has_kv_b_proj:
         status = "blocked"
         blockers.append("missing_kv_projection_surface")
+    if (
+        config_num_hidden_layers is not None
+        and observed_num_hidden_layers
+        and config_num_hidden_layers != observed_num_hidden_layers
+    ):
+        status = "blocked"
+        blockers.append("num_hidden_layers_mismatch")
+    if (
+        config is not None
+        and config.get("q_lora_rank") is not None
+        and observed_q_lora_rank is not None
+        and config.get("q_lora_rank") != observed_q_lora_rank
+    ):
+        status = "blocked"
+        blockers.append("q_lora_rank_mismatch")
     if has_moe:
         if config_first_k_dense_replace is None or not config_n_routed_experts:
             status = "blocked"
             blockers.append("missing_moe_config")
         else:
+            if (
+                observed_n_routed_experts is not None
+                and config_n_routed_experts != observed_n_routed_experts
+            ):
+                status = "blocked"
+                blockers.append("n_routed_experts_mismatch")
             for layer_idx in moe_layer_indices:
                 if layer_idx < config_first_k_dense_replace:
                     status = "blocked"
@@ -169,6 +220,10 @@ def inspect_deepseek_checkpoint(checkpoint_path):
         "config_n_routed_experts": config_n_routed_experts,
         "config_n_shared_experts": config_n_shared_experts,
         "config_tensor_parallel_world_size": config_tensor_parallel_world_size,
+        "config_num_hidden_layers": config_num_hidden_layers,
+        "observed_num_hidden_layers": observed_num_hidden_layers,
+        "observed_q_lora_rank": observed_q_lora_rank,
+        "observed_n_routed_experts": observed_n_routed_experts,
         "has_q_proj": has_q_proj,
         "has_q_lora": has_q_lora,
         "has_combined_kv": has_combined_kv,

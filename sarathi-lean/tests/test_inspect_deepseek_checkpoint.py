@@ -145,6 +145,8 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertFalse(result["has_moe"])
         self.assertEqual(result["config_model_type"], "deepseek_v2")
         self.assertEqual(result["config_tensor_parallel_world_size"], 2)
+        self.assertEqual(result["config_num_hidden_layers"], 4)
+        self.assertEqual(result["observed_num_hidden_layers"], 4)
         self.assertTrue(result["loadable_scaffold_surface"])
         self.assertIsNone(result["load_error"])
 
@@ -169,6 +171,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertTrue(result["has_q_lora"])
         self.assertTrue(result["has_kv_a_layernorm"])
         self.assertEqual(result["config_q_lora_rank"], 2)
+        self.assertEqual(result["observed_q_lora_rank"], 2)
         self.assertTrue(result["loadable_scaffold_surface"])
 
     def test_inspect_checkpoint_reports_supported_bounded_moe_surface(self):
@@ -192,6 +195,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertTrue(result["has_moe"])
         self.assertEqual(result["config_first_k_dense_replace"], 1)
         self.assertEqual(result["config_n_routed_experts"], 4)
+        self.assertEqual(result["observed_n_routed_experts"], 4)
         self.assertEqual(result["moe_layer_indices"], [1, 2, 3])
         self.assertTrue(result["loadable_scaffold_surface"])
 
@@ -228,6 +232,57 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertTrue(result["has_moe"])
         self.assertIn("missing_routed_expert_weights", result["blockers"])
         self.assertIsNone(result["loadable_scaffold_surface"])
+
+    def test_inspect_checkpoint_reports_config_layer_count_mismatch(self):
+        model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
+            query_mode="direct"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                output_dir=tmpdir,
+                moe_weights=moe_weights,
+            )
+            config_path = Path(checkpoint_dir) / "config.json"
+            config = json.loads(config_path.read_text())
+            config["num_hidden_layers"] = 5
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True))
+
+            result = self.inspect_module.inspect_deepseek_checkpoint(checkpoint_dir)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("num_hidden_layers_mismatch", result["blockers"])
+        self.assertEqual(result["observed_num_hidden_layers"], 4)
+
+    def test_inspect_checkpoint_reports_moe_expert_count_mismatch(self):
+        model, projection_weights, mlp_weights, moe_weights = self._make_model_and_weights(
+            query_mode="direct",
+            mlp_mode="moe",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                output_dir=tmpdir,
+                moe_weights=moe_weights,
+            )
+            config_path = Path(checkpoint_dir) / "config.json"
+            config = json.loads(config_path.read_text())
+            config["n_routed_experts"] = 3
+            config_path.write_text(json.dumps(config, indent=2, sort_keys=True))
+
+            result = self.inspect_module.inspect_deepseek_checkpoint(checkpoint_dir)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("n_routed_experts_mismatch", result["blockers"])
+        self.assertEqual(result["observed_n_routed_experts"], 4)
 
 
 if __name__ == "__main__":
