@@ -380,6 +380,9 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(spec.num_layers, 12)
         self.assertEqual(spec.num_kv_heads, 4)
         self.assertEqual(spec.head_size, 128)
+        self.assertEqual(len(spec.cache_components), 2)
+        self.assertEqual(spec.cache_components[0].name, "k")
+        self.assertEqual(spec.cache_components[1].name, "v")
         self.assertIsNone(spec.mla_kv_lora_rank)
         self.assertIsNone(spec.mla_qk_rope_head_dim)
 
@@ -414,6 +417,10 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
                 "num_layers": 12,
                 "num_kv_heads": 4,
                 "head_size": 128,
+                "cache_components": [
+                    {"name": "k", "token_dim": 4 * 128},
+                    {"name": "v", "token_dim": 4 * 128},
+                ],
                 "mla_kv_lora_rank": None,
                 "mla_qk_rope_head_dim": None,
             },
@@ -645,6 +652,9 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(spec.num_layers, 20)
         self.assertEqual(spec.num_kv_heads, 32)
         self.assertEqual(spec.head_size, 40)
+        self.assertEqual(len(spec.cache_components), 2)
+        self.assertEqual(spec.cache_components[0].name, "kv_latent")
+        self.assertEqual(spec.cache_components[1].name, "k_rope")
         self.assertEqual(spec.mla_kv_lora_rank, 512)
         self.assertEqual(spec.mla_qk_rope_head_dim, 64)
 
@@ -688,6 +698,10 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
                 "num_layers": 20,
                 "num_kv_heads": 32,
                 "head_size": 40,
+                "cache_components": [
+                    {"name": "kv_latent", "token_dim": 512},
+                    {"name": "k_rope", "token_dim": 64},
+                ],
                 "mla_kv_lora_rank": 512,
                 "mla_qk_rope_head_dim": 64,
             },

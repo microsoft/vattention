@@ -58,6 +58,7 @@ class VAttentionCacheSpec:
     num_layers: int
     num_kv_heads: int
     head_size: int
+    cache_components: Tuple[CacheComponentSpec, ...]
     mla_kv_lora_rank: Optional[int]
     mla_qk_rope_head_dim: Optional[int]
 
@@ -74,6 +75,10 @@ class VAttentionCacheSpec:
             "num_layers": self.num_layers,
             "num_kv_heads": self.num_kv_heads,
             "head_size": self.head_size,
+            "cache_components": [
+                {"name": component.name, "token_dim": component.token_dim}
+                for component in self.cache_components
+            ],
             "mla_kv_lora_rank": self.mla_kv_lora_rank,
             "mla_qk_rope_head_dim": self.mla_qk_rope_head_dim,
         }
@@ -420,6 +425,7 @@ class ModelConfig:
         dtype_size = torch.tensor([], dtype=self.dtype).element_size()
         is_mla = self.get_cache_architecture() == CacheArchitecture.MLA
         mla_spec = self.get_mla_attention_spec() if is_mla else None
+        cache_components = self.get_cache_component_specs(parallel_config)
         return VAttentionCacheSpec(
             architecture=layout.architecture,
             megacache=layout.megacache,
@@ -432,6 +438,7 @@ class ModelConfig:
             num_layers=self.get_num_layers(parallel_config),
             num_kv_heads=self.get_num_kv_heads(parallel_config),
             head_size=self.get_head_size(),
+            cache_components=cache_components,
             mla_kv_lora_rank=mla_spec.kv_lora_rank if is_mla else None,
             mla_qk_rope_head_dim=mla_spec.qk_rope_head_dim if is_mla else None,
         )
