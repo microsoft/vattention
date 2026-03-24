@@ -164,6 +164,12 @@ class BaseWorker:
     def get_model_parallel_ranks(self) -> Tuple[int, int]:
         return self.tensor_model_parallel_rank, self.pipeline_model_parallel_rank
 
+    @synchronized
+    def get_cache_usage_stats(self):
+        if self.cache_engine is None or not hasattr(self.cache_engine, "get_cache_usage_stats"):
+            return None
+        return self.cache_engine.get_cache_usage_stats()
+
     def on_step_completed(
         self, scheduler_outputs: SchedulerOutputs, sampler_outputs: SamplerOutputs
     ) -> None:

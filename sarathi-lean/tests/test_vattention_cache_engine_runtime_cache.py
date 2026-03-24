@@ -133,6 +133,7 @@ def _load_cache_engine_module():
 
 cache_engine_module, CacheArchitecture, DEEPSEEK_STUB = _load_cache_engine_module()
 format_vattention_gpu_cache = cache_engine_module.format_vattention_gpu_cache
+summarize_vattention_cache_usage = cache_engine_module.summarize_vattention_cache_usage
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -211,6 +212,45 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(len(caches), 3)
         self.assertEqual(tuple(caches[0][0].shape), (2, 4, 5))
         self.assertEqual(tuple(caches[0][1].shape), (2, 4, 5))
+
+    def test_mla_cache_usage_summary_counts_only_resident_component_bytes(self):
+        cache_spec = types.SimpleNamespace(
+            architecture=CacheArchitecture.MLA,
+            cached_token_bytes_local=32,
+            page_buffer_token_bytes=16,
+            cache_components=(
+                types.SimpleNamespace(name="kv_latent"),
+                types.SimpleNamespace(name="k_rope"),
+            ),
+        )
+
+        usage = summarize_vattention_cache_usage(cache_spec, [3, 0, 2])
+
+        self.assertEqual(usage["architecture"], "mla")
+        self.assertEqual(usage["persistent_tokens"], 5)
+        self.assertEqual(usage["persistent_bytes_per_token"], 32)
+        self.assertEqual(usage["persistent_bytes"], 160)
+        self.assertEqual(usage["page_buffer_token_bytes"], 16)
+        self.assertEqual(usage["cache_components"], ("kv_latent", "k_rope"))
+        self.assertTrue(usage["uses_component_resident_cache"])
+
+    def test_dense_cache_usage_summary_remains_non_mla(self):
+        cache_spec = types.SimpleNamespace(
+            architecture=CacheArchitecture.DENSE_KV,
+            cached_token_bytes_local=64,
+            page_buffer_token_bytes=32,
+            cache_components=(
+                types.SimpleNamespace(name="k"),
+                types.SimpleNamespace(name="v"),
+            ),
+        )
+
+        usage = summarize_vattention_cache_usage(cache_spec, [1, 2])
+
+        self.assertEqual(usage["architecture"], "dense_kv")
+        self.assertEqual(usage["persistent_tokens"], 3)
+        self.assertEqual(usage["persistent_bytes"], 192)
+        self.assertFalse(usage["uses_component_resident_cache"])
 
 
 if __name__ == "__main__":

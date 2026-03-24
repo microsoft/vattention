@@ -18,6 +18,28 @@ logger = init_logger(__name__)
 KVCache = Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
+def summarize_vattention_cache_usage(cache_spec, seq_lens) -> dict:
+    persistent_tokens = sum(max(int(seq_len), 0) for seq_len in seq_lens)
+    architecture = (
+        cache_spec.architecture.value
+        if hasattr(cache_spec.architecture, "value")
+        else str(cache_spec.architecture)
+    )
+    cache_components = tuple(
+        component.name
+        for component in getattr(cache_spec, "cache_components", ())
+    )
+    return {
+        "architecture": architecture,
+        "persistent_tokens": persistent_tokens,
+        "persistent_bytes_per_token": cache_spec.cached_token_bytes_local,
+        "persistent_bytes": persistent_tokens * cache_spec.cached_token_bytes_local,
+        "page_buffer_token_bytes": cache_spec.page_buffer_token_bytes,
+        "cache_components": cache_components,
+        "uses_component_resident_cache": cache_spec.architecture == CacheArchitecture.MLA,
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (
@@ -219,6 +241,9 @@ class vATTNCacheEngine(BaseCacheEngine):
 
     def get_attention_context_lens(self):
         return self.attn_context_lens
+
+    def get_cache_usage_stats(self) -> dict:
+        return summarize_vattention_cache_usage(self.cache_spec, self.curr_seq_lens)
 
     @staticmethod
     def get_cache_block_size(

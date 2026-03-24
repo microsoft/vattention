@@ -272,10 +272,11 @@ class _FakeSeqManager:
 
 
 class _FakeCacheEngine:
-    def __init__(self):
+    def __init__(self, cache_usage_stats=None):
         self.steps = []
         self.completions = []
         self.free_blocks = 9
+        self._cache_usage_stats = cache_usage_stats
 
     def num_free_blocks(self):
         return self.free_blocks
@@ -288,6 +289,9 @@ class _FakeCacheEngine:
 
     def preempt_requests(self, preempted_seq):
         pass
+
+    def get_cache_usage_stats(self):
+        return self._cache_usage_stats
 
 
 class _FakeMetricsStore:
@@ -412,10 +416,10 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         wrapper.batch_index_gen = torch.tensor([], dtype=torch.int32)
         return wrapper
 
-    def _make_worker(self, model_runner, gpu_cache):
+    def _make_worker(self, model_runner, gpu_cache, cache_usage_stats=None):
         worker = self.BaseWorker.__new__(self.BaseWorker)
         worker.seq_manager = _FakeSeqManager(["seq-md"])
-        worker.cache_engine = _FakeCacheEngine()
+        worker.cache_engine = _FakeCacheEngine(cache_usage_stats=cache_usage_stats)
         worker.gpu_cache = gpu_cache
         worker.model_runner = model_runner
         worker.metrics_store = _FakeMetricsStore()
@@ -464,7 +468,26 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             hidden_states=self._make_hidden_states(),
             attention_wrapper=self._make_wrapper(),
         )
-        worker = self._make_worker(model_runner=model_runner, gpu_cache=gpu_cache)
+        cache_usage_stats = self.cache_engine_module.summarize_vattention_cache_usage(
+            types.SimpleNamespace(
+                architecture=self.cache_engine_module.CacheArchitecture.MLA,
+                cached_token_bytes_local=model.num_layers
+                * (dims.kv_lora_rank + dims.qk_rope_head_dim)
+                * torch.tensor([], dtype=torch.float32).element_size(),
+                page_buffer_token_bytes=(dims.kv_lora_rank + dims.qk_rope_head_dim)
+                * torch.tensor([], dtype=torch.float32).element_size(),
+                cache_components=(
+                    types.SimpleNamespace(name="kv_latent"),
+                    types.SimpleNamespace(name="k_rope"),
+                ),
+            ),
+            [1],
+        )
+        worker = self._make_worker(
+            model_runner=model_runner,
+            gpu_cache=gpu_cache,
+            cache_usage_stats=cache_usage_stats,
+        )
 
         output, layer_caches = worker.execute_model_with_attention_wrapper(
             scheduler_outputs="scheduler",
@@ -484,6 +507,18 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
             projection_weights,
         )
         self.assertEqual(model_runner.calls[0]["gpu_cache"], gpu_cache)
+        self.assertEqual(
+            worker.get_cache_usage_stats(),
+            {
+                "architecture": "mla",
+                "persistent_tokens": 1,
+                "persistent_bytes_per_token": 32,
+                "persistent_bytes": 32,
+                "page_buffer_token_bytes": 16,
+                "cache_components": ("kv_latent", "k_rope"),
+                "uses_component_resident_cache": True,
+            },
+        )
         self.assertEqual(len(self.flash_calls), model.num_layers)
         self.assertTrue(torch.any(gpu_cache[0].kv_latent[0, 0] != 0))
 
