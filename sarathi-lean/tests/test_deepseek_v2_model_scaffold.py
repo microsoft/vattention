@@ -713,6 +713,158 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             )
         )
 
+    def test_causal_lm_loader_accepts_standard_loader_signature_for_local_path(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for layer_idx in range(model.model.num_layers):
+            prefix = f"layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + layer_idx
+            state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = torch.cat(
+                [
+                    projection_weights.kv_latent_proj + layer_idx,
+                    projection_weights.k_rope_proj + layer_idx,
+                ],
+                dim=1,
+            )
+            state_dict[f"{prefix}.kv_b_proj.weight"] = projection_weights.kv_up_proj + layer_idx
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + layer_idx
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "weights.pt"
+            torch.save(state_dict, checkpoint_path)
+            model.load_weights(tmpdir, None, "auto", None)
+
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].q_proj,
+                projection_weights.q_proj,
+            )
+        )
+
+    def test_causal_lm_loader_accepts_hf_oriented_linear_weights(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_moe_config()
+        config.num_experts_per_tok = 1
+        config.norm_topk_prob = True
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        dense_mlp = make_mlp_weights(
+            gate_proj=torch.ones(config.hidden_size, 4),
+            up_proj=torch.ones(config.hidden_size, 4) * 2.0,
+            down_proj=torch.ones(4, config.hidden_size) * 3.0,
+            hidden_size=config.hidden_size,
+        )
+        state_dict = {
+            "model.embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "model.norm.weight": torch.ones(config.hidden_size),
+        }
+        for layer_idx in range(model.model.num_layers):
+            attn_prefix = f"model.layers.{layer_idx}.self_attn"
+            state_dict[f"{attn_prefix}.q_proj.weight"] = (
+                projection_weights.q_proj + layer_idx
+            ).t().contiguous()
+            state_dict[f"{attn_prefix}.kv_a_proj_with_mqa.weight"] = torch.cat(
+                [
+                    projection_weights.kv_latent_proj + layer_idx,
+                    projection_weights.k_rope_proj + layer_idx,
+                ],
+                dim=1,
+            ).t().contiguous()
+            state_dict[f"{attn_prefix}.kv_b_proj.weight"] = (
+                projection_weights.kv_up_proj + layer_idx
+            ).t().contiguous()
+            state_dict[f"{attn_prefix}.o_proj.weight"] = (
+                projection_weights.o_proj + layer_idx
+            ).t().contiguous()
+            mlp_prefix = f"model.layers.{layer_idx}.mlp"
+            if layer_idx < config.first_k_dense_replace:
+                state_dict[f"{mlp_prefix}.gate_proj.weight"] = dense_mlp.gate_proj.t().contiguous()
+                state_dict[f"{mlp_prefix}.up_proj.weight"] = dense_mlp.up_proj.t().contiguous()
+                state_dict[f"{mlp_prefix}.down_proj.weight"] = dense_mlp.down_proj.t().contiguous()
+            else:
+                state_dict[f"{mlp_prefix}.gate.weight"] = torch.zeros(
+                    config.n_routed_experts,
+                    config.hidden_size,
+                )
+                state_dict[f"{mlp_prefix}.shared_experts.gate_proj.weight"] = torch.ones(
+                    4,
+                    config.hidden_size,
+                )
+                state_dict[f"{mlp_prefix}.shared_experts.up_proj.weight"] = torch.ones(
+                    4,
+                    config.hidden_size,
+                ) * 2.0
+                state_dict[f"{mlp_prefix}.shared_experts.down_proj.weight"] = torch.ones(
+                    config.hidden_size,
+                    4,
+                ) * 3.0
+                for expert_idx in range(config.n_routed_experts):
+                    state_dict[f"{mlp_prefix}.experts.{expert_idx}.gate_proj.weight"] = torch.full(
+                        (4, config.hidden_size),
+                        1.0 + expert_idx,
+                    )
+                    state_dict[f"{mlp_prefix}.experts.{expert_idx}.up_proj.weight"] = torch.full(
+                        (4, config.hidden_size),
+                        2.0 + expert_idx,
+                    )
+                    state_dict[f"{mlp_prefix}.experts.{expert_idx}.down_proj.weight"] = torch.full(
+                        (config.hidden_size, 4),
+                        3.0 + expert_idx,
+                    )
+
+        model.load_weights(state_dict)
+
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].kv_up_proj,
+                projection_weights.kv_up_proj,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].o_proj,
+                projection_weights.o_proj,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_mlp_weights[0].gate_proj,
+                dense_mlp.gate_proj,
+            )
+        )
+        self.assertIsNotNone(model.model.layer_moe_weights[1])
+        self.assertEqual(
+            model.model.layer_moe_weights[1].experts[0].gate_proj.shape,
+            (config.hidden_size, 4),
+        )
+
     def test_causal_lm_loader_rejects_incomplete_moe_layer_weights(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (
             set_pipeline_model_parallel_rank,

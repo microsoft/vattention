@@ -1565,6 +1565,15 @@ class DeepseekV2ForCausalLM(nn.Module):
                 state_dict,
                 *(f"{prefix}.kv_a_proj_with_mqa.weight" for prefix in projection_prefixes),
             )
+            kv_a_proj_with_mqa = self._coerce_linear_weight_layout(
+                kv_a_proj_with_mqa,
+                expected_shape=(
+                    hidden_size,
+                    layer.self_attn.mla_dims.kv_lora_rank
+                    + layer.self_attn.mla_dims.num_heads
+                    * layer.self_attn.mla_dims.qk_rope_head_dim,
+                ),
+            )
             if (
                 projection_tensors["kv_latent_proj"] is None
                 and projection_tensors["k_rope_proj"] is None
@@ -1595,6 +1604,51 @@ class DeepseekV2ForCausalLM(nn.Module):
             )
             if projection_tensors["kv_up_proj"] is None and kv_b_proj is not None:
                 projection_tensors["kv_up_proj"] = kv_b_proj
+            projection_tensors["q_proj"] = self._coerce_linear_weight_layout(
+                projection_tensors["q_proj"],
+                expected_shape=(
+                    hidden_size,
+                    layer.self_attn.mla_dims.q_proj_output_dim_local,
+                ),
+            )
+            if layer.self_attn.mla_dims.q_lora_rank is not None:
+                projection_tensors["q_a_proj"] = self._coerce_linear_weight_layout(
+                    projection_tensors["q_a_proj"],
+                    expected_shape=(hidden_size, layer.self_attn.mla_dims.q_lora_rank),
+                )
+                projection_tensors["q_b_proj"] = self._coerce_linear_weight_layout(
+                    projection_tensors["q_b_proj"],
+                    expected_shape=(
+                        layer.self_attn.mla_dims.q_lora_rank,
+                        layer.self_attn.mla_dims.q_proj_output_dim_local,
+                    ),
+                )
+            projection_tensors["kv_latent_proj"] = self._coerce_linear_weight_layout(
+                projection_tensors["kv_latent_proj"],
+                expected_shape=(hidden_size, layer.self_attn.mla_dims.kv_lora_rank),
+            )
+            projection_tensors["k_rope_proj"] = self._coerce_linear_weight_layout(
+                projection_tensors["k_rope_proj"],
+                expected_shape=(
+                    hidden_size,
+                    layer.self_attn.mla_dims.num_heads
+                    * layer.self_attn.mla_dims.qk_rope_head_dim,
+                ),
+            )
+            projection_tensors["kv_up_proj"] = self._coerce_linear_weight_layout(
+                projection_tensors["kv_up_proj"],
+                expected_shape=(
+                    layer.self_attn.mla_dims.kv_lora_rank,
+                    layer.self_attn.mla_dims.kv_up_proj_output_dim_local,
+                ),
+            )
+            projection_tensors["o_proj"] = self._coerce_linear_weight_layout(
+                projection_tensors["o_proj"],
+                expected_shape=(
+                    layer.self_attn.mla_dims.o_proj_input_dim_local,
+                    hidden_size,
+                ),
+            )
             query_uses_q_lora = projection_tensors["q_proj"] is None and any(
                 projection_tensors[name] is not None
                 for name in ("q_a_proj", "q_a_layernorm_weight", "q_b_proj")
@@ -1663,6 +1717,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     *(f"{prefix}.down_proj.weight" for prefix in mlp_prefixes),
                 ),
             }
+            mlp_tensors = self._normalize_mlp_tensor_layouts(
+                mlp_tensors,
+                hidden_size=hidden_size,
+            )
             present_mlp_keys = [
                 name for name, tensor in mlp_tensors.items() if tensor is not None
             ]
@@ -1705,6 +1763,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     reference=mlp_reference,
                 ),
             }
+            shared_expert_tensors = self._normalize_mlp_tensor_layouts(
+                shared_expert_tensors,
+                hidden_size=hidden_size,
+            )
             routed_experts = []
             for expert_idx in range(n_routed_experts):
                 expert_tensors = {
@@ -1739,6 +1801,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                         reference=mlp_reference,
                     ),
                 }
+                expert_tensors = self._normalize_mlp_tensor_layouts(
+                    expert_tensors,
+                    hidden_size=hidden_size,
+                )
                 try:
                     expert_weights = self._make_optional_mlp_weights(
                         expert_tensors,
@@ -1844,15 +1910,77 @@ class DeepseekV2ForCausalLM(nn.Module):
     def _load_scaffold_state_dict_from_path(
         cls,
         model_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
     ) -> Mapping[str, torch.Tensor]:
         if os.path.isdir(model_path):
             state_dict = {}
-            for name, tensor in hf_model_weights_iterator(model_path, load_format="auto"):
+            for name, tensor in hf_model_weights_iterator(
+                model_path,
+                cache_dir,
+                load_format,
+                revision,
+            ):
                 state_dict[name] = convert_pyslice_to_tensor(tensor)
             return state_dict
         if os.path.isfile(model_path):
             return cls._load_state_dict_file(model_path)
-        raise FileNotFoundError(f"Checkpoint path does not exist: {model_path}")
+        state_dict = {}
+        for name, tensor in hf_model_weights_iterator(
+            model_path,
+            cache_dir,
+            load_format,
+            revision,
+        ):
+            state_dict[name] = convert_pyslice_to_tensor(tensor)
+        return state_dict
+
+    @staticmethod
+    def _coerce_linear_weight_layout(
+        tensor: Optional[torch.Tensor],
+        *,
+        expected_shape: Tuple[int, ...],
+    ) -> Optional[torch.Tensor]:
+        if tensor is None or tensor.ndim != 2:
+            return tensor
+        if tuple(tensor.shape) == expected_shape:
+            return tensor
+        if tuple(tensor.t().shape) == expected_shape:
+            return tensor.t().contiguous()
+        return tensor
+
+    @classmethod
+    def _normalize_mlp_tensor_layouts(
+        cls,
+        tensors: Mapping[str, Optional[torch.Tensor]],
+        *,
+        hidden_size: int,
+    ) -> Mapping[str, Optional[torch.Tensor]]:
+        normalized = dict(tensors)
+        for name in ("gate_proj", "up_proj"):
+            tensor = normalized.get(name)
+            if tensor is None or tensor.ndim != 2:
+                continue
+            intermediate_size = (
+                tensor.shape[1] if tensor.shape[0] == hidden_size else tensor.shape[0]
+            )
+            normalized[name] = cls._coerce_linear_weight_layout(
+                tensor,
+                expected_shape=(hidden_size, intermediate_size),
+            )
+        down_proj = normalized.get("down_proj")
+        if down_proj is not None and down_proj.ndim == 2:
+            intermediate_size = (
+                down_proj.shape[0]
+                if down_proj.shape[1] == hidden_size
+                else down_proj.shape[1]
+            )
+            normalized["down_proj"] = cls._coerce_linear_weight_layout(
+                down_proj,
+                expected_shape=(intermediate_size, hidden_size),
+            )
+        return normalized
 
     def forward(
         self,
@@ -1896,12 +2024,20 @@ class DeepseekV2ForCausalLM(nn.Module):
             return
         if args and isinstance(args[0], (str, os.PathLike)):
             strict = kwargs.pop("strict", True)
+            cache_dir = args[1] if len(args) > 1 else None
+            load_format = args[2] if len(args) > 2 else "auto"
+            revision = args[3] if len(args) > 3 else None
             if kwargs:
                 raise ValueError(
                     "Unsupported kwargs for scaffold checkpoint loading: "
                     + ", ".join(sorted(kwargs.keys()))
                 )
-            state_dict = self._load_scaffold_state_dict_from_path(os.fspath(args[0]))
+            state_dict = self._load_scaffold_state_dict_from_path(
+                os.fspath(args[0]),
+                cache_dir=cache_dir,
+                load_format=load_format,
+                revision=revision,
+            )
             self.load_scaffold_state_dict(state_dict, strict=strict)
             return
         raise NotImplementedError(
