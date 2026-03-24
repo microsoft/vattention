@@ -324,25 +324,92 @@ Why this phase is central:
 
 This phase sharpens the old V3 “first working inference without MoE” milestone.
 
+Phase 7 now needs explicit sub-milestones.
+
+The implementation work showed that “first runnable non-MoE path” was still too coarse. In practice, this breaks into:
+
+#### Phase 7a: finish the bounded non-MoE scaffold execution path
+
 21. add the minimal remaining non-MoE model path needed for bring-up
 
-- if necessary:
-  - temporary feedforward fallback
-  - minimal output path
-  - weight-loading subset sufficient for early execution
+- attention path
+- feedforward path
+- token embedding path
+- logits path
+- norm path
 
-22. reach first runnable contiguous DeepSeek path without MoE
+#### Phase 7b: install scaffold weights without per-call tuple plumbing
+
+22. add model-owned scaffold weight installation
+
+- installed MLA projection weights
+- installed MLP weights
+- installed token/logit weights where needed
+
+23. support bounded structured scaffold loading
+
+- allow a structured tensor mapping to populate the scaffold path
+- keep this explicit and intentionally narrower than real pretrained loading
+
+#### Phase 7c: exercise the loaded scaffold through runtime seams
+
+24. run the loaded scaffold through the runner/worker surface
+
+- runner execution without per-call projection tuples
+- worker execution without per-call projection tuples
+- bounded integration tests for loaded scaffold execution
+
+#### Phase 7d: make scaffold loading partition-aware
+
+25. load stage-local model slices from pipeline-aware/global layer state
+
+- first-stage embedding handling
+- last-stage logits handling
+- correct global-to-local layer mapping for pipeline partitions
+
+26. validate partition-aware loaded scaffold execution at runner/worker seams
+
+- single-stage loaded scaffold execution
+- partitioned loaded scaffold execution
+
+#### Phase 7e: converge the scaffold toward a more realistic parameterized surface
+
+27. replace the most synthetic execution placeholders with lightweight parameterized modules
+
+- norm modules instead of identity placeholders
+- loader-populated weights for those modules
+- reduced reliance on custom one-off test contracts
+
+28. continue tightening scaffold loading toward realistic model organization
+
+- fewer scaffold-specific naming assumptions
+- closer approximation of stage-local parameter loading
+- keep the path compatible with runner/worker execution
+
+#### Phase 7f: reach first runnable non-MoE DeepSeek path
+
+29. reach first runnable contiguous DeepSeek path without MoE
 
 - run prompt prefill
 - run at least one decode step
 
-23. reach first runnable paged DeepSeek path without MoE
+30. reach first runnable paged DeepSeek path without MoE
 
 - run the same basic execution flow using the paged MLA wrapper path
 
 Why this phase is separate:
 
 - it distinguishes “paged MLA attention works” from “a runnable model path exists”
+- it also distinguishes:
+  - scaffold execution
+  - scaffold loading
+  - runtime-seam integration
+  - actual runnable non-MoE bring-up
+
+Status:
+
+- 7a through 7e are now underway, with meaningful partial coverage already in the codebase
+- 7f remains incomplete
 
 ### Phase 8: Add full DeepSeek-V2-Lite support
 
