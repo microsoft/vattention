@@ -24,6 +24,9 @@ def summarize_vattention_cache_usage(
     *,
     free_blocks=None,
     seq_to_batch_idx=None,
+    scheduled_batch_indices=None,
+    scheduled_prompt_batch_indices=None,
+    scheduled_decode_batch_indices=None,
 ) -> dict:
     persistent_tokens = sum(max(int(seq_len), 0) for seq_len in seq_lens)
     active_batch_indices = tuple(
@@ -54,6 +57,9 @@ def summarize_vattention_cache_usage(
             if seq_to_batch_idx is not None
             else None
         ),
+        "scheduled_batch_indices": scheduled_batch_indices,
+        "scheduled_prompt_batch_indices": scheduled_prompt_batch_indices,
+        "scheduled_decode_batch_indices": scheduled_decode_batch_indices,
     }
 
 
@@ -126,6 +132,9 @@ class vATTNCacheEngine(BaseCacheEngine):
         self.max_model_seq_len = model_config.max_model_len
         self.curr_seq_lens = [0 for i in range(self.max_batch_size)]
         self.seq_to_batch_idx = {}
+        self.curr_batch_idx = None
+        self.prompt_batch_indices = ()
+        self.decode_batch_indices = ()
         self.page_size = cache_config.page_size
         self.vattn_async = True if mem_alloc_backend == "async" else False
         self.vattn_mega_cache = True if "megacache" in model_config.attention_backend.lower() else False
@@ -209,6 +218,8 @@ class vATTNCacheEngine(BaseCacheEngine):
         else:
             vattention.step(self.curr_seq_lens, True)
 
+        self.prompt_batch_indices = tuple(b_idx_prompt)
+        self.decode_batch_indices = tuple(b_idx_gen)
         self.curr_batch_idx = torch.tensor(b_idx_prompt+b_idx_gen, dtype=torch.int32, device=self.device)
         get_attention_wrapper().set_batch_idx(self.curr_batch_idx, torch.tensor(b_idx_gen, dtype=torch.int32, device=self.device))
 
@@ -265,6 +276,13 @@ class vATTNCacheEngine(BaseCacheEngine):
             self.curr_seq_lens,
             free_blocks=self.num_free_blocks(),
             seq_to_batch_idx=self.seq_to_batch_idx,
+            scheduled_batch_indices=(
+                None
+                if getattr(self, "curr_batch_idx", None) is None
+                else tuple(self.curr_batch_idx.tolist())
+            ),
+            scheduled_prompt_batch_indices=getattr(self, "prompt_batch_indices", None),
+            scheduled_decode_batch_indices=getattr(self, "decode_batch_indices", None),
         )
 
     @staticmethod

@@ -521,6 +521,9 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
                 "active_request_count": 1,
                 "free_blocks": None,
                 "seq_to_batch_idx": None,
+                "scheduled_batch_indices": None,
+                "scheduled_prompt_batch_indices": None,
+                "scheduled_decode_batch_indices": None,
             },
         )
         self.assertEqual(len(self.flash_calls), model.num_layers)

@@ -242,6 +242,9 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(usage["active_request_count"], 2)
         self.assertEqual(usage["free_blocks"], 7)
         self.assertEqual(usage["seq_to_batch_idx"], {10: 0, 11: 2})
+        self.assertIsNone(usage["scheduled_batch_indices"])
+        self.assertIsNone(usage["scheduled_prompt_batch_indices"])
+        self.assertIsNone(usage["scheduled_decode_batch_indices"])
 
     def test_dense_cache_usage_summary_remains_non_mla(self):
         cache_spec = types.SimpleNamespace(
@@ -264,6 +267,9 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(usage["active_request_count"], 2)
         self.assertIsNone(usage["free_blocks"])
         self.assertIsNone(usage["seq_to_batch_idx"])
+        self.assertIsNone(usage["scheduled_batch_indices"])
+        self.assertIsNone(usage["scheduled_prompt_batch_indices"])
+        self.assertIsNone(usage["scheduled_decode_batch_indices"])
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(
@@ -289,6 +295,7 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(usage["active_batch_indices"], (0, 2))
         self.assertEqual(usage["active_request_count"], 2)
         self.assertEqual(usage["seq_to_batch_idx"], {20: 0, 21: 2})
+        self.assertIsNone(usage["scheduled_batch_indices"])
 
     def test_free_request_updates_runtime_state_for_accounting(self):
         freed_batch_indices = []
@@ -305,6 +312,103 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
         self.assertEqual(freed_batch_indices, [0])
         self.assertEqual(engine.curr_seq_lens, [0, 2, 0])
         self.assertEqual(engine.seq_to_batch_idx, {200: 1})
+
+    def test_step_updates_scheduled_batch_state_and_runtime_accounting(self):
+        class _FakeWrapper:
+            def __init__(self):
+                self.calls = []
+
+            def set_batch_idx(self, batch_idx, batch_idx_gen):
+                self.calls.append((batch_idx.clone(), batch_idx_gen.clone()))
+
+        class _FakePromptSeq:
+            def __init__(self, seq_id, processed_prompt_len, next_prompt_chunk_len):
+                self.seq_id = seq_id
+                self._processed_prompt_len = processed_prompt_len
+                self._next_prompt_chunk_len = next_prompt_chunk_len
+
+            def get_next_prompt_chunk_len(self, prompt_chunk_len):
+                return min(prompt_chunk_len, self._next_prompt_chunk_len)
+
+            def get_num_prompt_tokens_processed(self):
+                return self._processed_prompt_len
+
+        class _FakeDecodeSeq:
+            def __init__(self, seq_id, seq_len):
+                self.seq_id = seq_id
+                self._seq_len = seq_len
+
+            def get_len(self):
+                return self._seq_len
+
+        free_blocks_state = {"value": 6}
+        next_batch_idx_state = {"value": 0}
+        step_calls = []
+        wrapper = _FakeWrapper()
+
+        def _alloc_new_batch_idx(seq_len):
+            del seq_len
+            batch_idx = next_batch_idx_state["value"]
+            next_batch_idx_state["value"] += 1
+            return batch_idx
+
+        cache_engine_module.vattention.alloc_new_batch_idx = _alloc_new_batch_idx
+        cache_engine_module.vattention.step = lambda seq_lens, sync: step_calls.append(
+            (list(seq_lens), sync)
+        )
+        cache_engine_module.get_attention_wrapper = lambda: wrapper
+
+        engine = cache_engine_module.vATTNCacheEngine.__new__(
+            cache_engine_module.vATTNCacheEngine
+        )
+        engine.cache_spec = types.SimpleNamespace(
+            architecture=CacheArchitecture.MLA,
+            cached_token_bytes_local=32,
+            page_buffer_token_bytes=16,
+            cache_components=(
+                types.SimpleNamespace(name="kv_latent"),
+                types.SimpleNamespace(name="k_rope"),
+            ),
+        )
+        engine.curr_seq_lens = [0, 0, 0, 0]
+        engine.seq_to_batch_idx = {}
+        engine.device = torch.device("cpu")
+        engine.vattn_async = False
+        engine.num_free_blocks = lambda: free_blocks_state["value"]
+        engine.prompt_batch_indices = ()
+        engine.decode_batch_indices = ()
+        engine.curr_batch_idx = None
+
+        seq_metadata_list = [
+            types.SimpleNamespace(
+                is_prompt=True,
+                prompt_chunk_len=3,
+                seq=_FakePromptSeq(seq_id=100, processed_prompt_len=2, next_prompt_chunk_len=3),
+            ),
+            types.SimpleNamespace(
+                is_prompt=False,
+                seq=_FakeDecodeSeq(seq_id=200, seq_len=5),
+            ),
+        ]
+
+        engine.step(seq_metadata_list)
+
+        usage = engine.get_cache_usage_stats()
+
+        self.assertEqual(step_calls, [([5, 5, 0, 0], True)])
+        self.assertEqual(tuple(engine.curr_batch_idx.tolist()), (0, 1))
+        self.assertEqual(engine.prompt_batch_indices, (0,))
+        self.assertEqual(engine.decode_batch_indices, (1,))
+        self.assertEqual(wrapper.calls[0][0].tolist(), [0, 1])
+        self.assertEqual(wrapper.calls[0][1].tolist(), [1])
+        self.assertEqual(usage["persistent_tokens"], 10)
+        self.assertEqual(usage["persistent_bytes"], 320)
+        self.assertEqual(usage["active_batch_indices"], (0, 1))
+        self.assertEqual(usage["scheduled_batch_indices"], (0, 1))
+        self.assertEqual(usage["scheduled_prompt_batch_indices"], (0,))
+        self.assertEqual(usage["scheduled_decode_batch_indices"], (1,))
+        self.assertEqual(usage["seq_to_batch_idx"], {100: 0, 200: 1})
+        self.assertEqual(usage["free_blocks"], 6)
 
 
 if __name__ == "__main__":
