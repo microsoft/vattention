@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+from typing import Callable, Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -1091,6 +1091,112 @@ class DeepseekV2ForCausalLM(nn.Module):
             mlp_weights=mlp_weights,
         )
 
+    def load_scaffold_state_dict(
+        self,
+        state_dict: Mapping[str, torch.Tensor],
+        *,
+        strict: bool = True,
+    ) -> None:
+        local_projection_weights = []
+        local_mlp_weights = []
+        hidden_size = self.config.hidden_size
+
+        if self.model.embed_tokens is not None:
+            embed_key = "model.embed_tokens.weight"
+            embed_weight = state_dict.get(embed_key)
+            if embed_weight is None:
+                if strict:
+                    raise KeyError(f"Missing scaffold weight: {embed_key}")
+            else:
+                expected_shape = (
+                    self.config.vocab_size,
+                    hidden_size,
+                )
+                if tuple(embed_weight.shape) != expected_shape:
+                    raise ValueError(
+                        "model.embed_tokens.weight shape does not match scaffold embedding size"
+                    )
+                self.model.embed_tokens.weight.data.copy_(embed_weight)
+
+        if self.lm_head is not None:
+            lm_head_key = "lm_head.weight"
+            lm_head_weight = state_dict.get(lm_head_key)
+            if lm_head_weight is None:
+                if strict:
+                    raise KeyError(f"Missing scaffold weight: {lm_head_key}")
+            else:
+                expected_shape = (
+                    self.config.vocab_size,
+                    hidden_size,
+                )
+                if tuple(lm_head_weight.shape) != expected_shape:
+                    raise ValueError(
+                        "lm_head.weight shape does not match scaffold vocabulary projection size"
+                    )
+                self.lm_head.weight.data.copy_(lm_head_weight)
+
+        for layer_idx, layer in enumerate(self.model.layers):
+            prefix = f"model.layers.{layer_idx}"
+            projection_prefix = f"{prefix}.self_attn"
+            projection_keys = {
+                "q_proj": f"{projection_prefix}.q_proj.weight",
+                "kv_latent_proj": f"{projection_prefix}.kv_latent_proj.weight",
+                "k_rope_proj": f"{projection_prefix}.k_rope_proj.weight",
+                "kv_up_proj": f"{projection_prefix}.kv_up_proj.weight",
+                "o_proj": f"{projection_prefix}.o_proj.weight",
+            }
+            missing_projection_keys = [
+                name for name, key in projection_keys.items() if state_dict.get(key) is None
+            ]
+            if missing_projection_keys:
+                raise KeyError(
+                    "Missing scaffold weights for layer "
+                    f"{layer_idx}: {', '.join(missing_projection_keys)}"
+                )
+            local_projection_weights.append(
+                make_projection_weights(
+                    q_proj=state_dict[projection_keys["q_proj"]],
+                    kv_latent_proj=state_dict[projection_keys["kv_latent_proj"]],
+                    k_rope_proj=state_dict[projection_keys["k_rope_proj"]],
+                    kv_up_proj=state_dict[projection_keys["kv_up_proj"]],
+                    o_proj=state_dict[projection_keys["o_proj"]],
+                    mla_dims=layer.self_attn.mla_dims,
+                )
+            )
+
+            mlp_prefix = f"{prefix}.mlp"
+            mlp_keys = {
+                "gate_proj": f"{mlp_prefix}.gate_proj.weight",
+                "up_proj": f"{mlp_prefix}.up_proj.weight",
+                "down_proj": f"{mlp_prefix}.down_proj.weight",
+            }
+            present_mlp_keys = [name for name, key in mlp_keys.items() if state_dict.get(key) is not None]
+            if present_mlp_keys:
+                if len(present_mlp_keys) != len(mlp_keys):
+                    if strict:
+                        missing = sorted(set(mlp_keys) - set(present_mlp_keys))
+                        raise KeyError(
+                            "Missing scaffold MLP weights for layer "
+                            f"{layer_idx}: {', '.join(missing)}"
+                        )
+                    local_mlp_weights.append(None)
+                else:
+                    local_mlp_weights.append(
+                        make_mlp_weights(
+                            gate_proj=state_dict[mlp_keys["gate_proj"]],
+                            up_proj=state_dict[mlp_keys["up_proj"]],
+                            down_proj=state_dict[mlp_keys["down_proj"]],
+                            hidden_size=hidden_size,
+                        )
+                    )
+            else:
+                local_mlp_weights.append(None)
+
+        self.set_scaffold_weights(
+            projection_weights=tuple(local_projection_weights),
+            mlp_weights=tuple(local_mlp_weights),
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1122,6 +1228,15 @@ class DeepseekV2ForCausalLM(nn.Module):
         )
 
     def load_weights(self, *args, **kwargs):
+        if args and isinstance(args[0], Mapping):
+            strict = kwargs.pop("strict", True)
+            if kwargs:
+                raise ValueError(
+                    "Unsupported kwargs for scaffold state-dict loading: "
+                    + ", ".join(sorted(kwargs.keys()))
+                )
+            self.load_scaffold_state_dict(args[0], strict=strict)
+            return
         raise NotImplementedError(
             "DeepSeek-V2 weight loading is not implemented yet. "
             "The MLA attention/model path still needs to be added."

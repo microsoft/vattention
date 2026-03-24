@@ -186,6 +186,31 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             model(hidden_states=torch.zeros(2, config.hidden_size))
 
+    def test_causal_lm_scaffold_loader_rejects_missing_projection_weight(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        set_tensor_model_parallel_world_size(1)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(self._make_config())
+
+        with self.assertRaises(KeyError):
+            model.load_weights(
+                {
+                    "model.embed_tokens.weight": torch.zeros(
+                        model.config.vocab_size, model.config.hidden_size
+                    ),
+                    "lm_head.weight": torch.zeros(
+                        model.config.vocab_size, model.config.hidden_size
+                    ),
+                }
+            )
+
     def test_make_mlp_weights_rejects_invalid_down_projection_shape(self):
         hidden_size = 8
 
