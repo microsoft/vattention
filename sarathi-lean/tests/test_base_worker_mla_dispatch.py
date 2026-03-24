@@ -245,6 +245,25 @@ class BaseWorkerMLADispatchTests(unittest.TestCase):
 
         self.assertIsNone(worker.model_runner.calls[0]["model_kwargs"])
 
+    def test_execute_model_with_attention_wrapper_packages_mla_kwargs(self):
+        worker, _ = self._make_worker()
+
+        worker.execute_model_with_attention_wrapper(
+            scheduler_outputs="scheduler",
+            projection_weights=("proj",),
+            caches=("resident",),
+            softmax_scale=0.25,
+        )
+
+        self.assertEqual(
+            worker.model_runner.calls[0]["model_kwargs"],
+            {
+                "projection_weights": ("proj",),
+                "caches": ("resident",),
+                "softmax_scale": 0.25,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
