@@ -66,3 +66,46 @@ class BaseAttentionWrapper(ABC):
         layer_id: Optional[int] = None,
     ) -> torch.Tensor:
         pass
+
+    def forward_mla(self, wrapper_inputs) -> torch.Tensor:
+        required_attrs = (
+            "query",
+            "kv_cache",
+            "kv_up_proj_weight",
+            "past_resident_cache",
+            "new_resident_cache",
+            "softmax_scale",
+            "layer_id",
+            "mla_dims",
+        )
+        missing_attrs = [
+            attr for attr in required_attrs if not hasattr(wrapper_inputs, attr)
+        ]
+        if missing_attrs:
+            raise ValueError(
+                "wrapper_inputs is missing required MLA fields: "
+                + ", ".join(missing_attrs)
+            )
+
+        from sarathi.model_executor.models.deepseek_v2 import (
+            append_resident_cache,
+            reconstruct_dense_kv,
+        )
+
+        full_cache = append_resident_cache(
+            wrapper_inputs.past_resident_cache,
+            wrapper_inputs.new_resident_cache,
+        )
+        key, value = reconstruct_dense_kv(
+            full_cache,
+            wrapper_inputs.kv_up_proj_weight,
+            wrapper_inputs.mla_dims,
+        )
+        return self.forward(
+            wrapper_inputs.query.reshape(wrapper_inputs.query.shape[0], -1),
+            key.reshape(key.shape[0], -1),
+            value.reshape(value.shape[0], -1),
+            wrapper_inputs.kv_cache,
+            wrapper_inputs.softmax_scale,
+            wrapper_inputs.layer_id,
+        )

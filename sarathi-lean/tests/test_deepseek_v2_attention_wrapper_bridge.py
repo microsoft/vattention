@@ -54,10 +54,12 @@ DeepseekV2MLADims = deepseek_module.DeepseekV2MLADims
 DeepseekV2MLAAttention = deepseek_module.DeepseekV2MLAAttention
 DeepseekV2DecoderLayer = deepseek_module.DeepseekV2DecoderLayer
 DeepseekV2LayerCache = deepseek_module.DeepseekV2LayerCache
+DeepseekV2MLAWrapperInputs = deepseek_module.DeepseekV2MLAWrapperInputs
 DeepseekV2Model = deepseek_module.DeepseekV2Model
 DeepseekV2ForCausalLM = deepseek_module.DeepseekV2ForCausalLM
 make_layer_cache = deepseek_module.make_layer_cache
 make_projection_weights = deepseek_module.make_projection_weights
+prepare_mla_wrapper_inputs = deepseek_module.prepare_mla_wrapper_inputs
 
 
 class _RecordingAttentionWrapper:
@@ -76,6 +78,29 @@ class _RecordingAttentionWrapper:
             }
         )
         return value[-query.shape[0] :].clone()
+
+
+class _RecordingMLAAttentionWrapper:
+    def __init__(self):
+        self.calls = []
+        self.dense_forward_called = False
+
+    def forward(self, *args, **kwargs):
+        self.dense_forward_called = True
+        raise AssertionError("dense fallback should not be used when forward_mla is available")
+
+    def forward_mla(self, wrapper_inputs):
+        self.calls.append(wrapper_inputs)
+        full_cache = deepseek_module.append_resident_cache(
+            wrapper_inputs.past_resident_cache,
+            wrapper_inputs.new_resident_cache,
+        )
+        _, value = deepseek_module.reconstruct_dense_kv(
+            full_cache,
+            wrapper_inputs.kv_up_proj_weight,
+            wrapper_inputs.mla_dims,
+        )
+        return value[-wrapper_inputs.query.shape[0] :].reshape(wrapper_inputs.query.shape[0], -1)
 
 
 class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
@@ -213,6 +238,56 @@ class DeepseekV2AttentionWrapperBridgeTests(unittest.TestCase):
         self.assertEqual(cache.resident_cache.num_tokens, 2)
         self.assertEqual(len(wrapper.calls), 2)
         self.assertIs(wrapper.calls[1]["kv_cache"], kv_cache)
+
+    def test_prepare_mla_wrapper_inputs_exposes_resident_cache_components(self):
+        config = self._make_config()
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        kv_cache = object()
+        hidden_states = self._make_hidden_states()[:1]
+
+        wrapper_inputs, cache = prepare_mla_wrapper_inputs(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            mla_dims=dims,
+            kv_cache=kv_cache,
+            layer_id=5,
+        )
+
+        self.assertIsInstance(wrapper_inputs, DeepseekV2MLAWrapperInputs)
+        self.assertEqual(tuple(wrapper_inputs.query.shape), (1, dims.num_heads, dims.q_head_dim))
+        self.assertEqual(tuple(wrapper_inputs.new_resident_cache.kv_latent.shape), (1, dims.kv_lora_rank))
+        self.assertEqual(
+            tuple(wrapper_inputs.new_resident_cache.k_rope.shape),
+            (1, dims.num_heads, dims.qk_rope_head_dim),
+        )
+        self.assertIsNone(wrapper_inputs.past_resident_cache)
+        self.assertIs(wrapper_inputs.kv_cache, kv_cache)
+        self.assertEqual(wrapper_inputs.layer_id, 5)
+        self.assertEqual(cache.num_tokens, 1)
+
+    def test_attention_wrapper_bridge_prefers_forward_mla_when_available(self):
+        config = self._make_config()
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        attention = DeepseekV2MLAAttention(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        wrapper = _RecordingMLAAttentionWrapper()
+        kv_cache = object()
+
+        output, layer_cache = attention.forward_hidden_states_with_attention_wrapper(
+            hidden_states=self._make_hidden_states(),
+            projection_weights=projection_weights,
+            kv_cache=kv_cache,
+            layer_id=9,
+            attention_wrapper=wrapper,
+        )
+
+        self.assertEqual(tuple(output.shape), (2, config.hidden_size))
+        self.assertFalse(wrapper.dense_forward_called)
+        self.assertEqual(len(wrapper.calls), 1)
+        self.assertIs(wrapper.calls[0].kv_cache, kv_cache)
+        self.assertEqual(wrapper.calls[0].layer_id, 9)
+        self.assertEqual(layer_cache.resident_cache.num_tokens, 2)
 
     def test_decoder_layer_threads_layer_id_into_attention_wrapper(self):
         config = self._make_config()

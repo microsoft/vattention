@@ -99,6 +99,18 @@ class DeepseekV2LayerCache:
     resident_cache: Optional[DeepseekV2MLAResidentCache] = None
 
 
+@dataclass(frozen=True)
+class DeepseekV2MLAWrapperInputs:
+    query: torch.Tensor
+    kv_cache: object
+    kv_up_proj_weight: torch.Tensor
+    past_resident_cache: Optional[DeepseekV2MLAResidentCache]
+    new_resident_cache: DeepseekV2MLAResidentCache
+    softmax_scale: float
+    layer_id: Optional[int]
+    mla_dims: DeepseekV2MLADims
+
+
 DeepseekV2AttentionBackend = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, Optional[DeepseekV2MLAResidentCache], float],
     torch.Tensor,
@@ -374,6 +386,41 @@ def _prepare_mla_attention_tensors(
     return query, key, value, full_cache, cache, softmax_scale
 
 
+def prepare_mla_wrapper_inputs(
+    hidden_states: torch.Tensor,
+    projection_weights: DeepseekV2MLAProjectionWeights,
+    mla_dims: DeepseekV2MLADims,
+    kv_cache: object,
+    layer_id: Optional[int] = None,
+    cache: Optional[DeepseekV2MLAResidentCache] = None,
+    softmax_scale: Optional[float] = None,
+) -> Tuple[DeepseekV2MLAWrapperInputs, DeepseekV2MLAResidentCache]:
+    query_states, new_cache = project_mla_from_hidden_states(
+        hidden_states,
+        projection_weights,
+        mla_dims,
+    )
+    q_nope, q_rope = split_query_projection(query_states, mla_dims)
+    query = torch.cat([q_nope, q_rope], dim=-1)
+
+    if softmax_scale is None:
+        softmax_scale = mla_dims.q_head_dim ** -0.5
+
+    return (
+        DeepseekV2MLAWrapperInputs(
+            query=query,
+            kv_cache=kv_cache,
+            kv_up_proj_weight=projection_weights.kv_up_proj,
+            past_resident_cache=cache,
+            new_resident_cache=new_cache,
+            softmax_scale=softmax_scale,
+            layer_id=layer_id,
+            mla_dims=mla_dims,
+        ),
+        append_resident_cache(cache, new_cache),
+    )
+
+
 def mla_attention_with_wrapper(
     hidden_states: torch.Tensor,
     projection_weights: DeepseekV2MLAProjectionWeights,
@@ -389,25 +436,32 @@ def mla_attention_with_wrapper(
 
         attention_wrapper = get_attention_wrapper()
 
-    query, key, value, full_cache, _, softmax_scale = _prepare_mla_attention_tensors(
+    wrapper_inputs, full_cache = prepare_mla_wrapper_inputs(
         hidden_states=hidden_states,
         projection_weights=projection_weights,
         mla_dims=mla_dims,
+        kv_cache=kv_cache,
+        layer_id=layer_id,
         cache=cache,
         softmax_scale=softmax_scale,
     )
 
-    flat_query = query.reshape(query.shape[0], -1)
-    flat_key = key.reshape(key.shape[0], -1)
-    flat_value = value.reshape(value.shape[0], -1)
-    output = attention_wrapper.forward(
-        flat_query,
-        flat_key,
-        flat_value,
-        kv_cache,
-        softmax_scale,
-        layer_id,
-    )
+    if hasattr(attention_wrapper, "forward_mla"):
+        output = attention_wrapper.forward_mla(wrapper_inputs)
+    else:
+        key, value = reconstruct_dense_kv(
+            full_cache,
+            projection_weights.kv_up_proj,
+            mla_dims,
+        )
+        output = attention_wrapper.forward(
+            wrapper_inputs.query.reshape(wrapper_inputs.query.shape[0], -1),
+            key.reshape(key.shape[0], -1),
+            value.reshape(value.shape[0], -1),
+            wrapper_inputs.kv_cache,
+            wrapper_inputs.softmax_scale,
+            wrapper_inputs.layer_id,
+        )
     if (
         output.ndim != 2
         or output.shape[0] != hidden_states.shape[0]
