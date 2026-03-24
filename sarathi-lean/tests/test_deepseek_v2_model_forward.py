@@ -304,6 +304,32 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
         self.assertEqual(tuple(second_output.shape), (1, config.hidden_size))
         self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
 
+    def test_model_forward_uses_installed_scaffold_weights(self):
+        config = self._make_config()
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        model = DeepseekV2Model(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=2,
+            pipeline_parallel_rank=0,
+        )
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size) for _ in range(model.num_layers)
+        )
+        model.set_scaffold_weights(
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+        )
+
+        output, caches = model(hidden_states=self._make_hidden_states())
+
+        self.assertEqual(tuple(output.shape), (2, config.hidden_size))
+        self.assertEqual(len(caches), model.num_layers)
+        self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
+
     def test_model_forward_with_attention_wrapper_applies_mlp_weights(self):
         config = self._make_config()
         dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
@@ -418,6 +444,49 @@ class DeepseekV2ModelForwardTests(unittest.TestCase):
         self.assertTrue(torch.allclose(output, baseline_output))
         self.assertEqual(len(caches), len(baseline_caches))
         self.assertTrue(all(cache.num_tokens == 2 for cache in caches))
+
+    def test_causal_lm_uses_installed_scaffold_weights_for_wrapper_style_forward(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        self._set_embedding_and_lm_head_weights(model)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        model.set_scaffold_weights(
+            projection_weights=tuple(
+                self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+            ),
+            mlp_weights=tuple(
+                self._make_mlp_weights(config.hidden_size)
+                for _ in range(model.model.num_layers)
+            ),
+        )
+
+        class _Wrapper:
+            def forward(self, query, key, value, kv_cache, softmax_scale=1.0, layer_id=None):
+                return value[-query.shape[0] :].clone()
+
+        wrapper = _Wrapper()
+        input_ids = torch.tensor([1, 2], dtype=torch.long)
+        kv_caches = tuple(object() for _ in range(model.model.num_layers))
+
+        output, caches = model(
+            hidden_states=input_ids,
+            kv_caches=kv_caches,
+            attention_wrapper=wrapper,
+        )
+
+        self.assertEqual(tuple(output.shape), (2, config.hidden_size))
+        self.assertEqual(len(caches), model.model.num_layers)
+        self.assertTrue(all(cache.resident_cache.num_tokens == 2 for cache in caches))
 
     def test_causal_lm_forward_logits_projects_hidden_states_to_vocab(self):
         from sarathi.model_executor.parallel_utils.parallel_state import (

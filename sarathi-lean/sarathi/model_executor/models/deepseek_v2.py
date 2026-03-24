@@ -913,6 +913,10 @@ class DeepseekV2Model(nn.Module):
             ]
         )
         self.norm = nn.Identity() if self.is_pipeline_last_stage else None
+        self.layer_projection_weights: Optional[
+            Tuple[DeepseekV2MLAProjectionWeights, ...]
+        ] = None
+        self.layer_mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None
 
     def _prepare_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.dtype in (torch.int32, torch.int64, torch.long):
@@ -927,20 +931,57 @@ class DeepseekV2Model(nn.Module):
             raise ValueError("hidden_states must have shape [tokens, hidden_size]")
         return hidden_states
 
-    def forward(
+    def set_scaffold_weights(
         self,
-        hidden_states: torch.Tensor,
         projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
-        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
-        softmax_scale: Optional[float] = None,
-    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+    ) -> None:
         if len(projection_weights) != self.num_layers:
             raise ValueError("projection_weights must provide one entry per local layer")
         if mlp_weights is None:
             mlp_weights = tuple(None for _ in range(self.num_layers))
         if len(mlp_weights) != self.num_layers:
             raise ValueError("mlp_weights must provide one entry per local layer")
+        self.layer_projection_weights = tuple(projection_weights)
+        self.layer_mlp_weights = tuple(mlp_weights)
+
+    def _resolve_scaffold_weights(
+        self,
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]],
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]],
+    ) -> Tuple[
+        Tuple[DeepseekV2MLAProjectionWeights, ...],
+        Tuple[Optional[DeepseekV2MLPWeights], ...],
+    ]:
+        if projection_weights is None:
+            projection_weights = self.layer_projection_weights
+        if projection_weights is None:
+            raise ValueError(
+                "projection_weights must be provided unless scaffold weights are installed"
+            )
+        if len(projection_weights) != self.num_layers:
+            raise ValueError("projection_weights must provide one entry per local layer")
+
+        if mlp_weights is None:
+            mlp_weights = self.layer_mlp_weights
+        if mlp_weights is None:
+            mlp_weights = tuple(None for _ in range(self.num_layers))
+        if len(mlp_weights) != self.num_layers:
+            raise ValueError("mlp_weights must provide one entry per local layer")
+        return tuple(projection_weights), tuple(mlp_weights)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+        caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+        projection_weights, mlp_weights = self._resolve_scaffold_weights(
+            projection_weights,
+            mlp_weights,
+        )
         if caches is None:
             caches = tuple(None for _ in range(self.num_layers))
         if len(caches) != self.num_layers:
@@ -969,19 +1010,17 @@ class DeepseekV2Model(nn.Module):
     def forward_with_attention_wrapper(
         self,
         hidden_states: torch.Tensor,
-        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
         kv_caches: Tuple[object, ...],
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
         attention_wrapper=None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
     ) -> Tuple[torch.Tensor, Tuple[DeepseekV2LayerCache, ...]]:
-        if len(projection_weights) != self.num_layers:
-            raise ValueError("projection_weights must provide one entry per local layer")
-        if mlp_weights is None:
-            mlp_weights = tuple(None for _ in range(self.num_layers))
-        if len(mlp_weights) != self.num_layers:
-            raise ValueError("mlp_weights must provide one entry per local layer")
+        projection_weights, mlp_weights = self._resolve_scaffold_weights(
+            projection_weights,
+            mlp_weights,
+        )
         if len(kv_caches) != self.num_layers:
             raise ValueError("kv_caches must provide one entry per local layer")
         if caches is None:
@@ -1042,14 +1081,38 @@ class DeepseekV2ForCausalLM(nn.Module):
         if self.model.is_pipeline_last_stage and getattr(config, "vocab_size", None) is not None:
             self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+    def set_scaffold_weights(
+        self,
+        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
+    ) -> None:
+        self.model.set_scaffold_weights(
+            projection_weights=projection_weights,
+            mlp_weights=mlp_weights,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
-        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
+        positions: Optional[torch.Tensor] = None,
+        kv_caches: Optional[Tuple[object, ...]] = None,
+        attention_wrapper=None,
     ) -> Tuple[torch.Tensor, Tuple[DeepseekV2MLAResidentCache, ...]]:
+        del positions
+        if kv_caches is not None:
+            return self.model.forward_with_attention_wrapper(
+                hidden_states=hidden_states,
+                projection_weights=projection_weights,
+                mlp_weights=mlp_weights,
+                kv_caches=kv_caches,
+                attention_wrapper=attention_wrapper,
+                caches=caches,
+                softmax_scale=softmax_scale,
+            )
         return self.model(
             hidden_states=hidden_states,
             projection_weights=projection_weights,
@@ -1074,7 +1137,7 @@ class DeepseekV2ForCausalLM(nn.Module):
     def forward_logits(
         self,
         hidden_states: torch.Tensor,
-        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
         softmax_scale: Optional[float] = None,
@@ -1091,8 +1154,8 @@ class DeepseekV2ForCausalLM(nn.Module):
     def forward_with_attention_wrapper(
         self,
         hidden_states: torch.Tensor,
-        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
         kv_caches: Tuple[object, ...],
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
         attention_wrapper=None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,
@@ -1111,8 +1174,8 @@ class DeepseekV2ForCausalLM(nn.Module):
     def forward_logits_with_attention_wrapper(
         self,
         hidden_states: torch.Tensor,
-        projection_weights: Tuple[DeepseekV2MLAProjectionWeights, ...],
         kv_caches: Tuple[object, ...],
+        projection_weights: Optional[Tuple[DeepseekV2MLAProjectionWeights, ...]] = None,
         mlp_weights: Optional[Tuple[Optional[DeepseekV2MLPWeights], ...]] = None,
         attention_wrapper=None,
         caches: Optional[Tuple[Optional[DeepseekV2MLAResidentCache], ...]] = None,

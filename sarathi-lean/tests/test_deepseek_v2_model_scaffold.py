@@ -174,6 +174,18 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
                 ),
             )
 
+    def test_model_rejects_forward_without_projection_or_installed_weights(self):
+        config = self._make_config()
+        model = DeepseekV2Model(
+            config,
+            tensor_parallel_world_size=4,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+
+        with self.assertRaises(ValueError):
+            model(hidden_states=torch.zeros(2, config.hidden_size))
+
     def test_make_mlp_weights_rejects_invalid_down_projection_shape(self):
         hidden_size = 8
 
