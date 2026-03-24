@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 from types import SimpleNamespace
+from pathlib import Path
 
 import torch
 
@@ -252,12 +253,86 @@ def write_scaffold_checkpoint(
     raise ValueError(f"Unsupported checkpoint format: {checkpoint_format}")
 
 
+def write_scaffold_hf_directory(
+    model,
+    projection_weights,
+    mlp_weights,
+    *,
+    device,
+    dtype,
+    output_dir,
+    checkpoint_format="safetensors",
+    num_shards=2,
+):
+    state_dict = build_scaffold_state_dict(
+        model,
+        projection_weights,
+        mlp_weights,
+        device=device,
+        dtype=dtype,
+    )
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    config_path = output_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v2",
+                "vocab_size": model.config.vocab_size,
+                "hidden_size": model.config.hidden_size,
+                "num_attention_heads": model.config.num_attention_heads,
+                "num_hidden_layers": model.config.num_hidden_layers,
+                "q_lora_rank": model.config.q_lora_rank,
+                "kv_lora_rank": model.config.kv_lora_rank,
+                "qk_nope_head_dim": model.config.qk_nope_head_dim,
+                "qk_rope_head_dim": model.config.qk_rope_head_dim,
+                "v_head_dim": model.config.v_head_dim,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if checkpoint_format != "safetensors":
+        raise ValueError("HF directory scaffold writing currently supports only safetensors")
+
+    from safetensors.torch import save_file
+
+    state_items = list(state_dict.items())
+    shard_states = [dict() for _ in range(num_shards)]
+    weight_map = {}
+    total_size = 0
+    for index, (name, tensor) in enumerate(state_items):
+        shard_name = f"model-{index % num_shards + 1:05d}-of-{num_shards:05d}.safetensors"
+        cpu_tensor = tensor.detach().to(device="cpu").contiguous()
+        shard_states[index % num_shards][name] = cpu_tensor
+        weight_map[name] = shard_name
+        total_size += cpu_tensor.numel() * cpu_tensor.element_size()
+
+    for shard_idx, shard_state in enumerate(shard_states, start=1):
+        shard_path = output_path / f"model-{shard_idx:05d}-of-{num_shards:05d}.safetensors"
+        save_file(shard_state, shard_path)
+
+    index_path = output_path / "model.safetensors.index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": total_size},
+                "weight_map": weight_map,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return str(output_path)
+
+
 def _run_scaffold_smoke_artifacts(
     mode="contiguous",
     prompt_token_ids=(1, 3),
     max_new_tokens=3,
     checkpoint_format="pt",
     query_mode="direct",
+    checkpoint_layout="single_file",
 ):
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
@@ -305,15 +380,28 @@ def _run_scaffold_smoke_artifacts(
         for _ in range(model.model.num_layers)
     )
     with tempfile.TemporaryDirectory() as tmpdir:
-        checkpoint_path = write_scaffold_checkpoint(
-            model,
-            projection_weights,
-            mlp_weights,
-            device=device,
-            dtype=dtype,
-            output_dir=tmpdir,
-            checkpoint_format=checkpoint_format,
-        )
+        if checkpoint_layout == "single_file":
+            checkpoint_path = write_scaffold_checkpoint(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=device,
+                dtype=dtype,
+                output_dir=tmpdir,
+                checkpoint_format=checkpoint_format,
+            )
+        elif checkpoint_layout == "hf_dir":
+            checkpoint_path = write_scaffold_hf_directory(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=device,
+                dtype=dtype,
+                output_dir=tmpdir,
+                checkpoint_format="safetensors",
+            )
+        else:
+            raise ValueError(f"Unsupported checkpoint layout: {checkpoint_layout}")
         model.load_weights(checkpoint_path)
 
         prompt_token_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=device)
@@ -351,6 +439,7 @@ def run_scaffold_smoke(
     max_new_tokens=3,
     checkpoint_format="pt",
     query_mode="direct",
+    checkpoint_layout="single_file",
 ):
     generated_token_ids, final_logits, final_caches = _run_scaffold_smoke_artifacts(
         mode=mode,
@@ -358,11 +447,13 @@ def run_scaffold_smoke(
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
         query_mode=query_mode,
+        checkpoint_layout=checkpoint_layout,
     )
     return {
         "mode": mode,
         "checkpoint_format": checkpoint_format,
         "query_mode": query_mode,
+        "checkpoint_layout": checkpoint_layout,
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": generated_token_ids.tolist(),
         "final_logits_shape": list(final_logits.shape),
@@ -378,6 +469,7 @@ def compare_scaffold_smoke(
     max_new_tokens=3,
     checkpoint_format="pt",
     query_mode="direct",
+    checkpoint_layout="single_file",
 ):
     contiguous_tokens, contiguous_logits, contiguous_caches = _run_scaffold_smoke_artifacts(
         mode="contiguous",
@@ -385,6 +477,7 @@ def compare_scaffold_smoke(
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
         query_mode=query_mode,
+        checkpoint_layout=checkpoint_layout,
     )
     try:
         paged_tokens, paged_logits, paged_caches = _run_scaffold_smoke_artifacts(
@@ -393,12 +486,14 @@ def compare_scaffold_smoke(
             max_new_tokens=max_new_tokens,
             checkpoint_format=checkpoint_format,
             query_mode=query_mode,
+            checkpoint_layout=checkpoint_layout,
         )
     except RuntimeError as exc:
         return {
             "mode": "compare",
             "checkpoint_format": checkpoint_format,
             "query_mode": query_mode,
+            "checkpoint_layout": checkpoint_layout,
             "status": "blocked",
             "prompt_token_ids": list(prompt_token_ids),
             "generated_token_ids": contiguous_tokens.tolist(),
@@ -411,6 +506,7 @@ def compare_scaffold_smoke(
         "mode": "compare",
         "checkpoint_format": checkpoint_format,
         "query_mode": query_mode,
+        "checkpoint_layout": checkpoint_layout,
         "status": "ok",
         "prompt_token_ids": list(prompt_token_ids),
         "generated_token_ids": contiguous_tokens.tolist(),
@@ -433,12 +529,14 @@ def validate_scaffold_smoke_compare(
     max_new_tokens=3,
     checkpoint_format="pt",
     query_mode="direct",
+    checkpoint_layout="single_file",
 ):
     result = compare_scaffold_smoke(
         prompt_token_ids=prompt_token_ids,
         max_new_tokens=max_new_tokens,
         checkpoint_format=checkpoint_format,
         query_mode=query_mode,
+        checkpoint_layout=checkpoint_layout,
     )
     if result.get("status") == "blocked":
         raise RuntimeError(f"scaffold smoke compare blocked: {result['error']}")
@@ -465,6 +563,11 @@ def main():
         default="pt",
     )
     parser.add_argument(
+        "--checkpoint-layout",
+        choices=("single_file", "hf_dir"),
+        default="single_file",
+    )
+    parser.add_argument(
         "--query-mode",
         choices=("direct", "q_lora"),
         default="direct",
@@ -481,6 +584,7 @@ def main():
             max_new_tokens=args.max_new_tokens,
             checkpoint_format=args.checkpoint_format,
             query_mode=args.query_mode,
+            checkpoint_layout=args.checkpoint_layout,
         )
     else:
         output = run_scaffold_smoke(
@@ -488,6 +592,7 @@ def main():
             max_new_tokens=args.max_new_tokens,
             checkpoint_format=args.checkpoint_format,
             query_mode=args.query_mode,
+            checkpoint_layout=args.checkpoint_layout,
         )
     print(
         json.dumps(

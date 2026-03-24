@@ -4,6 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+import json
 
 import torch
 
@@ -184,6 +185,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
 
         self.assertEqual(result["mode"], "contiguous")
         self.assertEqual(result["query_mode"], "direct")
+        self.assertEqual(result["checkpoint_layout"], "single_file")
         self.assertEqual(result["prompt_token_ids"], [1, 3])
         self.assertEqual(len(result["generated_token_ids"]), 3)
         self.assertEqual(result["final_logits_shape"], [1, 16])
@@ -381,6 +383,54 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", checkpoint)
         self.assertEqual(checkpoint["layers.0.self_attn.q_proj.weight"].device.type, "cpu")
 
+    def test_write_scaffold_hf_directory_emits_sharded_safetensors_layout(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config()
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self.smoke_module.make_mlp_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                output_dir=tmpdir,
+            )
+            index = json.loads((Path(checkpoint_dir) / "model.safetensors.index.json").read_text())
+            self.assertTrue((Path(checkpoint_dir) / "config.json").exists())
+            self.assertTrue((Path(checkpoint_dir) / "model-00001-of-00002.safetensors").exists())
+            self.assertTrue((Path(checkpoint_dir) / "model-00002-of-00002.safetensors").exists())
+            self.assertIn("embed_tokens.weight", index["weight_map"])
+            self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", index["weight_map"])
+
     def test_write_scaffold_checkpoint_loads_back_into_runtime_device(self):
         deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
         config = self.smoke_module.build_config()
@@ -442,6 +492,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertEqual(result["mode"], "compare")
         self.assertEqual(result["checkpoint_format"], "safetensors")
         self.assertEqual(result["query_mode"], "direct")
+        self.assertEqual(result["checkpoint_layout"], "single_file")
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["generated_tokens_match"])
         self.assertTrue(result["final_logits_match"])
@@ -457,6 +508,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertEqual(result["mode"], "paged")
         self.assertEqual(result["checkpoint_format"], "pt")
         self.assertEqual(result["query_mode"], "direct")
+        self.assertEqual(result["checkpoint_layout"], "single_file")
         self.assertEqual(result["prompt_token_ids"], [1, 3])
         self.assertEqual(len(result["generated_token_ids"]), 3)
         self.assertEqual(result["final_logits_shape"], [1, 16])
@@ -471,6 +523,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertEqual(result["mode"], "compare")
         self.assertEqual(result["checkpoint_format"], "pt")
         self.assertEqual(result["query_mode"], "direct")
+        self.assertEqual(result["checkpoint_layout"], "single_file")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["prompt_token_ids"], [1, 3])
         self.assertTrue(result["generated_tokens_match"])
@@ -494,6 +547,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertEqual(result["mode"], "compare")
         self.assertEqual(result["checkpoint_format"], "pt")
         self.assertEqual(result["query_mode"], "direct")
+        self.assertEqual(result["checkpoint_layout"], "single_file")
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["generated_tokens_match"])
         self.assertTrue(result["final_logits_match"])
@@ -508,6 +562,21 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
 
         self.assertEqual(result["mode"], "compare")
         self.assertEqual(result["query_mode"], "q_lora")
+        self.assertEqual(result["checkpoint_layout"], "single_file")
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["generated_tokens_match"])
+        self.assertTrue(result["final_logits_match"])
+        self.assertTrue(result["cache_token_counts_match"])
+
+    def test_compare_scaffold_smoke_matches_hf_directory_generation(self):
+        result = self.smoke_module.compare_scaffold_smoke(
+            prompt_token_ids=(1, 3),
+            max_new_tokens=3,
+            checkpoint_layout="hf_dir",
+        )
+
+        self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["checkpoint_layout"], "hf_dir")
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["generated_tokens_match"])
         self.assertTrue(result["final_logits_match"])
@@ -522,8 +591,9 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
             max_new_tokens=3,
             checkpoint_format="pt",
             query_mode="direct",
+            checkpoint_layout="single_file",
         ):
-            del prompt_token_ids, max_new_tokens, checkpoint_format, query_mode
+            del prompt_token_ids, max_new_tokens, checkpoint_format, query_mode, checkpoint_layout
             if mode == "paged":
                 raise RuntimeError("real paged wrapper blocker")
             return (
@@ -541,6 +611,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertEqual(result["mode"], "compare")
         self.assertEqual(result["checkpoint_format"], "pt")
         self.assertEqual(result["query_mode"], "direct")
+        self.assertEqual(result["checkpoint_layout"], "single_file")
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["prompt_token_ids"], [1, 3])
         self.assertEqual(result["generated_token_ids"], [1, 2, 3])
