@@ -184,7 +184,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
-        return block_size * model_config.get_cached_token_bytes_local(parallel_config)
+        return model_config.get_cache_block_size_bytes(block_size, parallel_config)
 
     def cleanup_kvcache(self):
         # this is required to ensure UVM module is not holding on to the memory

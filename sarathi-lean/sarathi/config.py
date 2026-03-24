@@ -217,6 +217,17 @@ class ModelConfig:
             megacache=megacache,
         )
 
+    def get_cache_block_size_bytes(
+        self,
+        block_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        return block_size * self.get_cached_token_bytes_local(
+            parallel_config,
+            megacache=megacache,
+        )
+
     def get_head_size(self) -> int:
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads

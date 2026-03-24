@@ -200,6 +200,26 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
             page_size // (12 * 2 * 4 * 128),
         )
 
+    def test_dense_kv_cache_block_size_bytes_scale_with_block_size(self):
+        hf_config = types.SimpleNamespace(
+            model_type="llama",
+            hidden_size=4096,
+            num_attention_heads=32,
+            num_key_value_heads=8,
+            num_hidden_layers=24,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+        )
+
+        per_token_local = 12 * (2 * 4 * 128 * 2)
+        self.assertEqual(
+            model_config.get_cache_block_size_bytes(16, parallel_config),
+            16 * per_token_local,
+        )
+
     def test_mla_cached_bytes_per_layer_uses_resident_payload_only(self):
         hf_config = types.SimpleNamespace(
             model_type="deepseek_v2",
@@ -256,6 +276,27 @@ class ModelConfigCacheArchitectureTests(unittest.TestCase):
         self.assertEqual(
             model_config.get_num_cached_tokens_per_page(page_size, parallel_config),
             page_size // expected_per_layer,
+        )
+
+    def test_mla_cache_block_size_bytes_use_resident_payload_formula(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+
+        per_token_local = 20 * (2 * (512 + 64))
+        self.assertEqual(
+            model_config.get_cache_block_size_bytes(32, parallel_config),
+            32 * per_token_local,
         )
 
 
