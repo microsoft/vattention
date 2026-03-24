@@ -653,6 +653,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["checkpoint_format"], "safetensors")
         self.assertEqual(result["checkpoint_layout"], "hf_dir")
         self.assertEqual(result["status"], "ok")
         self.assertTrue(result["generated_tokens_match"])
@@ -669,6 +670,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         )
 
         self.assertEqual(result["mode"], "compare")
+        self.assertEqual(result["checkpoint_format"], "safetensors")
         self.assertEqual(result["checkpoint_layout"], "hf_dir")
         self.assertEqual(result["query_mode"], "q_lora")
         self.assertEqual(result["mlp_mode"], "moe")

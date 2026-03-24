@@ -432,6 +432,12 @@ def write_scaffold_hf_directory(
     return str(output_path)
 
 
+def resolve_checkpoint_format(checkpoint_format, checkpoint_layout):
+    if checkpoint_layout == "hf_dir":
+        return "safetensors"
+    return checkpoint_format
+
+
 def _run_scaffold_smoke_artifacts(
     mode="contiguous",
     prompt_token_ids=(1, 3),
@@ -511,6 +517,10 @@ def _run_scaffold_smoke_artifacts(
     else:
         moe_weights = tuple(None for _ in range(model.model.num_layers))
     with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_format = resolve_checkpoint_format(
+            checkpoint_format,
+            checkpoint_layout,
+        )
         if checkpoint_layout == "single_file":
             checkpoint_path = write_scaffold_checkpoint(
                 model,
@@ -530,7 +540,7 @@ def _run_scaffold_smoke_artifacts(
                 device=device,
                 dtype=dtype,
                 output_dir=tmpdir,
-                checkpoint_format="safetensors",
+                checkpoint_format=checkpoint_format,
                 moe_weights=moe_weights,
             )
         else:
@@ -575,6 +585,7 @@ def run_scaffold_smoke(
     checkpoint_layout="single_file",
     mlp_mode="dense",
 ):
+    checkpoint_format = resolve_checkpoint_format(checkpoint_format, checkpoint_layout)
     generated_token_ids, final_logits, final_caches = _run_scaffold_smoke_artifacts(
         mode=mode,
         prompt_token_ids=prompt_token_ids,
@@ -608,6 +619,7 @@ def compare_scaffold_smoke(
     checkpoint_layout="single_file",
     mlp_mode="dense",
 ):
+    checkpoint_format = resolve_checkpoint_format(checkpoint_format, checkpoint_layout)
     contiguous_tokens, contiguous_logits, contiguous_caches = _run_scaffold_smoke_artifacts(
         mode="contiguous",
         prompt_token_ids=prompt_token_ids,
