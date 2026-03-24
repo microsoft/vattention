@@ -184,6 +184,7 @@ class _FakeModelRunner:
     def __init__(self, output):
         self.output = output
         self.calls = []
+        self.load_calls = []
 
     def run(self, seq_metadata_list, gpu_cache, model_kwargs=None):
         self.calls.append(
@@ -194,6 +195,10 @@ class _FakeModelRunner:
             }
         )
         return self.output
+
+    def load_model_weights(self, *args, **kwargs):
+        self.load_calls.append((args, kwargs))
+        return "loaded"
 
 
 class _FakeMetricsStore:
@@ -281,6 +286,17 @@ class BaseWorkerMLADispatchTests(unittest.TestCase):
                 "caches": ("resident",),
                 "softmax_scale": 0.5,
             },
+        )
+
+    def test_load_model_weights_forwards_to_model_runner(self):
+        worker, _ = self._make_worker()
+
+        output = worker.load_model_weights({"weight": "value"}, strict=False)
+
+        self.assertEqual(output, "loaded")
+        self.assertEqual(
+            worker.model_runner.load_calls,
+            [(({"weight": "value"},), {"strict": False})],
         )
 
 

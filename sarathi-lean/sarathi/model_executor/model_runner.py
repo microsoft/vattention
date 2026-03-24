@@ -67,6 +67,11 @@ class ModelRunner:
             CpuOperationMetrics.MODEL_EXECUTION_E2E, rank=self.rank
         )
 
+    def load_model_weights(self, *args, **kwargs):
+        if not hasattr(self.model, "load_weights"):
+            raise AttributeError("model does not implement load_weights")
+        return self.model.load_weights(*args, **kwargs)
+
     def _execute_model(
         self,
         hidden_states: torch.Tensor,

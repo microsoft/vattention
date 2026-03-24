@@ -165,6 +165,10 @@ class BaseWorker:
         return self.tensor_model_parallel_rank, self.pipeline_model_parallel_rank
 
     @synchronized
+    def load_model_weights(self, *args, **kwargs):
+        return self.model_runner.load_model_weights(*args, **kwargs)
+
+    @synchronized
     def get_cache_usage_stats(self):
         if self.cache_engine is None or not hasattr(self.cache_engine, "get_cache_usage_stats"):
             return None
