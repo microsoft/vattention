@@ -1091,6 +1091,17 @@ class DeepseekV2ForCausalLM(nn.Module):
             mlp_weights=mlp_weights,
         )
 
+    @staticmethod
+    def _get_scaffold_tensor(
+        state_dict: Mapping[str, torch.Tensor],
+        *keys: str,
+    ) -> Optional[torch.Tensor]:
+        for key in keys:
+            tensor = state_dict.get(key)
+            if tensor is not None:
+                return tensor
+        return None
+
     def load_scaffold_state_dict(
         self,
         state_dict: Mapping[str, torch.Tensor],
@@ -1103,7 +1114,11 @@ class DeepseekV2ForCausalLM(nn.Module):
 
         if self.model.embed_tokens is not None:
             embed_key = "model.embed_tokens.weight"
-            embed_weight = state_dict.get(embed_key)
+            embed_weight = self._get_scaffold_tensor(
+                state_dict,
+                embed_key,
+                "embed_tokens.weight",
+            )
             if embed_weight is None:
                 if strict:
                     raise KeyError(f"Missing scaffold weight: {embed_key}")
@@ -1120,7 +1135,11 @@ class DeepseekV2ForCausalLM(nn.Module):
 
         if self.lm_head is not None:
             lm_head_key = "lm_head.weight"
-            lm_head_weight = state_dict.get(lm_head_key)
+            lm_head_weight = self._get_scaffold_tensor(
+                state_dict,
+                lm_head_key,
+                "model.lm_head.weight",
+            )
             if lm_head_weight is None:
                 if strict:
                     raise KeyError(f"Missing scaffold weight: {lm_head_key}")
@@ -1136,17 +1155,36 @@ class DeepseekV2ForCausalLM(nn.Module):
                 self.lm_head.weight.data.copy_(lm_head_weight)
 
         for layer_idx, layer in enumerate(self.model.layers):
-            prefix = f"model.layers.{layer_idx}"
-            projection_prefix = f"{prefix}.self_attn"
-            projection_keys = {
-                "q_proj": f"{projection_prefix}.q_proj.weight",
-                "kv_latent_proj": f"{projection_prefix}.kv_latent_proj.weight",
-                "k_rope_proj": f"{projection_prefix}.k_rope_proj.weight",
-                "kv_up_proj": f"{projection_prefix}.kv_up_proj.weight",
-                "o_proj": f"{projection_prefix}.o_proj.weight",
+            local_prefix = f"model.layers.{layer_idx}"
+            global_prefix = f"model.layers.{self.model.layer_offset + layer_idx}"
+            projection_prefixes = (
+                f"{local_prefix}.self_attn",
+                f"{global_prefix}.self_attn",
+            )
+            projection_tensors = {
+                "q_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.q_proj.weight" for prefix in projection_prefixes),
+                ),
+                "kv_latent_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.kv_latent_proj.weight" for prefix in projection_prefixes),
+                ),
+                "k_rope_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.k_rope_proj.weight" for prefix in projection_prefixes),
+                ),
+                "kv_up_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.kv_up_proj.weight" for prefix in projection_prefixes),
+                ),
+                "o_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.o_proj.weight" for prefix in projection_prefixes),
+                ),
             }
             missing_projection_keys = [
-                name for name, key in projection_keys.items() if state_dict.get(key) is None
+                name for name, tensor in projection_tensors.items() if tensor is None
             ]
             if missing_projection_keys:
                 raise KeyError(
@@ -1155,26 +1193,40 @@ class DeepseekV2ForCausalLM(nn.Module):
                 )
             local_projection_weights.append(
                 make_projection_weights(
-                    q_proj=state_dict[projection_keys["q_proj"]],
-                    kv_latent_proj=state_dict[projection_keys["kv_latent_proj"]],
-                    k_rope_proj=state_dict[projection_keys["k_rope_proj"]],
-                    kv_up_proj=state_dict[projection_keys["kv_up_proj"]],
-                    o_proj=state_dict[projection_keys["o_proj"]],
+                    q_proj=projection_tensors["q_proj"],
+                    kv_latent_proj=projection_tensors["kv_latent_proj"],
+                    k_rope_proj=projection_tensors["k_rope_proj"],
+                    kv_up_proj=projection_tensors["kv_up_proj"],
+                    o_proj=projection_tensors["o_proj"],
                     mla_dims=layer.self_attn.mla_dims,
                 )
             )
 
-            mlp_prefix = f"{prefix}.mlp"
-            mlp_keys = {
-                "gate_proj": f"{mlp_prefix}.gate_proj.weight",
-                "up_proj": f"{mlp_prefix}.up_proj.weight",
-                "down_proj": f"{mlp_prefix}.down_proj.weight",
+            mlp_prefixes = (
+                f"{local_prefix}.mlp",
+                f"{global_prefix}.mlp",
+            )
+            mlp_tensors = {
+                "gate_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.gate_proj.weight" for prefix in mlp_prefixes),
+                ),
+                "up_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.up_proj.weight" for prefix in mlp_prefixes),
+                ),
+                "down_proj": self._get_scaffold_tensor(
+                    state_dict,
+                    *(f"{prefix}.down_proj.weight" for prefix in mlp_prefixes),
+                ),
             }
-            present_mlp_keys = [name for name, key in mlp_keys.items() if state_dict.get(key) is not None]
+            present_mlp_keys = [
+                name for name, tensor in mlp_tensors.items() if tensor is not None
+            ]
             if present_mlp_keys:
-                if len(present_mlp_keys) != len(mlp_keys):
+                if len(present_mlp_keys) != len(mlp_tensors):
                     if strict:
-                        missing = sorted(set(mlp_keys) - set(present_mlp_keys))
+                        missing = sorted(set(mlp_tensors) - set(present_mlp_keys))
                         raise KeyError(
                             "Missing scaffold MLP weights for layer "
                             f"{layer_idx}: {', '.join(missing)}"
@@ -1183,9 +1235,9 @@ class DeepseekV2ForCausalLM(nn.Module):
                 else:
                     local_mlp_weights.append(
                         make_mlp_weights(
-                            gate_proj=state_dict[mlp_keys["gate_proj"]],
-                            up_proj=state_dict[mlp_keys["up_proj"]],
-                            down_proj=state_dict[mlp_keys["down_proj"]],
+                            gate_proj=mlp_tensors["gate_proj"],
+                            up_proj=mlp_tensors["up_proj"],
+                            down_proj=mlp_tensors["down_proj"],
                             hidden_size=hidden_size,
                         )
                     )

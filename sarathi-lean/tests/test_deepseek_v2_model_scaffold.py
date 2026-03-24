@@ -55,6 +55,7 @@ DeepseekV2MLAAttention = deepseek_module.DeepseekV2MLAAttention
 DeepseekV2Model = deepseek_module.DeepseekV2Model
 DeepseekV2ForCausalLM = deepseek_module.DeepseekV2ForCausalLM
 make_mlp_weights = deepseek_module.make_mlp_weights
+make_projection_weights = deepseek_module.make_projection_weights
 
 
 class DeepseekV2ModelScaffoldTests(unittest.TestCase):
@@ -69,6 +70,69 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             qk_nope_head_dim=128,
             qk_rope_head_dim=64,
             v_head_dim=128,
+        )
+
+    def _make_small_config(self):
+        return types.SimpleNamespace(
+            vocab_size=16,
+            hidden_size=6,
+            num_attention_heads=4,
+            num_hidden_layers=4,
+            q_lora_rank=None,
+            kv_lora_rank=3,
+            qk_nope_head_dim=2,
+            qk_rope_head_dim=1,
+            v_head_dim=2,
+        )
+
+    def _make_projection_weights(self, dims):
+        return make_projection_weights(
+            q_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            kv_latent_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ),
+            k_rope_proj=torch.tensor(
+                [
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 0.0],
+                    [1.0, 0.0],
+                    [0.0, 1.0],
+                    [0.0, 0.0],
+                ]
+            ),
+            kv_up_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 10.0, 20.0, 2.0, 0.0, 30.0, 40.0],
+                    [0.0, 1.0, 11.0, 21.0, 0.0, 2.0, 31.0, 41.0],
+                    [1.0, 1.0, 12.0, 22.0, 2.0, 2.0, 32.0, 42.0],
+                ]
+            ),
+            o_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+                    [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                ]
+            ),
+            mla_dims=dims,
         )
 
     def test_mla_dims_compute_local_tensor_parallel_shapes(self):
@@ -221,6 +285,100 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
                 down_proj=torch.zeros(5, hidden_size),
                 hidden_size=hidden_size,
             )
+
+    def test_causal_lm_scaffold_loader_accepts_global_layer_ids_for_last_stage(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(2)
+        set_pipeline_model_parallel_rank(1)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        state_dict = {
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for global_layer_idx in range(model.model.layer_offset, model.model.layer_offset + model.model.num_layers):
+            projection_weights = self._make_projection_weights(dims)
+            prefix = f"model.layers.{global_layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + global_layer_idx
+            state_dict[f"{prefix}.kv_latent_proj.weight"] = (
+                projection_weights.kv_latent_proj + global_layer_idx
+            )
+            state_dict[f"{prefix}.k_rope_proj.weight"] = (
+                projection_weights.k_rope_proj + global_layer_idx
+            )
+            state_dict[f"{prefix}.kv_up_proj.weight"] = (
+                projection_weights.kv_up_proj + global_layer_idx
+            )
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + global_layer_idx
+
+        model.load_weights(state_dict)
+
+        self.assertIsNone(model.model.embed_tokens)
+        self.assertIsNotNone(model.lm_head)
+        self.assertEqual(len(model.model.layer_projection_weights), model.model.num_layers)
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].q_proj,
+                self._make_projection_weights(dims).q_proj + model.model.layer_offset,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[1].q_proj,
+                self._make_projection_weights(dims).q_proj + model.model.layer_offset + 1,
+            )
+        )
+
+    def test_causal_lm_scaffold_loader_accepts_global_layer_ids_for_first_stage(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_config()
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(2)
+        set_pipeline_model_parallel_rank(0)
+
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        for global_layer_idx in range(model.model.layer_offset, model.model.layer_offset + model.model.num_layers):
+            projection_weights = self._make_projection_weights(dims)
+            prefix = f"model.layers.{global_layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + global_layer_idx
+            state_dict[f"{prefix}.kv_latent_proj.weight"] = (
+                projection_weights.kv_latent_proj + global_layer_idx
+            )
+            state_dict[f"{prefix}.k_rope_proj.weight"] = (
+                projection_weights.k_rope_proj + global_layer_idx
+            )
+            state_dict[f"{prefix}.kv_up_proj.weight"] = (
+                projection_weights.kv_up_proj + global_layer_idx
+            )
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + global_layer_idx
+
+        model.load_weights(state_dict)
+
+        self.assertIsNotNone(model.model.embed_tokens)
+        self.assertIsNone(model.lm_head)
+        self.assertEqual(len(model.model.layer_projection_weights), model.model.num_layers)
+        self.assertTrue(
+            torch.allclose(
+                model.model.layer_projection_weights[0].q_proj,
+                self._make_projection_weights(dims).q_proj,
+            )
+        )
 
 
 if __name__ == "__main__":
