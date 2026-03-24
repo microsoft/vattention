@@ -160,8 +160,17 @@ compare_vattention_cache_validation_suite_to_profile = (
 get_vattention_mla_validation_profile = (
     cache_engine_module.get_vattention_mla_validation_profile
 )
+list_vattention_mla_validation_profiles = (
+    cache_engine_module.list_vattention_mla_validation_profiles
+)
 compare_vattention_cache_validation_suite_to_named_profile = (
     cache_engine_module.compare_vattention_cache_validation_suite_to_named_profile
+)
+compare_vattention_cache_validation_suite_to_named_profiles = (
+    cache_engine_module.compare_vattention_cache_validation_suite_to_named_profiles
+)
+select_vattention_cache_validation_profile = (
+    cache_engine_module.select_vattention_cache_validation_profile
 )
 
 
@@ -642,6 +651,47 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
 
         with self.assertRaises(KeyError):
             get_vattention_mla_validation_profile("missing_profile")
+
+    def test_cache_usage_can_compare_and_select_among_named_profiles(self):
+        suite_summary = {
+            "num_matrices": 3,
+            "matrix_names": ("prompt_matrix", "overlap_matrix", "decode_pressure_matrix"),
+            "max_peak_persistent_bytes": 176,
+            "min_free_blocks_overall": 4,
+            "max_largest_growth_bytes": 144,
+            "max_largest_reclaim_bytes": 144,
+            "matrix_with_max_peak_bytes": "overlap_matrix",
+            "matrix_with_min_free_blocks": "overlap_matrix",
+        }
+
+        profile_names = list_vattention_mla_validation_profiles()
+        reports = compare_vattention_cache_validation_suite_to_named_profiles(
+            suite_summary
+        )
+        selected = select_vattention_cache_validation_profile(suite_summary)
+
+        self.assertEqual(
+            profile_names,
+            ("bounded_mla_suite_v1", "bounded_mla_suite_relaxed"),
+        )
+        self.assertEqual(len(reports), 2)
+        self.assertEqual(reports[0]["profile_name"], "bounded_mla_suite_v1")
+        self.assertFalse(reports[0]["is_valid"])
+        self.assertEqual(reports[1]["profile_name"], "bounded_mla_suite_relaxed")
+        self.assertTrue(reports[1]["is_valid"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["profile_name"], "bounded_mla_suite_relaxed")
+
+        no_match = select_vattention_cache_validation_profile(
+            {
+                **suite_summary,
+                "max_peak_persistent_bytes": 256,
+                "min_free_blocks_overall": 3,
+                "max_largest_growth_bytes": 192,
+                "max_largest_reclaim_bytes": 192,
+            }
+        )
+        self.assertIsNone(no_match)
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(

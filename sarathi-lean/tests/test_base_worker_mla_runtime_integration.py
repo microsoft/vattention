@@ -1119,6 +1119,33 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertEqual(named_profile_report["profile_name"], "bounded_mla_suite_v1")
         self.assertTrue(named_profile_report["is_valid"])
         self.assertEqual(named_profile_report["violations"], ())
+        multi_profile_reports = worker.evaluate_cache_usage_suite_profiles(suite_summary)
+        self.assertEqual(len(multi_profile_reports), 2)
+        self.assertEqual(multi_profile_reports[0]["profile_name"], "bounded_mla_suite_v1")
+        selected_profile = worker.select_cache_usage_suite_profile(suite_summary)
+        self.assertIsNotNone(selected_profile)
+        self.assertEqual(selected_profile["profile_name"], "bounded_mla_suite_v1")
+
+    def test_worker_can_select_relaxed_profile_when_strict_profile_fails(self):
+        suite_summary = {
+            "num_matrices": 3,
+            "matrix_names": ("prompt_matrix", "overlap_matrix", "decode_pressure_matrix"),
+            "max_peak_persistent_bytes": 176,
+            "min_free_blocks_overall": 4,
+            "max_largest_growth_bytes": 144,
+            "max_largest_reclaim_bytes": 144,
+            "matrix_with_max_peak_bytes": "overlap_matrix",
+            "matrix_with_min_free_blocks": "overlap_matrix",
+        }
+        worker = self._make_worker(
+            model_runner=_FakeModelRunner(output="sampler-output"),
+            gpu_cache=("gpu-cache",),
+        )
+
+        selected_profile = worker.select_cache_usage_suite_profile(suite_summary)
+
+        self.assertIsNotNone(selected_profile)
+        self.assertEqual(selected_profile["profile_name"], "bounded_mla_suite_relaxed")
 
 
 if __name__ == "__main__":

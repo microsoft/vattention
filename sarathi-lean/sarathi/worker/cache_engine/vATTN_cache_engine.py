@@ -25,6 +25,13 @@ VATTENTION_MLA_VALIDATION_PROFILES = {
         "max_largest_growth_bytes": 128,
         "max_largest_reclaim_bytes": 128,
     },
+    "bounded_mla_suite_relaxed": {
+        "profile_name": "bounded_mla_suite_relaxed",
+        "max_peak_persistent_bytes": 192,
+        "min_free_blocks_overall": 4,
+        "max_largest_growth_bytes": 160,
+        "max_largest_reclaim_bytes": 160,
+    },
 }
 
 
@@ -452,6 +459,10 @@ def get_vattention_mla_validation_profile(profile_name):
     return dict(VATTENTION_MLA_VALIDATION_PROFILES[profile_name])
 
 
+def list_vattention_mla_validation_profiles():
+    return tuple(VATTENTION_MLA_VALIDATION_PROFILES.keys())
+
+
 def compare_vattention_cache_validation_suite_to_named_profile(
     suite_summary,
     profile_name,
@@ -460,6 +471,37 @@ def compare_vattention_cache_validation_suite_to_named_profile(
         suite_summary,
         get_vattention_mla_validation_profile(profile_name),
     )
+
+
+def compare_vattention_cache_validation_suite_to_named_profiles(
+    suite_summary,
+    profile_names=None,
+):
+    profile_names = (
+        list_vattention_mla_validation_profiles()
+        if profile_names is None
+        else tuple(profile_names)
+    )
+    return tuple(
+        compare_vattention_cache_validation_suite_to_named_profile(
+            suite_summary,
+            profile_name,
+        )
+        for profile_name in profile_names
+    )
+
+
+def select_vattention_cache_validation_profile(
+    suite_summary,
+    profile_names=None,
+):
+    for report in compare_vattention_cache_validation_suite_to_named_profiles(
+        suite_summary,
+        profile_names=profile_names,
+    ):
+        if report["is_valid"]:
+            return report
+    return None
 
 
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
