@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -233,6 +234,105 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertIn("layers.0.self_attn.kv_b_proj.weight", state_dict)
         self.assertNotIn("model.layers.0.self_attn.kv_latent_proj.weight", state_dict)
         self.assertNotIn("model.layers.0.self_attn.k_rope_proj.weight", state_dict)
+
+    def test_write_scaffold_checkpoint_emits_pt_checkpoint_file(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config()
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self.smoke_module.make_mlp_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = self.smoke_module.write_scaffold_checkpoint(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                output_dir=tmpdir,
+            )
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+        self.assertTrue(str(checkpoint_path).endswith(".pt"))
+        self.assertIn("embed_tokens.weight", checkpoint)
+        self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", checkpoint)
+        self.assertEqual(checkpoint["layers.0.self_attn.q_proj.weight"].device.type, "cpu")
+
+    def test_write_scaffold_checkpoint_loads_back_into_runtime_device(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config()
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dtype = torch.float16 if device.type == "cuda" else torch.float32
+        model = model.to(device=device, dtype=dtype)
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=device,
+                dtype=dtype,
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self.smoke_module.make_mlp_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=device,
+                dtype=dtype,
+            )
+            for _ in range(model.model.num_layers)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = self.smoke_module.write_scaffold_checkpoint(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=device,
+                dtype=dtype,
+                output_dir=tmpdir,
+            )
+            model.load_weights(checkpoint_path)
+
+        installed_weights = model.model.layer_projection_weights
+        self.assertIsNotNone(installed_weights)
+        self.assertEqual(installed_weights[0].q_proj.device.type, device.type)
+        self.assertEqual(installed_weights[0].q_proj.dtype, dtype)
 
     def test_run_scaffold_smoke_paged_executes_prompt_and_decode(self):
         result = self.smoke_module.run_scaffold_smoke(

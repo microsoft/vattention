@@ -1159,6 +1159,16 @@ class DeepseekV2ForCausalLM(nn.Module):
             f"layers.{global_idx}.{suffix}",
         )
 
+    @staticmethod
+    def _coerce_scaffold_tensor(
+        tensor: Optional[torch.Tensor],
+        *,
+        reference: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if tensor is None:
+            return None
+        return tensor.to(device=reference.device, dtype=reference.dtype)
+
     def load_scaffold_state_dict(
         self,
         state_dict: Mapping[str, torch.Tensor],
@@ -1242,6 +1252,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     raise ValueError(
                         "input_layernorm.weight shape does not match scaffold hidden size"
                     )
+                input_norm_weight = self._coerce_scaffold_tensor(
+                    input_norm_weight,
+                    reference=layer.input_layernorm.weight,
+                )
                 layer.input_layernorm.weight.data.copy_(input_norm_weight)
 
             post_attn_norm_weight = self._get_scaffold_tensor(
@@ -1260,6 +1274,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     raise ValueError(
                         "post_attention_layernorm.weight shape does not match scaffold hidden size"
                     )
+                post_attn_norm_weight = self._coerce_scaffold_tensor(
+                    post_attn_norm_weight,
+                    reference=layer.post_attention_layernorm.weight,
+                )
                 layer.post_attention_layernorm.weight.data.copy_(post_attn_norm_weight)
 
             projection_prefixes = self._candidate_layer_prefixes(
@@ -1331,6 +1349,14 @@ class DeepseekV2ForCausalLM(nn.Module):
                     "Missing scaffold weights for layer "
                     f"{layer_idx}: {', '.join(missing_projection_keys)}"
                 )
+            projection_reference = layer.input_layernorm.weight
+            projection_tensors = {
+                name: self._coerce_scaffold_tensor(
+                    tensor,
+                    reference=projection_reference,
+                )
+                for name, tensor in projection_tensors.items()
+            }
             local_projection_weights.append(
                 make_projection_weights(
                     q_proj=projection_tensors["q_proj"],
@@ -1374,6 +1400,14 @@ class DeepseekV2ForCausalLM(nn.Module):
                         )
                     local_mlp_weights.append(None)
                 else:
+                    mlp_reference = layer.post_attention_layernorm.weight
+                    mlp_tensors = {
+                        name: self._coerce_scaffold_tensor(
+                            tensor,
+                            reference=mlp_reference,
+                        )
+                        for name, tensor in mlp_tensors.items()
+                    }
                     local_mlp_weights.append(
                         make_mlp_weights(
                             gate_proj=mlp_tensors["gate_proj"],

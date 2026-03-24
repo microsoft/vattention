@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import tempfile
 from types import SimpleNamespace
 
 import torch
@@ -172,6 +173,19 @@ def build_scaffold_state_dict(model, projection_weights, mlp_weights, *, device,
     return state_dict
 
 
+def write_scaffold_checkpoint(model, projection_weights, mlp_weights, *, device, dtype, output_dir):
+    state_dict = build_scaffold_state_dict(
+        model,
+        projection_weights,
+        mlp_weights,
+        device=device,
+        dtype=dtype,
+    )
+    checkpoint_path = f"{output_dir}/deepseek_scaffold.pt"
+    torch.save(state_dict, checkpoint_path)
+    return checkpoint_path
+
+
 def _run_scaffold_smoke_artifacts(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
     from sarathi.model_executor.parallel_utils.parallel_state import (
         set_pipeline_model_parallel_rank,
@@ -212,43 +226,44 @@ def _run_scaffold_smoke_artifacts(mode="contiguous", prompt_token_ids=(1, 3), ma
         )
         for _ in range(model.model.num_layers)
     )
-    model.load_weights(
-        build_scaffold_state_dict(
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_path = write_scaffold_checkpoint(
             model,
             projection_weights,
             mlp_weights,
             device=device,
             dtype=dtype,
+            output_dir=tmpdir,
         )
-    )
+        model.load_weights(checkpoint_path)
 
-    prompt_token_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=device)
-    generate_kwargs = {}
-    if mode == "paged":
-        from sarathi.model_executor.attention.vattention_flashattention_wrapper import (
-            VAttentionFlashAttentionWrapper,
+        prompt_token_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=device)
+        generate_kwargs = {}
+        if mode == "paged":
+            from sarathi.model_executor.attention.vattention_flashattention_wrapper import (
+                VAttentionFlashAttentionWrapper,
+            )
+
+            wrapper = VAttentionFlashAttentionWrapper()
+            wrapper.device = device
+            wrapper.is_metadata_initialized = True
+            wrapper.is_profiling_iteration = False
+            generate_kwargs["kv_caches"] = model.make_runtime_mla_kv_caches(
+                batch_size=1,
+                max_seq_len=prompt_token_ids.numel() + max_new_tokens + 1,
+                device=device,
+                dtype=dtype,
+            )
+            generate_kwargs["attention_wrapper"] = wrapper
+        elif mode != "contiguous":
+            raise ValueError(f"Unsupported smoke mode: {mode}")
+
+        generated_token_ids, final_logits, final_caches = model.generate_greedy(
+            prompt_token_ids,
+            max_new_tokens=max_new_tokens,
+            **generate_kwargs,
         )
-
-        wrapper = VAttentionFlashAttentionWrapper()
-        wrapper.device = device
-        wrapper.is_metadata_initialized = True
-        wrapper.is_profiling_iteration = False
-        generate_kwargs["kv_caches"] = model.make_runtime_mla_kv_caches(
-            batch_size=1,
-            max_seq_len=prompt_token_ids.numel() + max_new_tokens + 1,
-            device=device,
-            dtype=dtype,
-        )
-        generate_kwargs["attention_wrapper"] = wrapper
-    elif mode != "contiguous":
-        raise ValueError(f"Unsupported smoke mode: {mode}")
-
-    generated_token_ids, final_logits, final_caches = model.generate_greedy(
-        prompt_token_ids,
-        max_new_tokens=max_new_tokens,
-        **generate_kwargs,
-    )
-    return generated_token_ids, final_logits, final_caches
+        return generated_token_ids, final_logits, final_caches
 
 
 def run_scaffold_smoke(mode="contiguous", prompt_token_ids=(1, 3), max_new_tokens=3):
