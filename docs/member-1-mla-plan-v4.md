@@ -271,7 +271,9 @@ Why this phase is separate:
 
 ### Phase 6: Validate paged MLA attention and accounting
 
-16. reach first working paged MLA attention execution
+This phase now has explicit sub-milestones so runtime progress is easier to track without changing the plan structure.
+
+16. Phase 6a: reach first working paged MLA attention execution
 
 - run paged MLA attention successfully under `vAttention`
 - confirm:
@@ -279,7 +281,7 @@ Why this phase is separate:
   - prefill attention succeeds
   - decode attention succeeds
 
-17. compare paged MLA against contiguous MLA
+17. Phase 6b: compare paged MLA against contiguous MLA
 
 - validate parity between:
   - contiguous MLA reference path
@@ -288,14 +290,25 @@ Why this phase is separate:
   - `tp=1`
   - at least one meaningful `tp>1` setting
 
-18. validate resident-memory accounting at the wrapper boundary
+18. Phase 6c: validate resident-memory accounting at the wrapper boundary
 
 - confirm:
   - allocator-visible persistent bytes are resident MLA bytes only
   - transient dense reconstructed K/V is not counted as persistent cache
   - wrapper-side MLA execution does not silently restore dense-KV accounting assumptions
 
-19. add allocator/fragmentation validation cases for MLA paging
+19. Phase 6d: validate allocator-visible runtime transitions
+
+- validate live runtime state across:
+  - prefill
+  - decode
+  - request reclamation / preemption
+- confirm:
+  - active batch-slot tracking stays correct
+  - free-block movement follows request lifecycle changes
+  - resident MLA bytes evolve consistently with runtime cache state
+
+20. Phase 6e: add allocator/fragmentation validation cases for MLA paging
 
 - sequence-length sweeps
 - expected page-growth checks
@@ -311,19 +324,19 @@ Why this phase is central:
 
 This phase sharpens the old V3 “first working inference without MoE” milestone.
 
-20. add the minimal remaining non-MoE model path needed for bring-up
+21. add the minimal remaining non-MoE model path needed for bring-up
 
 - if necessary:
   - temporary feedforward fallback
   - minimal output path
   - weight-loading subset sufficient for early execution
 
-21. reach first runnable contiguous DeepSeek path without MoE
+22. reach first runnable contiguous DeepSeek path without MoE
 
 - run prompt prefill
 - run at least one decode step
 
-22. reach first runnable paged DeepSeek path without MoE
+23. reach first runnable paged DeepSeek path without MoE
 
 - run the same basic execution flow using the paged MLA wrapper path
 
@@ -335,7 +348,7 @@ Why this phase is separate:
 
 Keep from V3, but make the dependency explicit.
 
-23. implement MoE support for DeepSeek-V2-Lite
+24. implement MoE support for DeepSeek-V2-Lite
 
 - expert routing
 - expert parameter loading
