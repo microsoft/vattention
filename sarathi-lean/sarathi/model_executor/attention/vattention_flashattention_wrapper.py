@@ -35,6 +35,32 @@ def _split_resident_cache_by_lengths(cache, lengths):
     return tuple(chunks)
 
 
+def _pad_value_heads_for_flash_attention(
+    value: torch.Tensor,
+    target_head_dim: int,
+) -> Tuple[torch.Tensor, int]:
+    if value.ndim != 4:
+        raise ValueError("value must have shape [batch, tokens, heads, head_dim]")
+    value_head_dim = value.shape[-1]
+    if value_head_dim > target_head_dim:
+        raise ValueError("value head_dim must not exceed flash-attention target head_dim")
+    if value_head_dim == target_head_dim:
+        return value, value_head_dim
+    padded = torch.nn.functional.pad(value, (0, target_head_dim - value_head_dim))
+    return padded, value_head_dim
+
+
+def _trim_flash_attention_output(
+    output: torch.Tensor,
+    value_head_dim: int,
+) -> torch.Tensor:
+    if output.ndim != 4:
+        raise ValueError("flash-attention output must have shape [batch, tokens, heads, head_dim]")
+    if value_head_dim > output.shape[-1]:
+        raise ValueError("value_head_dim must not exceed flash-attention output head_dim")
+    return output[..., :value_head_dim]
+
+
 class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
     _inst = None
 
@@ -363,7 +389,10 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
             )
             seq_query = wrapper_inputs.query[token_offset : token_offset + query_len].unsqueeze(0)
             seq_key = key.unsqueeze(0)
-            seq_value = value.unsqueeze(0)
+            seq_value, value_head_dim = _pad_value_heads_for_flash_attention(
+                value.unsqueeze(0),
+                wrapper_inputs.mla_dims.q_head_dim,
+            )
             seq_output = flash_attn_func(
                 seq_query,
                 seq_key,
@@ -371,6 +400,7 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
                 causal=True,
                 softmax_scale=wrapper_inputs.softmax_scale,
             )
+            seq_output = _trim_flash_attention_output(seq_output, value_head_dim)
             output[token_offset : token_offset + query_len].copy_(
                 seq_output.reshape(query_len, -1)
             )

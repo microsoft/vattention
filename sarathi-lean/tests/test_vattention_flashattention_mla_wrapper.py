@@ -288,7 +288,8 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
         self.assertEqual(len(self.flash_calls), 1)
         self.assertEqual(tuple(self.flash_calls[0]["query"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
         self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
-        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
+        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
+        self.assertTrue(torch.all(self.flash_calls[0]["value"][..., dims.v_head_dim:] == 0))
 
     def test_forward_mla_reuses_past_resident_cache_for_decode(self):
         dims = self.deepseek_module.DeepseekV2MLADims.from_config(
@@ -323,7 +324,8 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
         self.assertEqual(len(self.flash_calls), 1)
         self.assertEqual(tuple(self.flash_calls[0]["query"].shape), (1, 1, dims.num_heads, dims.q_head_dim))
         self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
-        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
+        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
+        self.assertTrue(torch.all(self.flash_calls[0]["value"][..., dims.v_head_dim:] == 0))
 
     def test_forward_mla_can_read_past_resident_cache_from_layer_cache(self):
         dims = self.deepseek_module.DeepseekV2MLADims.from_config(
@@ -357,7 +359,8 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
         self.assertEqual(tuple(output.shape), (1, dims.o_proj_input_dim_local))
         self.assertEqual(len(self.flash_calls), 1)
         self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
-        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
+        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
+        self.assertTrue(torch.all(self.flash_calls[0]["value"][..., dims.v_head_dim:] == 0))
 
     def test_forward_mla_writes_prefill_resident_components_to_runtime_cache(self):
         dims = self.deepseek_module.DeepseekV2MLADims.from_config(
@@ -441,13 +444,35 @@ class VAttentionFlashAttentionMLAWrapperTests(unittest.TestCase):
 
         self.assertEqual(len(self.flash_calls), 1)
         self.assertEqual(tuple(self.flash_calls[0]["key"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
-        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.v_head_dim))
+        self.assertEqual(tuple(self.flash_calls[0]["value"].shape), (1, 2, dims.num_heads, dims.q_head_dim))
+        self.assertTrue(torch.all(self.flash_calls[0]["value"][..., dims.v_head_dim:] == 0))
         self.assertTrue(
             torch.equal(
                 runtime_cache.kv_latent[0, 1:2],
                 wrapper_inputs.new_resident_cache.kv_latent,
             )
         )
+
+    def test_value_padding_helpers_expand_and_trim_flash_attention_value_heads(self):
+        value = torch.tensor(
+            [
+                [
+                    [[1.0, 2.0], [3.0, 4.0]],
+                    [[5.0, 6.0], [7.0, 8.0]],
+                ]
+            ]
+        )
+
+        padded, original_dim = self.wrapper_module._pad_value_heads_for_flash_attention(
+            value,
+            target_head_dim=3,
+        )
+        trimmed = self.wrapper_module._trim_flash_attention_output(padded, original_dim)
+
+        self.assertEqual(original_dim, 2)
+        self.assertEqual(tuple(padded.shape), (1, 2, 2, 3))
+        self.assertTrue(torch.all(padded[..., 2] == 0))
+        self.assertTrue(torch.equal(trimmed, value))
 
 
 if __name__ == "__main__":
