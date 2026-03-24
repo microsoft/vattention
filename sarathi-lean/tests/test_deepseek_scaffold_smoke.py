@@ -285,6 +285,122 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertIn("layers.0.self_attn.q_b_proj.weight", state_dict)
         self.assertNotIn("layers.0.self_attn.q_proj.weight", state_dict)
 
+    def test_write_scaffold_hf_directory_emits_tokenizer_assets(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config()
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self.smoke_module.make_mlp_weights(
+                deepseek_module,
+                config.hidden_size,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+            )
+            for _ in range(model.model.num_layers)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_dir = self.smoke_module.write_scaffold_hf_directory(
+                model,
+                projection_weights,
+                mlp_weights,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                output_dir=tmpdir,
+            )
+
+            self.assertTrue(Path(checkpoint_dir, "tokenizer.json").exists())
+            self.assertTrue(Path(checkpoint_dir, "tokenizer_config.json").exists())
+            self.assertTrue(Path(checkpoint_dir, "special_tokens_map.json").exists())
+
+    def test_build_hf_scaffold_state_dict_expands_tp_sharded_weights_to_global_shapes(self):
+        deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
+        config = self.smoke_module.build_config(query_mode="q_lora", mlp_mode="moe")
+        model = deepseek_module.DeepseekV2ForCausalLM(
+            config,
+            tensor_parallel_world_size=2,
+            pipeline_parallel_world_size=1,
+            pipeline_parallel_rank=0,
+        )
+        dims = deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self.smoke_module.make_projection_weights(
+                deepseek_module,
+                dims,
+                device=torch.device("cpu"),
+                dtype=torch.float32,
+                query_mode="q_lora",
+            )
+            for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            (
+                self.smoke_module.make_mlp_weights(
+                    deepseek_module,
+                    config.hidden_size,
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                )
+                if layer_idx < config.first_k_dense_replace
+                else None
+            )
+            for layer_idx in range(model.model.num_layers)
+        )
+        moe_weights = tuple(
+            (
+                None
+                if layer_idx < config.first_k_dense_replace
+                else self.smoke_module.make_moe_weights(
+                    deepseek_module,
+                    config.hidden_size,
+                    device=torch.device("cpu"),
+                    dtype=torch.float32,
+                    num_experts=config.n_routed_experts,
+                )
+            )
+            for layer_idx in range(model.model.num_layers)
+        )
+
+        state_dict = self.smoke_module.build_scaffold_state_dict(
+            model,
+            projection_weights,
+            mlp_weights,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            moe_weights=moe_weights,
+            namespace="hf",
+        )
+
+        self.assertEqual(tuple(state_dict["model.layers.0.self_attn.q_b_proj.weight"].shape), (2, 12))
+        self.assertEqual(tuple(state_dict["model.layers.0.self_attn.kv_b_proj.weight"].shape), (3, 16))
+        self.assertEqual(tuple(state_dict["model.layers.0.self_attn.o_proj.weight"].shape), (8, 6))
+        self.assertEqual(tuple(state_dict["model.layers.0.mlp.gate_proj.weight"].shape), (6, 8))
+        self.assertEqual(
+            tuple(state_dict["model.layers.1.mlp.experts.0.down_proj.weight"].shape),
+            (8, 6),
+        )
+
     def test_build_scaffold_state_dict_supports_hf_namespace(self):
         deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]
         config = self.smoke_module.build_config()

@@ -246,6 +246,13 @@ def build_scaffold_state_dict(
     if namespace not in ("local", "hf"):
         raise ValueError(f"Unsupported scaffold namespace: {namespace}")
 
+    tp_world_size = model.model.tensor_parallel_world_size if namespace == "hf" else 1
+
+    def expand_tp_shard(tensor, *, shard_dim):
+        if tensor is None or tp_world_size == 1:
+            return tensor
+        return torch.cat([tensor] * tp_world_size, dim=shard_dim)
+
     embed_key = "model.embed_tokens.weight" if namespace == "hf" else "embed_tokens.weight"
     lm_head_key = "lm_head.weight"
     norm_key = "model.norm.weight" if namespace == "hf" else "norm.weight"
@@ -284,25 +291,37 @@ def build_scaffold_state_dict(
         kv_a_proj_with_mqa = torch.cat(
             [
                 layer_projection_weights.kv_latent_proj,
-                layer_projection_weights.k_rope_proj,
+                expand_tp_shard(layer_projection_weights.k_rope_proj, shard_dim=1),
             ],
             dim=1,
         )
         if layer_projection_weights.q_proj is not None:
-            state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj
+            state_dict[f"{prefix}.q_proj.weight"] = expand_tp_shard(
+                layer_projection_weights.q_proj,
+                shard_dim=1,
+            )
         else:
             state_dict[f"{prefix}.q_a_proj.weight"] = layer_projection_weights.q_a_proj
             state_dict[f"{prefix}.q_a_layernorm.weight"] = (
                 layer_projection_weights.q_a_layernorm_weight
             )
-            state_dict[f"{prefix}.q_b_proj.weight"] = layer_projection_weights.q_b_proj
+            state_dict[f"{prefix}.q_b_proj.weight"] = expand_tp_shard(
+                layer_projection_weights.q_b_proj,
+                shard_dim=1,
+            )
         state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = kv_a_proj_with_mqa
         if layer_projection_weights.kv_a_layernorm_weight is not None:
             state_dict[f"{prefix}.kv_a_layernorm.weight"] = (
                 layer_projection_weights.kv_a_layernorm_weight
             )
-        state_dict[f"{prefix}.kv_b_proj.weight"] = layer_projection_weights.kv_up_proj
-        state_dict[f"{prefix}.o_proj.weight"] = layer_projection_weights.o_proj
+        state_dict[f"{prefix}.kv_b_proj.weight"] = expand_tp_shard(
+            layer_projection_weights.kv_up_proj,
+            shard_dim=1,
+        )
+        state_dict[f"{prefix}.o_proj.weight"] = expand_tp_shard(
+            layer_projection_weights.o_proj,
+            shard_dim=0,
+        )
     if moe_weights is None:
         moe_weights = tuple(None for _ in mlp_weights)
     for layer_idx, (layer_mlp_weights, layer_moe_weights) in enumerate(
@@ -313,30 +332,48 @@ def build_scaffold_state_dict(
         )
         prefix = f"{layer_prefix}.mlp"
         if layer_mlp_weights is not None:
-            state_dict[f"{prefix}.gate_proj.weight"] = layer_mlp_weights.gate_proj
-            state_dict[f"{prefix}.up_proj.weight"] = layer_mlp_weights.up_proj
-            state_dict[f"{prefix}.down_proj.weight"] = layer_mlp_weights.down_proj
+            state_dict[f"{prefix}.gate_proj.weight"] = expand_tp_shard(
+                layer_mlp_weights.gate_proj,
+                shard_dim=1,
+            )
+            state_dict[f"{prefix}.up_proj.weight"] = expand_tp_shard(
+                layer_mlp_weights.up_proj,
+                shard_dim=1,
+            )
+            state_dict[f"{prefix}.down_proj.weight"] = expand_tp_shard(
+                layer_mlp_weights.down_proj,
+                shard_dim=0,
+            )
         if layer_moe_weights is not None:
             state_dict[f"{prefix}.gate.weight"] = layer_moe_weights.gate
             if layer_moe_weights.shared_experts is not None:
                 state_dict[f"{prefix}.shared_experts.gate_proj.weight"] = (
-                    layer_moe_weights.shared_experts.gate_proj
+                    expand_tp_shard(
+                        layer_moe_weights.shared_experts.gate_proj,
+                        shard_dim=1,
+                    )
                 )
                 state_dict[f"{prefix}.shared_experts.up_proj.weight"] = (
-                    layer_moe_weights.shared_experts.up_proj
+                    expand_tp_shard(
+                        layer_moe_weights.shared_experts.up_proj,
+                        shard_dim=1,
+                    )
                 )
                 state_dict[f"{prefix}.shared_experts.down_proj.weight"] = (
-                    layer_moe_weights.shared_experts.down_proj
+                    expand_tp_shard(
+                        layer_moe_weights.shared_experts.down_proj,
+                        shard_dim=0,
+                    )
                 )
             for expert_idx, expert_weights in enumerate(layer_moe_weights.experts):
                 state_dict[f"{prefix}.experts.{expert_idx}.gate_proj.weight"] = (
-                    expert_weights.gate_proj
+                    expand_tp_shard(expert_weights.gate_proj, shard_dim=1)
                 )
                 state_dict[f"{prefix}.experts.{expert_idx}.up_proj.weight"] = (
-                    expert_weights.up_proj
+                    expand_tp_shard(expert_weights.up_proj, shard_dim=1)
                 )
                 state_dict[f"{prefix}.experts.{expert_idx}.down_proj.weight"] = (
-                    expert_weights.down_proj
+                    expand_tp_shard(expert_weights.down_proj, shard_dim=0)
                 )
     return state_dict
 
@@ -472,7 +509,42 @@ def write_scaffold_hf_directory(
             sort_keys=True,
         )
     )
+    _write_minimal_tokenizer_assets(
+        output_path,
+        vocab_size=model.config.vocab_size,
+    )
     return str(output_path)
+
+
+def _write_minimal_tokenizer_assets(output_path: Path, *, vocab_size: int) -> None:
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import PreTrainedTokenizerFast
+
+    if vocab_size < 4:
+        raise ValueError("vocab_size must be at least 4 to emit scaffold tokenizer assets")
+
+    vocab = {
+        "<unk>": 0,
+        "<pad>": 1,
+        "<bos>": 2,
+        "<eos>": 3,
+    }
+    for token_id in range(4, vocab_size):
+        vocab[f"tok{token_id}"] = token_id
+
+    tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>"))
+    tokenizer.pre_tokenizer = Whitespace()
+    fast_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        unk_token="<unk>",
+        pad_token="<pad>",
+        bos_token="<bos>",
+        eos_token="<eos>",
+    )
+    fast_tokenizer.model_max_length = 4096
+    fast_tokenizer.save_pretrained(str(output_path))
 
 
 def resolve_checkpoint_format(checkpoint_format, checkpoint_layout):

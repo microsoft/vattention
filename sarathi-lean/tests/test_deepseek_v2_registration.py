@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import contextmanager
@@ -38,6 +40,10 @@ def _install_transformers_stub():
     class PretrainedConfig:
         @classmethod
         def from_pretrained(cls, *args, **kwargs):
+            if args:
+                config_path = Path(args[0]) / "config.json"
+                if config_path.exists():
+                    return cls(**json.loads(config_path.read_text()))
             return cls()
 
         def __init__(self, **kwargs):
@@ -46,10 +52,17 @@ def _install_transformers_stub():
 
     class AutoConfig:
         from_pretrained_result = None
+        registry = {}
 
         @classmethod
         def from_pretrained(cls, *args, **kwargs):
+            if isinstance(cls.from_pretrained_result, Exception):
+                raise cls.from_pretrained_result
             return cls.from_pretrained_result
+
+        @classmethod
+        def register(cls, model_type, config_class):
+            cls.registry[model_type] = config_class
 
     transformers.PretrainedConfig = PretrainedConfig
     transformers.AutoConfig = AutoConfig
@@ -209,6 +222,38 @@ class DeepseekV2RegistrationTests(unittest.TestCase):
             self.assertIs(resolved, sentinel)
             self.assertEqual(recorded["model"], "deepseek-ai/DeepSeek-V2-Lite")
             self.assertEqual(recorded["revision"], "main")
+
+    def test_get_config_falls_back_to_known_local_deepseek_config(self):
+        with _isolated_modules(["sarathi.transformers_utils", "transformers"]):
+            transformers, deepseek_module, config_module = _load_config_modules()
+            transformers.AutoConfig.from_pretrained_result = ValueError(
+                "unknown model type deepseek_v2"
+            )
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                config_path = Path(tmpdir) / "config.json"
+                config_path.write_text(
+                    json.dumps(
+                        {
+                            "model_type": "deepseek_v2",
+                            "architectures": ["DeepseekV2ForCausalLM"],
+                            "kv_lora_rank": 321,
+                        }
+                    )
+                )
+
+                resolved = config_module.get_config(
+                    tmpdir,
+                    trust_remote_code=True,
+                    revision=None,
+                )
+
+            self.assertIsInstance(resolved, deepseek_module.DeepseekV2Config)
+            self.assertEqual(resolved.kv_lora_rank, 321)
+            self.assertIs(
+                transformers.AutoConfig.registry["deepseek_v2"],
+                deepseek_module.DeepseekV2Config,
+            )
 
     def test_model_loader_resolves_deepseek_architecture(self):
         with _isolated_modules(

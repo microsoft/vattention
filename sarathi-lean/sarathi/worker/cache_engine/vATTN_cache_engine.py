@@ -556,17 +556,6 @@ def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
             DeepseekV2ComponentMLAKVCache,
         )
 
-        kv_latent_cache, k_rope_cache = kv_cache
-        assert kv_latent_cache.device == device, (
-            "kv_latent cache device mismatch. expected: {}, got: {}".format(
-                device, kv_latent_cache.device
-            )
-        )
-        assert k_rope_cache.device == device, (
-            "k_rope cache device mismatch expected: {}, got: {}".format(
-                device, k_rope_cache.device
-            )
-        )
         num_q_heads_local = getattr(
             getattr(cache_spec, "tp_attention", None),
             "num_q_heads_local",
@@ -576,17 +565,63 @@ def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
             raise AttributeError(
                 "MLA cache spec must expose tp_attention.num_q_heads_local or num_heads"
             )
+        if len(kv_cache) == 2:
+            kv_latent_cache, k_rope_cache = kv_cache
+            assert kv_latent_cache.device == device, (
+                "kv_latent cache device mismatch. expected: {}, got: {}".format(
+                    device, kv_latent_cache.device
+                )
+            )
+            assert k_rope_cache.device == device, (
+                "k_rope cache device mismatch expected: {}, got: {}".format(
+                    device, k_rope_cache.device
+                )
+            )
+            return [
+                DeepseekV2ComponentMLAKVCache(
+                    kv_latent=kv_latent_cache[:, :, layer_idx, :],
+                    k_rope=k_rope_cache[:, :, layer_idx, :].view(
+                        kv_latent_cache.shape[0],
+                        kv_latent_cache.shape[1],
+                        num_q_heads_local,
+                        cache_spec.mla_qk_rope_head_dim,
+                    ),
+                )
+                for layer_idx in range(cache_spec.num_layers)
+            ]
+
+        if len(kv_cache) != 2 * cache_spec.num_layers:
+            raise ValueError(
+                "Unexpected MLA cache tensor layout from vAttention backend: "
+                f"expected 2 or {2 * cache_spec.num_layers} tensors, got {len(kv_cache)}"
+            )
+
+        kv_latent_caches = kv_cache[: cache_spec.num_layers]
+        k_rope_caches = kv_cache[cache_spec.num_layers :]
+        for layer_idx, (kv_latent_cache, k_rope_cache) in enumerate(
+            zip(kv_latent_caches, k_rope_caches)
+        ):
+            assert kv_latent_cache.device == device, (
+                "kv_latent cache device mismatch for layer {}. expected: {}, got: {}".format(
+                    layer_idx, device, kv_latent_cache.device
+                )
+            )
+            assert k_rope_cache.device == device, (
+                "k_rope cache device mismatch for layer {}. expected: {}, got: {}".format(
+                    layer_idx, device, k_rope_cache.device
+                )
+            )
         return [
             DeepseekV2ComponentMLAKVCache(
-                kv_latent=kv_latent_cache[:, :, layer_idx, :],
-                k_rope=k_rope_cache[:, :, layer_idx, :].view(
+                kv_latent=kv_latent_cache,
+                k_rope=k_rope_cache.view(
                     kv_latent_cache.shape[0],
                     kv_latent_cache.shape[1],
                     num_q_heads_local,
                     cache_spec.mla_qk_rope_head_dim,
                 ),
             )
-            for layer_idx in range(cache_spec.num_layers)
+            for kv_latent_cache, k_rope_cache in zip(kv_latent_caches, k_rope_caches)
         ]
 
     if cache_spec.megacache:

@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -24,6 +25,11 @@ def get_tokenizer(
         tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name, *args, trust_remote_code=trust_remote_code, **kwargs
         )
+    except KeyError as e:
+        tokenizer_path = Path(tokenizer_name)
+        if tokenizer_mode == "slow" or not (tokenizer_path / "tokenizer.json").exists():
+            raise e
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments.
         err_msg = "Failed to load the tokenizer."

@@ -245,6 +245,63 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
             )
         )
 
+    def test_component_spec_mla_cache_formats_real_backend_per_layer_tensor_layout(self):
+        batch_size = 2
+        max_seq_len = 3
+        num_layers = 2
+        kv_lora_rank = 3
+        num_q_heads_local = 2
+        qk_rope_head_dim = 1
+
+        kv_latent_layers = [
+            torch.full(
+                (batch_size, max_seq_len, kv_lora_rank),
+                float(layer_idx + 1),
+                dtype=torch.float32,
+            )
+            for layer_idx in range(num_layers)
+        ]
+        k_rope_layers = [
+            torch.arange(
+                batch_size * max_seq_len * num_q_heads_local * qk_rope_head_dim,
+                dtype=torch.float32,
+            ).view(batch_size, max_seq_len, num_q_heads_local * qk_rope_head_dim)
+            + 100 * layer_idx
+            for layer_idx in range(num_layers)
+        ]
+
+        cache_spec = types.SimpleNamespace(
+            architecture=CacheArchitecture.MLA,
+            num_layers=num_layers,
+            tp_attention=types.SimpleNamespace(num_q_heads_local=num_q_heads_local),
+            mla_qk_rope_head_dim=qk_rope_head_dim,
+        )
+
+        caches = format_vattention_gpu_cache(
+            cache_spec,
+            tuple(kv_latent_layers + k_rope_layers),
+            torch.device("cpu"),
+        )
+
+        self.assertEqual(len(caches), num_layers)
+        self.assertEqual(tuple(caches[0].kv_latent.shape), (batch_size, max_seq_len, kv_lora_rank))
+        self.assertEqual(
+            tuple(caches[0].k_rope.shape),
+            (batch_size, max_seq_len, num_q_heads_local, qk_rope_head_dim),
+        )
+        self.assertTrue(torch.equal(caches[1].kv_latent, kv_latent_layers[1]))
+        self.assertTrue(
+            torch.equal(
+                caches[1].k_rope,
+                k_rope_layers[1].view(
+                    batch_size,
+                    max_seq_len,
+                    num_q_heads_local,
+                    qk_rope_head_dim,
+                ),
+            )
+        )
+
     def test_dense_megacache_formatting_is_unchanged(self):
         k_cache = torch.zeros(2, 4, 3, 5)
         v_cache = torch.zeros(2, 4, 3, 5)
