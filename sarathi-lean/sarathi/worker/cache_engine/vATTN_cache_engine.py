@@ -504,6 +504,52 @@ def select_vattention_cache_validation_profile(
     return None
 
 
+def recommend_vattention_cache_validation_profile(
+    suite_summary,
+    *,
+    preferred_profile="bounded_mla_suite_v1",
+    fallback_profiles=None,
+):
+    if fallback_profiles is None:
+        fallback_profiles = tuple(
+            profile_name
+            for profile_name in list_vattention_mla_validation_profiles()
+            if profile_name != preferred_profile
+        )
+
+    preferred_report = compare_vattention_cache_validation_suite_to_named_profile(
+        suite_summary,
+        preferred_profile,
+    )
+    if preferred_report["is_valid"]:
+        return {
+            "status": "ready",
+            "selected_profile": preferred_profile,
+            "selected_report": preferred_report,
+            "checked_reports": (preferred_report,),
+        }
+
+    fallback_reports = compare_vattention_cache_validation_suite_to_named_profiles(
+        suite_summary,
+        profile_names=fallback_profiles,
+    )
+    for report in fallback_reports:
+        if report["is_valid"]:
+            return {
+                "status": "relaxed_only",
+                "selected_profile": report["profile_name"],
+                "selected_report": report,
+                "checked_reports": (preferred_report,) + tuple(fallback_reports),
+            }
+
+    return {
+        "status": "blocked",
+        "selected_profile": None,
+        "selected_report": None,
+        "checked_reports": (preferred_report,) + tuple(fallback_reports),
+    }
+
+
 def format_vattention_gpu_cache(cache_spec, kv_cache, device) -> List[object]:
     if cache_spec.architecture == CacheArchitecture.MLA:
         from sarathi.model_executor.models.deepseek_v2 import (

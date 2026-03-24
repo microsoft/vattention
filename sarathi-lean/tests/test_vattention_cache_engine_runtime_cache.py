@@ -172,6 +172,9 @@ compare_vattention_cache_validation_suite_to_named_profiles = (
 select_vattention_cache_validation_profile = (
     cache_engine_module.select_vattention_cache_validation_profile
 )
+recommend_vattention_cache_validation_profile = (
+    cache_engine_module.recommend_vattention_cache_validation_profile
+)
 
 
 class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
@@ -692,6 +695,40 @@ class VAttentionCacheEngineRuntimeCacheTests(unittest.TestCase):
             }
         )
         self.assertIsNone(no_match)
+
+    def test_cache_usage_profile_recommendation_reports_ready_relaxed_and_blocked(self):
+        ready_suite = {
+            "max_peak_persistent_bytes": 160,
+            "min_free_blocks_overall": 5,
+            "max_largest_growth_bytes": 128,
+            "max_largest_reclaim_bytes": 128,
+        }
+        relaxed_only_suite = {
+            "max_peak_persistent_bytes": 176,
+            "min_free_blocks_overall": 4,
+            "max_largest_growth_bytes": 144,
+            "max_largest_reclaim_bytes": 144,
+        }
+        blocked_suite = {
+            "max_peak_persistent_bytes": 256,
+            "min_free_blocks_overall": 3,
+            "max_largest_growth_bytes": 192,
+            "max_largest_reclaim_bytes": 192,
+        }
+
+        ready = recommend_vattention_cache_validation_profile(ready_suite)
+        relaxed = recommend_vattention_cache_validation_profile(relaxed_only_suite)
+        blocked = recommend_vattention_cache_validation_profile(blocked_suite)
+
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["selected_profile"], "bounded_mla_suite_v1")
+        self.assertEqual(len(ready["checked_reports"]), 1)
+        self.assertEqual(relaxed["status"], "relaxed_only")
+        self.assertEqual(relaxed["selected_profile"], "bounded_mla_suite_relaxed")
+        self.assertEqual(len(relaxed["checked_reports"]), 2)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertIsNone(blocked["selected_profile"])
+        self.assertIsNone(blocked["selected_report"])
 
     def test_engine_cache_usage_stats_tracks_active_slots_and_free_blocks(self):
         engine = cache_engine_module.vATTNCacheEngine.__new__(

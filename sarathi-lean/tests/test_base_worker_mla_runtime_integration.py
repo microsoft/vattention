@@ -1147,6 +1147,44 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(selected_profile)
         self.assertEqual(selected_profile["profile_name"], "bounded_mla_suite_relaxed")
 
+    def test_worker_can_recommend_cache_usage_profile_readiness(self):
+        worker = self._make_worker(
+            model_runner=_FakeModelRunner(output="sampler-output"),
+            gpu_cache=("gpu-cache",),
+        )
+
+        ready = worker.recommend_cache_usage_suite_profile(
+            {
+                "max_peak_persistent_bytes": 160,
+                "min_free_blocks_overall": 5,
+                "max_largest_growth_bytes": 128,
+                "max_largest_reclaim_bytes": 128,
+            }
+        )
+        relaxed = worker.recommend_cache_usage_suite_profile(
+            {
+                "max_peak_persistent_bytes": 176,
+                "min_free_blocks_overall": 4,
+                "max_largest_growth_bytes": 144,
+                "max_largest_reclaim_bytes": 144,
+            }
+        )
+        blocked = worker.recommend_cache_usage_suite_profile(
+            {
+                "max_peak_persistent_bytes": 256,
+                "min_free_blocks_overall": 3,
+                "max_largest_growth_bytes": 192,
+                "max_largest_reclaim_bytes": 192,
+            }
+        )
+
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["selected_profile"], "bounded_mla_suite_v1")
+        self.assertEqual(relaxed["status"], "relaxed_only")
+        self.assertEqual(relaxed["selected_profile"], "bounded_mla_suite_relaxed")
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertIsNone(blocked["selected_profile"])
+
 
 if __name__ == "__main__":
     unittest.main()

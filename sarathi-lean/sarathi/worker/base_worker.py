@@ -221,6 +221,24 @@ class BaseWorker:
             profile_names=profile_names,
         )
 
+    @synchronized
+    def recommend_cache_usage_suite_profile(
+        self,
+        suite_summary,
+        *,
+        preferred_profile="bounded_mla_suite_v1",
+        fallback_profiles=None,
+    ):
+        from sarathi.worker.cache_engine.vATTN_cache_engine import (
+            recommend_vattention_cache_validation_profile,
+        )
+
+        return recommend_vattention_cache_validation_profile(
+            suite_summary,
+            preferred_profile=preferred_profile,
+            fallback_profiles=fallback_profiles,
+        )
+
     def on_step_completed(
         self, scheduler_outputs: SchedulerOutputs, sampler_outputs: SamplerOutputs
     ) -> None:
