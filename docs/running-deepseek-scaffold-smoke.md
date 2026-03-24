@@ -1,6 +1,6 @@
 # Running DeepSeek Scaffold Smoke
 
-This document explains how to run the bounded non-MoE `DeepSeek` scaffold smoke path inside the project Docker container.
+This document explains how to run the bounded `DeepSeek` scaffold smoke path inside the project Docker container.
 
 This is **not** real `DeepSeek-V2-Lite` pretrained inference.
 
@@ -11,6 +11,7 @@ It is a bring-up checkpoint for the current scaffold path:
 - iterative greedy decode
 - contiguous vs paged MLA generation parity
 - DeepSeek-style MLA projection aliases in the bounded loader path
+- bounded MoE scaffold loading and execution
 
 ## Recommended Command
 
@@ -42,6 +43,15 @@ To run only the paged scaffold path:
 scripts/docker/run-deepseek-scaffold-smoke.sh paged
 ```
 
+To exercise the most realistic current synthetic HF-style surface:
+
+```bash
+scripts/docker/run-deepseek-scaffold-smoke.sh compare \
+  --checkpoint-layout hf_dir \
+  --query-mode q_lora \
+  --mlp-mode moe
+```
+
 ## Expected Output
 
 The script prints a JSON summary including:
@@ -68,7 +78,7 @@ This smoke path is currently meant to validate Phase `7f` scaffold bring-up work
 It does **not** validate:
 
 - real `DeepSeek-V2-Lite` pretrained weight loading
-- MoE execution
+- full real DeepSeek MoE semantics
 - full production inference quality
 
 ## Interpreting A Blocked Compare Run

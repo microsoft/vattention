@@ -497,6 +497,11 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
             self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", index["weight_map"])
             self.assertIn("layers.0.self_attn.kv_a_layernorm.weight", index["weight_map"])
             self.assertEqual(config_json["tensor_parallel_world_size"], 2)
+            self.assertEqual(config_json["intermediate_size"], 4)
+            self.assertEqual(config_json["moe_intermediate_size"], 4)
+            self.assertEqual(config_json["scoring_func"], "softmax")
+            self.assertEqual(config_json["architectures"], ["DeepseekV2ForCausalLM"])
+            self.assertFalse(config_json["tie_word_embeddings"])
 
     def test_write_scaffold_checkpoint_loads_back_into_runtime_device(self):
         deepseek_module = sys.modules["sarathi.model_executor.models.deepseek_v2"]

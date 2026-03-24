@@ -19,14 +19,22 @@ def build_config(query_mode="direct", mlp_mode="dense"):
     config = SimpleNamespace(
         vocab_size=16,
         hidden_size=6,
+        intermediate_size=4,
+        moe_intermediate_size=4,
         num_attention_heads=4,
         num_hidden_layers=4,
+        max_position_embeddings=128,
         rms_norm_eps=1e-6,
+        rope_theta=10000.0,
+        attention_bias=False,
         q_lora_rank=q_lora_rank,
         kv_lora_rank=3,
         qk_nope_head_dim=2,
         qk_rope_head_dim=1,
         v_head_dim=2,
+        scoring_func="softmax",
+        architectures=["DeepseekV2ForCausalLM"],
+        tie_word_embeddings=False,
     )
     if mlp_mode == "moe":
         config.first_k_dense_replace = 1
@@ -381,11 +389,17 @@ def write_scaffold_hf_directory(
         "model_type": "deepseek_v2",
         "vocab_size": model.config.vocab_size,
         "hidden_size": model.config.hidden_size,
+        "intermediate_size": getattr(model.config, "intermediate_size", None),
+        "moe_intermediate_size": getattr(model.config, "moe_intermediate_size", None),
         "num_attention_heads": model.config.num_attention_heads,
         "num_hidden_layers": model.config.num_hidden_layers,
+        "max_position_embeddings": getattr(model.config, "max_position_embeddings", None),
         "tensor_parallel_world_size": model.model.tensor_parallel_world_size,
         "pipeline_parallel_world_size": model.model.pipeline_parallel_world_size,
         "pipeline_parallel_rank": model.model.pipeline_parallel_rank,
+        "rms_norm_eps": getattr(model.config, "rms_norm_eps", None),
+        "rope_theta": getattr(model.config, "rope_theta", None),
+        "attention_bias": getattr(model.config, "attention_bias", None),
         "q_lora_rank": model.config.q_lora_rank,
         "kv_lora_rank": model.config.kv_lora_rank,
         "qk_nope_head_dim": model.config.qk_nope_head_dim,
@@ -395,7 +409,10 @@ def write_scaffold_hf_directory(
         "n_routed_experts": getattr(model.config, "n_routed_experts", None),
         "n_shared_experts": getattr(model.config, "n_shared_experts", None),
         "num_experts_per_tok": getattr(model.config, "num_experts_per_tok", None),
+        "scoring_func": getattr(model.config, "scoring_func", None),
         "norm_topk_prob": getattr(model.config, "norm_topk_prob", None),
+        "architectures": getattr(model.config, "architectures", None),
+        "tie_word_embeddings": getattr(model.config, "tie_word_embeddings", None),
     }
     config_payload = {
         key: value for key, value in config_payload.items() if value is not None
