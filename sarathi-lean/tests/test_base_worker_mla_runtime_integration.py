@@ -271,6 +271,21 @@ class _FakeSeqManager:
         self.completed.append((scheduler_outputs, sampler_outputs))
 
 
+class _SequencedFakeSeqManager(_FakeSeqManager):
+    def __init__(self, seq_metadata_lists):
+        super().__init__(seq_metadata_lists[0])
+        self.seq_metadata_lists = list(seq_metadata_lists)
+        self.schedule_index = 0
+
+    def on_schedule(self, scheduler_outputs):
+        del scheduler_outputs
+        seq_metadata_list = self.seq_metadata_lists[self.schedule_index]
+        if self.schedule_index < len(self.seq_metadata_lists) - 1:
+            self.schedule_index += 1
+        self.seq_metadata_list = seq_metadata_list
+        return None, seq_metadata_list
+
+
 class _FakeCacheEngine:
     def __init__(self, cache_usage_stats=None):
         self.steps = []
@@ -293,6 +308,37 @@ class _FakeCacheEngine:
     def get_cache_usage_stats(self):
         return self._cache_usage_stats
 
+    def get_cache_usage_history(self):
+        return ()
+
+
+class _SequencedFakeCacheEngine(_FakeCacheEngine):
+    def __init__(self, cache_usage_history):
+        super().__init__(cache_usage_stats=None)
+        self.cache_usage_history = list(cache_usage_history)
+        self.history_index = -1
+        self.preempted = []
+
+    def step(self, seq_metadata_list):
+        super().step(seq_metadata_list)
+        if self.history_index < len(self.cache_usage_history) - 1:
+            self.history_index += 1
+
+    def preempt_requests(self, preempted_seq):
+        self.preempted.append(tuple(seq.seq_id for seq in preempted_seq))
+        if self.history_index < len(self.cache_usage_history) - 1:
+            self.history_index += 1
+
+    def get_cache_usage_stats(self):
+        if self.history_index < 0:
+            return None
+        return self.cache_usage_history[self.history_index]
+
+    def get_cache_usage_history(self):
+        if self.history_index < 0:
+            return ()
+        return tuple(self.cache_usage_history[: self.history_index + 1])
+
 
 class _FakeMetricsStore:
     def __init__(self):
@@ -300,6 +346,22 @@ class _FakeMetricsStore:
 
     def on_batch_stage_end(self, *args):
         self.calls.append(args)
+
+
+class _FakeModelRunner:
+    def __init__(self, output):
+        self.output = output
+        self.calls = []
+
+    def run(self, seq_metadata_list, gpu_cache, model_kwargs=None):
+        self.calls.append(
+            {
+                "seq_metadata_list": seq_metadata_list,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        return self.output
 
 
 class _WrapperExecutionModelRunner:
@@ -416,16 +478,16 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         wrapper.batch_index_gen = torch.tensor([], dtype=torch.int32)
         return wrapper
 
-    def _make_worker(self, model_runner, gpu_cache, cache_usage_stats=None):
+    def _make_worker(self, model_runner, gpu_cache, cache_usage_stats=None, *, seq_manager=None, cache_engine=None):
         worker = self.BaseWorker.__new__(self.BaseWorker)
-        worker.seq_manager = _FakeSeqManager(["seq-md"])
-        worker.cache_engine = _FakeCacheEngine(cache_usage_stats=cache_usage_stats)
+        worker.seq_manager = seq_manager or _FakeSeqManager(["seq-md"])
+        worker.cache_engine = cache_engine or _FakeCacheEngine(cache_usage_stats=cache_usage_stats)
         worker.gpu_cache = gpu_cache
         worker.model_runner = model_runner
         worker.metrics_store = _FakeMetricsStore()
         worker.tensor_model_parallel_rank = 0
         worker.pipeline_model_parallel_rank = 0
-        worker.preempt_requests = lambda preempted_seq: None
+        worker.preempt_requests = worker.cache_engine.preempt_requests
         return worker
 
     def test_worker_executes_mla_wrapper_path_with_component_runtime_cache(self):
@@ -528,6 +590,92 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(len(self.flash_calls), model.num_layers)
         self.assertTrue(torch.any(gpu_cache[0].kv_latent[0, 0] != 0))
+
+    def test_worker_exposes_multi_step_mla_cache_history_across_prefill_decode_and_preemption(self):
+        history = [
+            {
+                "event": "step",
+                "architecture": "mla",
+                "persistent_tokens": 2,
+                "persistent_bytes_per_token": 32,
+                "persistent_bytes": 64,
+                "page_buffer_token_bytes": 16,
+                "cache_components": ("kv_latent", "k_rope"),
+                "uses_component_resident_cache": True,
+                "active_batch_indices": (0,),
+                "active_request_count": 1,
+                "free_blocks": 8,
+                "seq_to_batch_idx": {10: 0},
+                "scheduled_batch_indices": (0,),
+                "scheduled_prompt_batch_indices": (0,),
+                "scheduled_decode_batch_indices": (),
+            },
+            {
+                "event": "step",
+                "architecture": "mla",
+                "persistent_tokens": 3,
+                "persistent_bytes_per_token": 32,
+                "persistent_bytes": 96,
+                "page_buffer_token_bytes": 16,
+                "cache_components": ("kv_latent", "k_rope"),
+                "uses_component_resident_cache": True,
+                "active_batch_indices": (0,),
+                "active_request_count": 1,
+                "free_blocks": 7,
+                "seq_to_batch_idx": {10: 0},
+                "scheduled_batch_indices": (0,),
+                "scheduled_prompt_batch_indices": (),
+                "scheduled_decode_batch_indices": (0,),
+            },
+            {
+                "event": "free_request",
+                "architecture": "mla",
+                "persistent_tokens": 0,
+                "persistent_bytes_per_token": 32,
+                "persistent_bytes": 0,
+                "page_buffer_token_bytes": 16,
+                "cache_components": ("kv_latent", "k_rope"),
+                "uses_component_resident_cache": True,
+                "active_batch_indices": (),
+                "active_request_count": 0,
+                "free_blocks": 9,
+                "seq_to_batch_idx": {},
+                "scheduled_batch_indices": (0,),
+                "scheduled_prompt_batch_indices": (),
+                "scheduled_decode_batch_indices": (0,),
+            },
+        ]
+        seq_manager = _SequencedFakeSeqManager(
+            [["prefill-md"], ["decode-md"], ["post-preempt-md"]]
+        )
+        cache_engine = _SequencedFakeCacheEngine(history)
+        model_runner = _FakeModelRunner(output="sampler-output")
+        worker = self._make_worker(
+            model_runner=model_runner,
+            gpu_cache=("gpu-cache",),
+            seq_manager=seq_manager,
+            cache_engine=cache_engine,
+        )
+
+        worker.execute_model(scheduler_outputs="prefill")
+        first_stats = worker.get_cache_usage_stats()
+        worker.execute_model(scheduler_outputs="decode")
+        second_stats = worker.get_cache_usage_stats()
+        worker.execute_model(
+            scheduler_outputs="preempt",
+            preempted_seq=[types.SimpleNamespace(seq_id=10)],
+        )
+        history_view = worker.get_cache_usage_history()
+
+        self.assertEqual(first_stats["persistent_bytes"], 64)
+        self.assertEqual(first_stats["scheduled_prompt_batch_indices"], (0,))
+        self.assertEqual(second_stats["persistent_bytes"], 96)
+        self.assertEqual(second_stats["scheduled_decode_batch_indices"], (0,))
+        self.assertEqual(cache_engine.preempted, [(10,)])
+        self.assertEqual([snapshot["event"] for snapshot in history_view], ["step", "step", "free_request"])
+        self.assertEqual(history_view[-1]["persistent_bytes"], 0)
+        self.assertEqual(history_view[-1]["free_blocks"], 9)
+        self.assertEqual(history_view[-1]["seq_to_batch_idx"], {})
 
 
 if __name__ == "__main__":

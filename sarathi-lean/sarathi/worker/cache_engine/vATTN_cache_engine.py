@@ -135,6 +135,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         self.curr_batch_idx = None
         self.prompt_batch_indices = ()
         self.decode_batch_indices = ()
+        self.cache_usage_history = []
         self.page_size = cache_config.page_size
         self.vattn_async = True if mem_alloc_backend == "async" else False
         self.vattn_mega_cache = True if "megacache" in model_config.attention_backend.lower() else False
@@ -222,6 +223,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         self.decode_batch_indices = tuple(b_idx_gen)
         self.curr_batch_idx = torch.tensor(b_idx_prompt+b_idx_gen, dtype=torch.int32, device=self.device)
         get_attention_wrapper().set_batch_idx(self.curr_batch_idx, torch.tensor(b_idx_gen, dtype=torch.int32, device=self.device))
+        self._record_cache_usage_snapshot("step")
 
     def on_step_completion(self, seq_metadata_list: List[SequenceMetadata]) -> None:
         for seq_metadata in seq_metadata_list:
@@ -248,6 +250,7 @@ class vATTNCacheEngine(BaseCacheEngine):
             vattention.free_batch_idx(batch_idx)
             self.seq_to_batch_idx.pop(seq_id)
             self.curr_seq_lens[batch_idx] = 0
+            self._record_cache_usage_snapshot("free_request")
             return
         raise Exception(f"seq_id {seq_id} not found in req_table")
 
@@ -284,6 +287,18 @@ class vATTNCacheEngine(BaseCacheEngine):
             scheduled_prompt_batch_indices=getattr(self, "prompt_batch_indices", None),
             scheduled_decode_batch_indices=getattr(self, "decode_batch_indices", None),
         )
+
+    def _record_cache_usage_snapshot(self, event: str) -> None:
+        if not hasattr(self, "cache_spec") or not hasattr(self, "curr_seq_lens"):
+            return
+        snapshot = dict(self.get_cache_usage_stats())
+        snapshot["event"] = event
+        if not hasattr(self, "cache_usage_history"):
+            self.cache_usage_history = []
+        self.cache_usage_history.append(snapshot)
+
+    def get_cache_usage_history(self):
+        return tuple(getattr(self, "cache_usage_history", ()))
 
     @staticmethod
     def get_cache_block_size(
