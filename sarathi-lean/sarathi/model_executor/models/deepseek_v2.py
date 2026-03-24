@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -91,6 +91,12 @@ class DeepseekV2MLAProjectionWeights:
     k_rope_proj: torch.Tensor
     kv_up_proj: torch.Tensor
     o_proj: torch.Tensor
+
+
+DeepseekV2AttentionBackend = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, Optional[DeepseekV2MLAResidentCache], float],
+    torch.Tensor,
+]
 
 
 def split_query_projection(
@@ -273,6 +279,37 @@ def contiguous_mla_attention_from_hidden_states(
     )
 
 
+def mla_attention_with_backend(
+    hidden_states: torch.Tensor,
+    projection_weights: DeepseekV2MLAProjectionWeights,
+    mla_dims: DeepseekV2MLADims,
+    backend: DeepseekV2AttentionBackend,
+    cache: Optional[DeepseekV2MLAResidentCache] = None,
+    softmax_scale: Optional[float] = None,
+) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+    query_states, new_cache = project_mla_from_hidden_states(
+        hidden_states,
+        projection_weights,
+        mla_dims,
+    )
+    q_nope, q_rope = split_query_projection(query_states, mla_dims)
+    full_cache = append_resident_cache(cache, new_cache)
+    key, value = reconstruct_dense_kv(full_cache, projection_weights.kv_up_proj, mla_dims)
+    query = torch.cat([q_nope, q_rope], dim=-1)
+
+    if softmax_scale is None:
+        softmax_scale = mla_dims.q_head_dim ** -0.5
+
+    output = backend(query, key, value, cache, softmax_scale)
+    if (
+        output.ndim != 2
+        or output.shape[0] != hidden_states.shape[0]
+        or output.shape[1] != mla_dims.o_proj_input_dim_local
+    ):
+        raise ValueError("attention backend must return [tokens, o_proj_input_dim_local]")
+    return output @ projection_weights.o_proj, full_cache
+
+
 def batched_contiguous_mla_attention_from_hidden_states(
     hidden_states: Tuple[torch.Tensor, ...],
     projection_weights: DeepseekV2MLAProjectionWeights,
@@ -403,6 +440,23 @@ class DeepseekV2MLAAttention(nn.Module):
             softmax_scale=softmax_scale,
         )
         return output @ projection_weights.o_proj, cache
+
+    def forward_hidden_states_with_backend(
+        self,
+        hidden_states: torch.Tensor,
+        projection_weights: DeepseekV2MLAProjectionWeights,
+        backend: DeepseekV2AttentionBackend,
+        cache: Optional[DeepseekV2MLAResidentCache] = None,
+        softmax_scale: Optional[float] = None,
+    ) -> Tuple[torch.Tensor, DeepseekV2MLAResidentCache]:
+        return mla_attention_with_backend(
+            hidden_states=hidden_states,
+            projection_weights=projection_weights,
+            mla_dims=self.mla_dims,
+            backend=backend,
+            cache=cache,
+            softmax_scale=softmax_scale,
+        )
 
     def forward_hidden_states_contiguous_batched(
         self,
