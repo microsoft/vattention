@@ -14,6 +14,7 @@
 #include <cuda.h>
 #include <Python.h>
 #include <utility>
+#include <string>
 
 #include <thread>
 #include <atomic>
@@ -38,7 +39,12 @@ public:
     void init_kv_block_size()
     {
         page_size = do_cuda_init(device, page_size);
-        if (megacache_enabled)
+        if (component_spec_enabled)
+        {
+            if (tokens_per_page == 0)
+                tokens_per_page = page_size / page_buffer_token_bytes;
+        }
+        else if (megacache_enabled)
             tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem * num_layers);
         else
             tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem);
@@ -50,7 +56,9 @@ public:
     {
         u64 remainder;
 
-        if (megacache_enabled)
+        if (component_spec_enabled)
+            virt_buff_size_per_token = page_buffer_token_bytes;
+        else if (megacache_enabled)
             virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem * num_layers;
         else
             virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem;
@@ -115,9 +123,65 @@ public:
         max_context_length = max_context_length_;
         device = device_;
         dtype = dtype_;
+        scalar_type = torch::python::detail::py_object_to_dtype(dtype_);
         page_size = page_size_;
         megacache_enabled = megacache;
         bytes_per_elem = dtype.attr("itemsize").cast<int>();
+        page_buffer_token_bytes = megacache_enabled
+            ? (u64)num_kv_heads * head_size * bytes_per_elem * num_layers
+            : (u64)num_kv_heads * head_size * bytes_per_elem;
+        component_spec_enabled = false;
+        cache_component_token_dims = {
+            num_kv_heads * head_size,
+            num_kv_heads * head_size,
+        };
+        init_kv_block_size();
+        init_buffer_sizes();
+        init_kvcache_batch_metadata();
+        k_ptr.resize(num_layers);
+        v_ptr.resize(num_layers);
+        allocator = new VirtualTensorAllocator(device, page_size);
+        is_configured = true;
+    }
+
+    static at::ScalarType parse_scalar_type(const std::string &dtype_name)
+    {
+        if (dtype_name == "float16" || dtype_name == "half")
+            return at::ScalarType::Half;
+        if (dtype_name == "bfloat16")
+            return at::ScalarType::BFloat16;
+        if (dtype_name == "float32" || dtype_name == "float")
+            return at::ScalarType::Float;
+        throw std::runtime_error("Unsupported dtype for component-spec initialization: " + dtype_name);
+    }
+
+    void init_kvcache_component_spec(py::dict payload)
+    {
+        py::dict cache_spec = payload["cache_spec"].cast<py::dict>();
+        py::list cache_components = cache_spec["cache_components"].cast<py::list>();
+
+        max_batch_size = payload["max_batch_size"].cast<int>();
+        max_context_length = payload["max_context_length"].cast<long>();
+        device = payload["device_idx"].cast<int>();
+        page_size = cache_spec["page_size"].cast<u64>();
+        megacache_enabled = cache_spec["megacache"].cast<bool>();
+        num_layers = cache_spec["num_layers"].cast<int>();
+        num_kv_heads = cache_spec["num_kv_heads"].cast<int>();
+        head_size = cache_spec["head_size"].cast<int>();
+        tokens_per_page = cache_spec["tokens_per_page"].cast<u64>();
+        page_buffer_token_bytes = cache_spec["page_buffer_token_bytes"].cast<u64>();
+        bytes_per_elem = cache_spec["dtype_size"].cast<int>();
+        scalar_type = parse_scalar_type(payload["dtype"].cast<std::string>());
+        component_spec_enabled = true;
+        cache_component_token_dims.clear();
+        for (auto component_obj : cache_components)
+        {
+            py::dict component = component_obj.cast<py::dict>();
+            cache_component_token_dims.push_back(component["token_dim"].cast<int>());
+        }
+        if (cache_component_token_dims.size() != 2)
+            throw std::runtime_error("component-spec initialization currently expects exactly 2 cache components");
+
         init_kv_block_size();
         init_buffer_sizes();
         init_kvcache_batch_metadata();
@@ -141,7 +205,7 @@ public:
 
     at::Tensor alloc_virtual_tensor()
     {
-        at::ScalarType type_ = torch::python::detail::py_object_to_dtype(dtype);
+        at::ScalarType type_ = scalar_type;
         at::IntArrayRef shape;
         if (megacache_enabled)
             shape = {max_batch_size, max_context_length, num_layers, num_kv_heads, head_size};
@@ -149,6 +213,18 @@ public:
             shape = {max_batch_size, max_context_length, num_kv_heads, head_size};
 
         at::Tensor t = alloc_vtensor(shape, page_size, type_, allocator, device);
+        return t;
+    }
+
+    at::Tensor alloc_component_virtual_tensor(int component_token_dim)
+    {
+        at::IntArrayRef shape;
+        if (megacache_enabled)
+            shape = {max_batch_size, max_context_length, num_layers, component_token_dim};
+        else
+            shape = {max_batch_size, max_context_length, component_token_dim};
+
+        at::Tensor t = alloc_vtensor(shape, page_size, scalar_type, allocator, device);
         return t;
     }
 
@@ -178,6 +254,35 @@ public:
                     continue;
                 }
                 v_tensors.push_back(t);
+            }
+        }
+        std::vector<at::Tensor> tensors;
+        tensors.insert(tensors.end(), k_tensors.begin(), k_tensors.end());
+        tensors.insert(tensors.end(), v_tensors.begin(), v_tensors.end());
+        return tensors;
+    }
+
+    std::vector<at::Tensor> init_kvcache_component_spec_virtual()
+    {
+        if (!check_kvcache_config())
+        {
+            log.log("Invalid component-spec kv cache configuration...");
+            return std::vector<at::Tensor>();
+        }
+
+        if (megacache_enabled)
+        {
+            at::Tensor t0 = alloc_component_virtual_tensor(cache_component_token_dims[0]);
+            at::Tensor t1 = alloc_component_virtual_tensor(cache_component_token_dims[1]);
+            k_tensors.push_back(t0);
+            v_tensors.push_back(t1);
+        }
+        else
+        {
+            for (int layer_idx = 0; layer_idx < num_layers; layer_idx++)
+            {
+                k_tensors.push_back(alloc_component_virtual_tensor(cache_component_token_dims[0]));
+                v_tensors.push_back(alloc_component_virtual_tensor(cache_component_token_dims[1]));
             }
         }
         std::vector<at::Tensor> tensors;
@@ -653,6 +758,8 @@ public:
         DO_KVCACHE_CLEANUP(page_size);
         k_tensors.clear();
         v_tensors.clear();
+        cache_component_token_dims.clear();
+        component_spec_enabled = false;
         log.log("released memory and cleaned up vattention ...");
     }
 };
@@ -667,6 +774,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
      */
     m.def("reserve_physical_pages", &reserve_physical_pages, "reserve physical memory blocks...");
     m.def("init_kvcache", &init_kvcache, "initialize KV cache...");
+    m.def("init_kvcache_component_spec", &init_kvcache_component_spec, "initialize KV cache from a structured component spec...");
     m.def("cleanup", &cleanup, "cleanup and release allocator resources context...");
     /* Tunables and other helper APIs */
     m.def("set_verbose", &set_verbose, "to enable/disable printing logs...");

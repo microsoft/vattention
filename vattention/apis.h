@@ -12,6 +12,13 @@ std::vector<at::Tensor> init_kvcache(unsigned long num_layers, unsigned long num
     return tensors;
 }
 
+std::vector<at::Tensor> init_kvcache_component_spec(py::dict payload) {
+    std::vector<at::Tensor> tensors;
+    vattn.init_kvcache_component_spec(payload);
+    tensors = vattn.init_kvcache_component_spec_virtual();
+    return tensors;
+}
+
 void show_kvcache_config() {
     vattn.show_kvcache_config();
 }

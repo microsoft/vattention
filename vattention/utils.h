@@ -32,6 +32,7 @@ uvmPhysPageMap uvm_pagemap;
 
 std::vector<CUdeviceptr> k_ptr;
 std::vector<CUdeviceptr> v_ptr;
+std::vector<int> cache_component_token_dims;
 
 // kv cache for the full model, one elem per layer
 std::vector<at::Tensor> k_tensors;
@@ -47,6 +48,9 @@ int num_layers;
 int bytes_per_elem;
 int device;
 py::object dtype;
+at::ScalarType scalar_type;
+bool component_spec_enabled = false;
+u64 page_buffer_token_bytes = 0;
 
 /* framework specific params */
 int max_batch_size;
@@ -98,8 +102,8 @@ void init_kvcache_batch_metadata()
 
 bool check_kvcache_config()
 {
-    return !(num_layers == 0 || num_kv_heads == 0 || head_size == 0 ||
-             max_batch_size == 0 || max_context_length == 0);
+    return !(num_layers == 0 || max_batch_size == 0 || max_context_length == 0 ||
+             page_buffer_token_bytes == 0);
 }
 
 inline u64 tokens_to_pages(u64 num_tokens)
