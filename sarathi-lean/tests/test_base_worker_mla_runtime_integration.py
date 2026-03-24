@@ -175,7 +175,7 @@ def _install_stubs(call_log):
     sys.modules["sarathi.worker.cache_engine.vattention_init"] = vattention_init_module
 
     sys.modules["vattention"] = types.ModuleType("vattention")
-    return originals, config_module.CacheArchitecture
+    return originals, config_module.CacheArchitecture, attention_module
 
 
 def _restore_stubs(originals):
@@ -204,7 +204,7 @@ def _load_modules(call_log):
     _ensure_package("sarathi.worker", SARATHI_ROOT / "worker")
     _ensure_package("sarathi.worker.cache_engine", SARATHI_ROOT / "worker" / "cache_engine")
 
-    originals, cache_architecture = _install_stubs(call_log)
+    originals, cache_architecture, attention_module = _install_stubs(call_log)
     project_originals = {
         name: sys.modules.get(name)
         for name in [
@@ -242,6 +242,7 @@ def _load_modules(call_log):
         )
     finally:
         _restore_stubs(originals)
+        sys.modules["sarathi.model_executor.attention"] = attention_module
         for module_name, original in project_originals.items():
             if original is None:
                 sys.modules.pop(module_name, None)
@@ -450,6 +451,37 @@ class _WrapperExecutionModelRunner:
         )
 
 
+class _InstalledWrapperExecutionModelRunner:
+    def __init__(self, model, hidden_states, attention_wrapper):
+        self.model = model
+        self.hidden_states = hidden_states
+        self.attention_wrapper = attention_wrapper
+        self.calls = []
+        self.load_calls = []
+
+    def load_model_weights(self, *args, **kwargs):
+        self.load_calls.append((args, kwargs))
+        return self.model.load_weights(*args, **kwargs)
+
+    def run(self, seq_metadata_list, gpu_cache, model_kwargs=None):
+        self.calls.append(
+            {
+                "seq_metadata_list": seq_metadata_list,
+                "gpu_cache": gpu_cache,
+                "model_kwargs": model_kwargs,
+            }
+        )
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        return self.model(
+            hidden_states=self.hidden_states,
+            kv_caches=tuple(gpu_cache),
+            attention_wrapper=self.attention_wrapper,
+            caches=model_kwargs.get("caches"),
+            softmax_scale=model_kwargs.get("softmax_scale"),
+            mlp_weights=model_kwargs.get("mlp_weights"),
+        )
+
+
 class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.flash_calls = []
@@ -464,6 +496,7 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
 
     def _make_config(self):
         return types.SimpleNamespace(
+            vocab_size=16,
             hidden_size=6,
             num_attention_heads=4,
             num_hidden_layers=2,
@@ -526,6 +559,77 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
 
     def _make_hidden_states(self):
         return torch.tensor([[1.0, 2.0, 3.0, 0.0, 1.0, 0.0]])
+
+    def _make_mlp_weights(self, hidden_size):
+        return self.deepseek_module.make_mlp_weights(
+            gate_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0, 1.0],
+                    [1.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.5, 1.0, 0.0],
+                    [0.5, 0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.5, 0.5],
+                ]
+            ),
+            up_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.5, 0.0],
+                    [0.0, 1.0, 0.0, 0.5],
+                    [0.5, 0.0, 1.0, 0.0],
+                    [0.0, 0.5, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 0.5],
+                    [0.0, 1.0, 0.5, 0.0],
+                ]
+            ),
+            down_proj=torch.tensor(
+                [
+                    [1.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+                    [0.0, 1.0, 0.5, 0.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0, 0.5, 0.0],
+                    [0.5, 0.0, 0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            hidden_size=hidden_size,
+        )
+
+    def _make_scaffold_state_dict(
+        self,
+        config,
+        projection_weights,
+        mlp_weights,
+        *,
+        use_global_layer_ids=False,
+        layer_offset=0,
+        include_embed=True,
+        include_lm_head=True,
+    ):
+        state_dict = {}
+        if include_embed:
+            state_dict["model.embed_tokens.weight"] = torch.arange(
+                config.vocab_size * config.hidden_size, dtype=torch.float32
+            ).view(config.vocab_size, config.hidden_size) / 1000.0
+        if include_lm_head:
+            state_dict["lm_head.weight"] = torch.arange(
+                config.vocab_size * config.hidden_size, dtype=torch.float32
+            ).view(config.vocab_size, config.hidden_size) / 1000.0
+        for layer_idx, layer_projection_weights in enumerate(projection_weights):
+            resolved_idx = layer_offset + layer_idx if use_global_layer_ids else layer_idx
+            prefix = f"model.layers.{resolved_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = layer_projection_weights.q_proj
+            state_dict[f"{prefix}.kv_latent_proj.weight"] = (
+                layer_projection_weights.kv_latent_proj
+            )
+            state_dict[f"{prefix}.k_rope_proj.weight"] = layer_projection_weights.k_rope_proj
+            state_dict[f"{prefix}.kv_up_proj.weight"] = layer_projection_weights.kv_up_proj
+            state_dict[f"{prefix}.o_proj.weight"] = layer_projection_weights.o_proj
+        for layer_idx, layer_mlp_weights in enumerate(mlp_weights):
+            resolved_idx = layer_offset + layer_idx if use_global_layer_ids else layer_idx
+            prefix = f"model.layers.{resolved_idx}.mlp"
+            state_dict[f"{prefix}.gate_proj.weight"] = layer_mlp_weights.gate_proj
+            state_dict[f"{prefix}.up_proj.weight"] = layer_mlp_weights.up_proj
+            state_dict[f"{prefix}.down_proj.weight"] = layer_mlp_weights.down_proj
+        return state_dict
 
     def _make_wrapper(self):
         wrapper = self.wrapper_module.VAttentionFlashAttentionWrapper()
@@ -761,6 +865,104 @@ class BaseWorkerMLARuntimeIntegrationTests(unittest.TestCase):
                 "events": ("step", "step", "free_request"),
             },
         )
+
+    def test_worker_executes_partitioned_loaded_scaffold_with_installed_attention_wrapper(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_world_size,
+        )
+
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(2)
+        set_pipeline_model_parallel_rank(1)
+
+        config = self._make_config()
+        model = self.deepseek_module.DeepseekV2ForCausalLM(config)
+
+        dims = self.deepseek_module.DeepseekV2MLADims.from_config(
+            config,
+            tensor_parallel_world_size=2,
+        )
+        projection_weights = tuple(
+            self._make_projection_weights(dims) for _ in range(model.model.num_layers)
+        )
+        mlp_weights = tuple(
+            self._make_mlp_weights(config.hidden_size) for _ in range(model.model.num_layers)
+        )
+        scaffold_state_dict = self._make_scaffold_state_dict(
+            config,
+            projection_weights,
+            mlp_weights,
+            use_global_layer_ids=True,
+            layer_offset=model.model.layer_offset,
+            include_embed=False,
+            include_lm_head=True,
+        )
+
+        kv_latent = torch.zeros(1, 4, model.model.num_layers, dims.kv_lora_rank)
+        k_rope = torch.zeros(
+            1,
+            4,
+            model.model.num_layers,
+            dims.num_heads * dims.qk_rope_head_dim,
+        )
+        cache_spec = types.SimpleNamespace(
+            architecture=self.cache_engine_module.CacheArchitecture.MLA,
+            num_layers=model.model.num_layers,
+            num_heads=dims.num_heads,
+            mla_qk_rope_head_dim=dims.qk_rope_head_dim,
+        )
+        gpu_cache = tuple(
+            self.cache_engine_module.format_vattention_gpu_cache(
+                cache_spec,
+                (kv_latent, k_rope),
+                torch.device("cpu"),
+            )
+        )
+        model_runner = _InstalledWrapperExecutionModelRunner(
+            model=model,
+            hidden_states=self._make_hidden_states(),
+            attention_wrapper=self._make_wrapper(),
+        )
+        cache_usage_stats = self.cache_engine_module.summarize_vattention_cache_usage(
+            types.SimpleNamespace(
+                architecture=self.cache_engine_module.CacheArchitecture.MLA,
+                cached_token_bytes_local=model.model.num_layers
+                * (dims.kv_lora_rank + dims.qk_rope_head_dim)
+                * torch.tensor([], dtype=torch.float32).element_size(),
+                page_buffer_token_bytes=(dims.kv_lora_rank + dims.qk_rope_head_dim)
+                * torch.tensor([], dtype=torch.float32).element_size(),
+                cache_components=(
+                    types.SimpleNamespace(name="kv_latent"),
+                    types.SimpleNamespace(name="k_rope"),
+                ),
+            ),
+            [1],
+        )
+        worker = self._make_worker(
+            model_runner=model_runner,
+            gpu_cache=gpu_cache,
+            cache_usage_stats=cache_usage_stats,
+        )
+        worker.pipeline_model_parallel_rank = 1
+
+        worker.load_model_weights(scaffold_state_dict)
+        output, layer_caches = worker.execute_model_with_installed_attention_wrapper(
+            scheduler_outputs="scheduler",
+            softmax_scale=0.25,
+        )
+
+        self.assertEqual(worker.pipeline_model_parallel_rank, 1)
+        self.assertEqual(model.model.layer_offset, 1)
+        self.assertEqual(tuple(output.shape), (1, config.hidden_size))
+        self.assertEqual(len(layer_caches), model.model.num_layers)
+        self.assertEqual(len(model_runner.load_calls), 1)
+        self.assertEqual(model_runner.calls[0]["model_kwargs"], {"softmax_scale": 0.25})
+        self.assertTrue(all(cache.resident_cache.num_tokens == 1 for cache in layer_caches))
+        self.assertEqual(worker.cache_engine.steps, [["seq-md"]])
+        self.assertEqual(worker.cache_engine.completions, [["seq-md"]])
+        self.assertEqual(len(self.flash_calls), model.model.num_layers)
 
     def test_worker_can_compare_multiple_mla_runtime_patterns_via_sweep_summaries(self):
         patterns = [
