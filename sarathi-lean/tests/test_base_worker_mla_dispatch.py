@@ -264,6 +264,25 @@ class BaseWorkerMLADispatchTests(unittest.TestCase):
             },
         )
 
+    def test_execute_model_with_installed_attention_wrapper_packages_runner_kwargs(self):
+        worker, _ = self._make_worker()
+
+        worker.execute_model_with_installed_attention_wrapper(
+            scheduler_outputs="scheduler",
+            mlp_weights=("mlp",),
+            caches=("resident",),
+            softmax_scale=0.5,
+        )
+
+        self.assertEqual(
+            worker.model_runner.calls[0]["model_kwargs"],
+            {
+                "mlp_weights": ("mlp",),
+                "caches": ("resident",),
+                "softmax_scale": 0.5,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

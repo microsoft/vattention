@@ -307,6 +307,29 @@ class BaseWorker:
             model_runner_kwargs=model_runner_kwargs,
         )
 
+    @torch.inference_mode()
+    def execute_model_with_installed_attention_wrapper(
+        self,
+        scheduler_outputs: SchedulerOutputs,
+        *,
+        mlp_weights=None,
+        caches=None,
+        softmax_scale: Optional[float] = None,
+        preempted_seq: Optional[List] = None,
+    ) -> Optional[SamplerOutputs]:
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if caches is not None:
+            model_runner_kwargs["caches"] = caches
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.execute_model(
+            scheduler_outputs,
+            preempted_seq=preempted_seq,
+            model_runner_kwargs=(model_runner_kwargs or None),
+        )
+
     @synchronized
     def get_metrics_store(self) -> MetricsStore:
         return self.metrics_store

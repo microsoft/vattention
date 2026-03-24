@@ -104,6 +104,25 @@ class ModelRunner:
                 softmax_scale=softmax_scale,
             )
 
+        uses_installed_scaffold_kwargs = any(
+            value is not None for value in (mlp_weights, caches, softmax_scale)
+        )
+        if uses_installed_scaffold_kwargs:
+            if model_kwargs:
+                raise ValueError(
+                    "Unsupported model_kwargs for installed-scaffold execution: "
+                    + ", ".join(sorted(model_kwargs.keys()))
+                )
+            return self.model(
+                hidden_states=hidden_states,
+                positions=positions,
+                kv_caches=kv_caches,
+                mlp_weights=mlp_weights,
+                caches=caches,
+                softmax_scale=softmax_scale,
+                attention_wrapper=get_attention_wrapper(),
+            )
+
         if model_kwargs:
             raise ValueError(
                 "Unsupported model_kwargs for standard execution: "

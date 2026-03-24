@@ -227,6 +227,30 @@ class ModelRunnerMLADispatchTests(unittest.TestCase):
         self.assertEqual(runner.model.wrapper_calls[0]["caches"], ("resident",))
         self.assertEqual(runner.model.wrapper_calls[0]["softmax_scale"], 0.5)
 
+    def test_execute_model_uses_installed_scaffold_path_without_projection_weights(self):
+        runner = ModelRunner.__new__(ModelRunner)
+        runner.model = _RecordingModel()
+
+        output = runner._execute_model(
+            hidden_states=torch.tensor([1]),
+            positions=torch.tensor([2]),
+            kv_caches=("cache",),
+            model_kwargs={
+                "mlp_weights": ("mlp",),
+                "caches": ("resident",),
+                "softmax_scale": 0.25,
+            },
+        )
+
+        self.assertEqual(output, "standard")
+        self.assertEqual(len(runner.model.calls), 1)
+        self.assertEqual(runner.model.calls[0]["positions"].tolist(), [2])
+        self.assertEqual(runner.model.calls[0]["kv_caches"], ("cache",))
+        self.assertEqual(runner.model.calls[0]["mlp_weights"], ("mlp",))
+        self.assertEqual(runner.model.calls[0]["caches"], ("resident",))
+        self.assertEqual(runner.model.calls[0]["softmax_scale"], 0.25)
+        self.assertEqual(runner.model.calls[0]["attention_wrapper"], ATTENTION_WRAPPER)
+
     def test_execute_model_rejects_unknown_model_kwargs(self):
         runner = ModelRunner.__new__(ModelRunner)
         runner.model = _RecordingModel()
