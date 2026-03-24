@@ -234,6 +234,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertIn("embed_tokens.weight", state_dict)
         self.assertIn("norm.weight", state_dict)
         self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", state_dict)
+        self.assertIn("layers.0.self_attn.kv_a_layernorm.weight", state_dict)
         self.assertIn("layers.0.self_attn.kv_b_proj.weight", state_dict)
         self.assertNotIn("model.layers.0.self_attn.kv_latent_proj.weight", state_dict)
         self.assertNotIn("model.layers.0.self_attn.k_rope_proj.weight", state_dict)
@@ -391,6 +392,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertTrue(str(checkpoint_path).endswith(".pt"))
         self.assertIn("embed_tokens.weight", checkpoint)
         self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", checkpoint)
+        self.assertIn("layers.0.self_attn.kv_a_layernorm.weight", checkpoint)
         self.assertEqual(checkpoint["layers.0.self_attn.q_proj.weight"].device.type, "cpu")
 
     def test_write_scaffold_checkpoint_emits_safetensors_checkpoint_file(self):
@@ -442,6 +444,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
         self.assertTrue(str(checkpoint_path).endswith(".safetensors"))
         self.assertIn("embed_tokens.weight", checkpoint)
         self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", checkpoint)
+        self.assertIn("layers.0.self_attn.kv_a_layernorm.weight", checkpoint)
         self.assertEqual(checkpoint["layers.0.self_attn.q_proj.weight"].device.type, "cpu")
 
     def test_write_scaffold_hf_directory_emits_sharded_safetensors_layout(self):
@@ -492,6 +495,7 @@ class DeepseekScaffoldSmokeTests(unittest.TestCase):
             self.assertTrue((Path(checkpoint_dir) / "model-00002-of-00002.safetensors").exists())
             self.assertIn("embed_tokens.weight", index["weight_map"])
             self.assertIn("layers.0.self_attn.kv_a_proj_with_mqa.weight", index["weight_map"])
+            self.assertIn("layers.0.self_attn.kv_a_layernorm.weight", index["weight_map"])
             self.assertEqual(config_json["tensor_parallel_world_size"], 2)
 
     def test_write_scaffold_checkpoint_loads_back_into_runtime_device(self):

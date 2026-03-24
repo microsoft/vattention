@@ -98,6 +98,11 @@ def make_projection_weights(deepseek_module, dims, *, device, dtype, query_mode=
             device=device,
             dtype=dtype,
         ),
+        kv_a_layernorm_weight=torch.tensor(
+            [1.0, 0.5, 2.0],
+            device=device,
+            dtype=dtype,
+        ),
         k_rope_proj=torch.tensor(
             [
                 [1.0, 0.0],
@@ -272,6 +277,10 @@ def build_scaffold_state_dict(
             )
             state_dict[f"{prefix}.q_b_proj.weight"] = layer_projection_weights.q_b_proj
         state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = kv_a_proj_with_mqa
+        if layer_projection_weights.kv_a_layernorm_weight is not None:
+            state_dict[f"{prefix}.kv_a_layernorm.weight"] = (
+                layer_projection_weights.kv_a_layernorm_weight
+            )
         state_dict[f"{prefix}.kv_b_proj.weight"] = layer_projection_weights.kv_up_proj
         state_dict[f"{prefix}.o_proj.weight"] = layer_projection_weights.o_proj
     if moe_weights is None:

@@ -140,6 +140,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertEqual(result["status"], "supported_non_moe_surface")
         self.assertTrue(result["has_q_proj"])
         self.assertTrue(result["has_combined_kv"])
+        self.assertTrue(result["has_kv_a_layernorm"])
         self.assertTrue(result["has_kv_b_proj"])
         self.assertFalse(result["has_moe"])
         self.assertEqual(result["config_model_type"], "deepseek_v2")
@@ -166,6 +167,7 @@ class InspectDeepseekCheckpointTests(unittest.TestCase):
         self.assertEqual(result["status"], "supported_non_moe_surface")
         self.assertFalse(result["has_q_proj"])
         self.assertTrue(result["has_q_lora"])
+        self.assertTrue(result["has_kv_a_layernorm"])
         self.assertEqual(result["config_q_lora_rank"], 2)
         self.assertTrue(result["loadable_scaffold_surface"])
 
