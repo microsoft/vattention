@@ -1,6 +1,7 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
+import torch
 import torch.nn as nn
 
 from sarathi.model_executor.parallel_utils.parallel_state import (
@@ -65,6 +66,97 @@ class DeepseekV2MLADims:
         )
 
 
+@dataclass(frozen=True)
+class DeepseekV2MLAResidentCache:
+    kv_latent: torch.Tensor
+    k_rope: torch.Tensor
+
+    def __post_init__(self):
+        if self.kv_latent.ndim != 2:
+            raise ValueError("kv_latent must have shape [tokens, kv_lora_rank]")
+        if self.k_rope.ndim != 3:
+            raise ValueError("k_rope must have shape [tokens, num_heads, qk_rope_head_dim]")
+        if self.kv_latent.shape[0] != self.k_rope.shape[0]:
+            raise ValueError("kv_latent and k_rope must agree on token count")
+
+    @property
+    def num_tokens(self) -> int:
+        return self.kv_latent.shape[0]
+
+
+def split_query_projection(
+    query_states: torch.Tensor,
+    mla_dims: DeepseekV2MLADims,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if query_states.ndim != 2:
+        raise ValueError("query_states must have shape [tokens, num_heads * q_head_dim]")
+    expected_width = mla_dims.q_proj_output_dim_local
+    if query_states.shape[1] != expected_width:
+        raise ValueError("query_states width does not match local MLA query projection size")
+
+    query_states = query_states.view(-1, mla_dims.num_heads, mla_dims.q_head_dim)
+    q_nope, q_rope = torch.split(
+        query_states,
+        [mla_dims.qk_nope_head_dim, mla_dims.qk_rope_head_dim],
+        dim=-1,
+    )
+    return q_nope, q_rope
+
+
+def make_resident_cache(
+    kv_latent: torch.Tensor,
+    k_rope: torch.Tensor,
+    mla_dims: DeepseekV2MLADims,
+) -> DeepseekV2MLAResidentCache:
+    if kv_latent.ndim != 2 or kv_latent.shape[1] != mla_dims.kv_lora_rank:
+        raise ValueError("kv_latent must have shape [tokens, kv_lora_rank]")
+    if k_rope.ndim != 3:
+        raise ValueError("k_rope must have shape [tokens, num_heads, qk_rope_head_dim]")
+    expected_k_rope_shape = (kv_latent.shape[0], mla_dims.num_heads, mla_dims.qk_rope_head_dim)
+    if tuple(k_rope.shape) != expected_k_rope_shape:
+        raise ValueError("k_rope shape does not match local MLA rope dimensions")
+    return DeepseekV2MLAResidentCache(kv_latent=kv_latent, k_rope=k_rope)
+
+
+def append_resident_cache(
+    cache: Optional[DeepseekV2MLAResidentCache],
+    new_cache: DeepseekV2MLAResidentCache,
+) -> DeepseekV2MLAResidentCache:
+    if cache is None:
+        return new_cache
+    return DeepseekV2MLAResidentCache(
+        kv_latent=torch.cat([cache.kv_latent, new_cache.kv_latent], dim=0),
+        k_rope=torch.cat([cache.k_rope, new_cache.k_rope], dim=0),
+    )
+
+
+def reconstruct_dense_kv(
+    cache: DeepseekV2MLAResidentCache,
+    kv_up_proj_weight: torch.Tensor,
+    mla_dims: DeepseekV2MLADims,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    expected_weight_shape = (
+        mla_dims.kv_lora_rank,
+        mla_dims.kv_up_proj_output_dim_local,
+    )
+    if tuple(kv_up_proj_weight.shape) != expected_weight_shape:
+        raise ValueError("kv_up_proj_weight shape does not match local MLA up-projection size")
+
+    kv_dense = cache.kv_latent @ kv_up_proj_weight
+    kv_dense = kv_dense.view(
+        cache.num_tokens,
+        mla_dims.num_heads,
+        mla_dims.qk_nope_head_dim + mla_dims.v_head_dim,
+    )
+    k_nope, value = torch.split(
+        kv_dense,
+        [mla_dims.qk_nope_head_dim, mla_dims.v_head_dim],
+        dim=-1,
+    )
+    key = torch.cat([k_nope, cache.k_rope], dim=-1)
+    return key, value
+
+
 class DeepseekV2MLAAttention(nn.Module):
 
     def __init__(
@@ -84,6 +176,26 @@ class DeepseekV2MLAAttention(nn.Module):
             "DeepSeek-V2 MLA attention execution is not implemented yet. "
             "This scaffold only defines tensor-parallel MLA dimensions."
         )
+
+    def split_query_projection(
+        self,
+        query_states: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return split_query_projection(query_states, self.mla_dims)
+
+    def make_resident_cache(
+        self,
+        kv_latent: torch.Tensor,
+        k_rope: torch.Tensor,
+    ) -> DeepseekV2MLAResidentCache:
+        return make_resident_cache(kv_latent, k_rope, self.mla_dims)
+
+    def reconstruct_dense_kv(
+        self,
+        cache: DeepseekV2MLAResidentCache,
+        kv_up_proj_weight: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return reconstruct_dense_kv(cache, kv_up_proj_weight, self.mla_dims)
 
 
 class DeepseekV2DecoderLayer(nn.Module):
