@@ -149,7 +149,7 @@ That preset currently uses the tight startup settings that were verified to reac
 The wrapper also auto-selects a default `--model_max_model_len` based on the requested tensor-parallel degree unless you override it explicitly:
 
 - `128` for the default `TP=2` bring-up
-- `512` when you pass `--model_tensor_parallel_degree 4`
+- `32768` when you pass `--model_tensor_parallel_degree 4`
 
 To target a different GPU pair, override the wrapper-local env var from the host shell:
 
@@ -163,7 +163,7 @@ To override the max context directly, pass it on the command line:
 DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES=0,1,2,3 \
 scripts/docker/start-server-deepseek-v2-lite.sh \
   --model_tensor_parallel_degree 4 \
-  --model_max_model_len 768
+  --model_max_model_len 8192
 ```
 
 Do not run `start-server.sh` or `start-server-yi6b.sh` from inside the container shell opened by `enter-container.sh`. Those wrapper scripts are intended to be launched from the host and will `docker exec` into the container for you.

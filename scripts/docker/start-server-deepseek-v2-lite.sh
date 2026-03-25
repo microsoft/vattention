@@ -41,7 +41,7 @@ done
 
 if [[ -z "${requested_max_model_len}" ]]; then
     if [[ "${requested_tp}" -ge 4 ]]; then
-        requested_max_model_len=512
+        requested_max_model_len=32768
     else
         requested_max_model_len=128
     fi
