@@ -488,45 +488,52 @@ public:
         }
     }
 
-    /* Map physical memory for the current iteration before returning control */
-    py::dict compute_fragmentation_metrics(u64 seq_len, u64 nr_mapped)
+    struct FragmentationMetrics
     {
-        py::dict metrics;
+        u64 seq_len;
+        u64 mapped_blocks;
+        u64 pages_per_kvblock;
+        u64 tokens_per_page;
+        u64 mapped_token_capacity;
+        u64 resident_tokens;
+        u64 slack_tokens;
+        u64 useful_payload_bytes;
+        u64 mapped_physical_bytes;
+        double token_fill_pct;
+        double token_frag_pct;
+        double payload_util_pct;
+        double payload_overhead_pct;
+    };
 
-        u64 mapped_token_capacity = nr_mapped * tokens_per_page;
-        u64 resident_tokens = (seq_len < mapped_token_capacity)
+    /* Map physical memory for the current iteration before returning control */
+    FragmentationMetrics compute_fragmentation_metrics(u64 seq_len, u64 nr_mapped)
+    {
+        FragmentationMetrics metrics{};
+
+        metrics.seq_len = seq_len;
+        metrics.mapped_blocks = nr_mapped;
+        metrics.pages_per_kvblock = get_pages_per_kvblock();
+        metrics.tokens_per_page = tokens_per_page;
+        metrics.mapped_token_capacity = nr_mapped * tokens_per_page;
+        metrics.resident_tokens = (seq_len < metrics.mapped_token_capacity)
             ? seq_len
-            : mapped_token_capacity;
-        u64 slack_tokens = mapped_token_capacity - resident_tokens;
-        u64 useful_payload_bytes = resident_tokens * cached_token_bytes_local;
-        u64 mapped_physical_bytes = nr_mapped * get_pages_per_kvblock() * page_size;
+            : metrics.mapped_token_capacity;
+        metrics.slack_tokens = metrics.mapped_token_capacity - metrics.resident_tokens;
+        metrics.useful_payload_bytes = metrics.resident_tokens * cached_token_bytes_local;
+        metrics.mapped_physical_bytes = nr_mapped * metrics.pages_per_kvblock * page_size;
 
-        double token_fill_pct = mapped_token_capacity > 0
-            ? (100.0 * static_cast<double>(resident_tokens) / static_cast<double>(mapped_token_capacity))
+        metrics.token_fill_pct = metrics.mapped_token_capacity > 0
+            ? (100.0 * static_cast<double>(metrics.resident_tokens) / static_cast<double>(metrics.mapped_token_capacity))
             : 0.0;
-        double token_frag_pct = mapped_token_capacity > 0
-            ? (100.0 * static_cast<double>(slack_tokens) / static_cast<double>(mapped_token_capacity))
+        metrics.token_frag_pct = metrics.mapped_token_capacity > 0
+            ? (100.0 * static_cast<double>(metrics.slack_tokens) / static_cast<double>(metrics.mapped_token_capacity))
             : 0.0;
-        double payload_util_pct = mapped_physical_bytes > 0
-            ? (100.0 * static_cast<double>(useful_payload_bytes) / static_cast<double>(mapped_physical_bytes))
+        metrics.payload_util_pct = metrics.mapped_physical_bytes > 0
+            ? (100.0 * static_cast<double>(metrics.useful_payload_bytes) / static_cast<double>(metrics.mapped_physical_bytes))
             : 0.0;
-        double payload_overhead_pct = mapped_physical_bytes > 0
-            ? (100.0 - payload_util_pct)
+        metrics.payload_overhead_pct = metrics.mapped_physical_bytes > 0
+            ? (100.0 - metrics.payload_util_pct)
             : 0.0;
-
-        metrics["seq_len"] = py::int_(seq_len);
-        metrics["mapped_blocks"] = py::int_(nr_mapped);
-        metrics["pages_per_kvblock"] = py::int_(get_pages_per_kvblock());
-        metrics["tokens_per_page"] = py::int_(tokens_per_page);
-        metrics["mapped_token_capacity"] = py::int_(mapped_token_capacity);
-        metrics["resident_tokens"] = py::int_(resident_tokens);
-        metrics["slack_tokens"] = py::int_(slack_tokens);
-        metrics["useful_payload_bytes"] = py::int_(useful_payload_bytes);
-        metrics["mapped_physical_bytes"] = py::int_(mapped_physical_bytes);
-        metrics["token_fill_pct"] = py::float_(token_fill_pct);
-        metrics["token_frag_pct"] = py::float_(token_frag_pct);
-        metrics["payload_util_pct"] = py::float_(payload_util_pct);
-        metrics["payload_overhead_pct"] = py::float_(payload_overhead_pct);
         return metrics;
     }
 
@@ -538,7 +545,7 @@ public:
         u64 nr_mapped = get_req_pages(reqId);
 
         if (nr_mapped > 0) {
-            py::dict metrics = compute_fragmentation_metrics(seq_len, nr_mapped);
+            FragmentationMetrics metrics = compute_fragmentation_metrics(seq_len, nr_mapped);
             printf(
                 "[vAttention FRAG] Req: %d | TotalSeq: %llu | Mapped Blocks: %llu | "
                 "Capacity: %llu | Resident: %llu | Slack: %llu | "
@@ -548,15 +555,15 @@ public:
                 reqId,
                 (unsigned long long)seq_len,
                 (unsigned long long)nr_mapped,
-                (unsigned long long)py::cast<u64>(metrics["mapped_token_capacity"]),
-                (unsigned long long)py::cast<u64>(metrics["resident_tokens"]),
-                (unsigned long long)py::cast<u64>(metrics["slack_tokens"]),
-                py::cast<double>(metrics["token_fill_pct"]),
-                py::cast<double>(metrics["token_frag_pct"]),
-                py::cast<u64>(metrics["useful_payload_bytes"]) / (1024.0 * 1024.0),
-                py::cast<u64>(metrics["mapped_physical_bytes"]) / (1024.0 * 1024.0),
-                py::cast<double>(metrics["payload_util_pct"]),
-                py::cast<double>(metrics["payload_overhead_pct"]));
+                (unsigned long long)metrics.mapped_token_capacity,
+                (unsigned long long)metrics.resident_tokens,
+                (unsigned long long)metrics.slack_tokens,
+                metrics.token_fill_pct,
+                metrics.token_frag_pct,
+                metrics.useful_payload_bytes / (1024.0 * 1024.0),
+                metrics.mapped_physical_bytes / (1024.0 * 1024.0),
+                metrics.payload_util_pct,
+                metrics.payload_overhead_pct);
         }
 
         if (nr_required <= nr_mapped)
@@ -802,7 +809,22 @@ public:
 
     py::dict debug_fragmentation_metrics(u64 seq_len, u64 mapped_blocks)
     {
-        return compute_fragmentation_metrics(seq_len, mapped_blocks);
+        FragmentationMetrics metrics = compute_fragmentation_metrics(seq_len, mapped_blocks);
+        py::dict result;
+        result["seq_len"] = py::int_(metrics.seq_len);
+        result["mapped_blocks"] = py::int_(metrics.mapped_blocks);
+        result["pages_per_kvblock"] = py::int_(metrics.pages_per_kvblock);
+        result["tokens_per_page"] = py::int_(metrics.tokens_per_page);
+        result["mapped_token_capacity"] = py::int_(metrics.mapped_token_capacity);
+        result["resident_tokens"] = py::int_(metrics.resident_tokens);
+        result["slack_tokens"] = py::int_(metrics.slack_tokens);
+        result["useful_payload_bytes"] = py::int_(metrics.useful_payload_bytes);
+        result["mapped_physical_bytes"] = py::int_(metrics.mapped_physical_bytes);
+        result["token_fill_pct"] = py::float_(metrics.token_fill_pct);
+        result["token_frag_pct"] = py::float_(metrics.token_frag_pct);
+        result["payload_util_pct"] = py::float_(metrics.payload_util_pct);
+        result["payload_overhead_pct"] = py::float_(metrics.payload_overhead_pct);
+        return result;
     }
 
     /* TODO(ashish): check if this is compatible with PyTorch destructor */
