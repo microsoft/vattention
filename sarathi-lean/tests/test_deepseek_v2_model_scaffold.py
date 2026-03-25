@@ -100,6 +100,12 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
         config.n_shared_experts = 1
         return config
 
+    def _make_small_multi_shared_moe_config(self):
+        config = self._make_small_moe_config()
+        config.moe_intermediate_size = 2
+        config.n_shared_experts = 2
+        return config
+
     def _make_projection_weights(self, dims):
         return make_projection_weights(
             q_proj=torch.tensor(
@@ -897,7 +903,6 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             [
                 rank0_projection_weights.kv_latent_proj,
                 rank0_projection_weights.k_rope_proj,
-                rank1_projection_weights.k_rope_proj,
             ],
             dim=1,
         )
@@ -954,7 +959,7 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             self.assertTrue(
                 torch.allclose(
                     model.model.layer_projection_weights[0].k_rope_proj,
-                    expected_projection_weights.k_rope_proj,
+                    rank0_projection_weights.k_rope_proj,
                 )
             )
             self.assertTrue(
@@ -1294,6 +1299,123 @@ class DeepseekV2ModelScaffoldTests(unittest.TestCase):
             len(model.model.layer_moe_weights[1].experts),
             config.n_routed_experts,
         )
+
+    def test_causal_lm_loader_slices_multi_shared_expert_width_by_tensor_parallel_rank(self):
+        from sarathi.model_executor.parallel_utils.parallel_state import (
+            set_pipeline_model_parallel_rank,
+            set_pipeline_model_parallel_world_size,
+            set_tensor_model_parallel_rank,
+            set_tensor_model_parallel_world_size,
+        )
+
+        config = self._make_small_multi_shared_moe_config()
+        config.num_experts_per_tok = 1
+        config.norm_topk_prob = True
+        set_tensor_model_parallel_world_size(2)
+        set_pipeline_model_parallel_world_size(1)
+        set_pipeline_model_parallel_rank(0)
+
+        shared_width = config.moe_intermediate_size * config.n_shared_experts
+        local_shared_width = shared_width // 2
+        model = DeepseekV2ForCausalLM(config)
+        dims = DeepseekV2MLADims.from_config(config, tensor_parallel_world_size=2)
+        projection_weights = self._make_projection_weights(dims)
+        state_dict = {
+            "embed_tokens.weight": torch.zeros(config.vocab_size, config.hidden_size),
+            "lm_head.weight": torch.zeros(config.vocab_size, config.hidden_size),
+        }
+        rank0_shared_gate = torch.full((config.hidden_size, local_shared_width), 4.0)
+        rank1_shared_gate = torch.full((config.hidden_size, local_shared_width), 14.0)
+        rank0_shared_up = torch.full((config.hidden_size, local_shared_width), 5.0)
+        rank1_shared_up = torch.full((config.hidden_size, local_shared_width), 15.0)
+        rank0_shared_down = torch.full((local_shared_width, config.hidden_size), 6.0)
+        rank1_shared_down = torch.full((local_shared_width, config.hidden_size), 16.0)
+
+        for layer_idx in range(model.model.num_layers):
+            prefix = f"layers.{layer_idx}.self_attn"
+            state_dict[f"{prefix}.q_proj.weight"] = projection_weights.q_proj + layer_idx
+            state_dict[f"{prefix}.kv_a_proj_with_mqa.weight"] = torch.cat(
+                [
+                    projection_weights.kv_latent_proj + layer_idx,
+                    projection_weights.k_rope_proj + layer_idx,
+                ],
+                dim=1,
+            )
+            state_dict[f"{prefix}.kv_b_proj.weight"] = projection_weights.kv_up_proj + layer_idx
+            state_dict[f"{prefix}.o_proj.weight"] = projection_weights.o_proj + layer_idx
+
+            mlp_prefix = f"layers.{layer_idx}.mlp"
+            if layer_idx < config.first_k_dense_replace:
+                state_dict[f"{mlp_prefix}.gate_proj.weight"] = torch.ones(
+                    config.hidden_size,
+                    4,
+                )
+                state_dict[f"{mlp_prefix}.up_proj.weight"] = torch.ones(
+                    config.hidden_size,
+                    4,
+                )
+                state_dict[f"{mlp_prefix}.down_proj.weight"] = torch.ones(
+                    4,
+                    config.hidden_size,
+                )
+                continue
+
+            state_dict[f"{mlp_prefix}.gate.weight"] = torch.zeros(
+                config.n_routed_experts,
+                config.hidden_size,
+            )
+            state_dict[f"{mlp_prefix}.shared_experts.gate_proj.weight"] = torch.cat(
+                [rank0_shared_gate, rank1_shared_gate],
+                dim=1,
+            ).t().contiguous()
+            state_dict[f"{mlp_prefix}.shared_experts.up_proj.weight"] = torch.cat(
+                [rank0_shared_up, rank1_shared_up],
+                dim=1,
+            ).t().contiguous()
+            state_dict[f"{mlp_prefix}.shared_experts.down_proj.weight"] = torch.cat(
+                [rank0_shared_down, rank1_shared_down],
+                dim=0,
+            ).t().contiguous()
+            for expert_idx in range(config.n_routed_experts):
+                state_dict[f"{mlp_prefix}.experts.{expert_idx}.gate_proj.weight"] = torch.full(
+                    (config.hidden_size, config.moe_intermediate_size),
+                    1.0 + expert_idx,
+                )
+                state_dict[f"{mlp_prefix}.experts.{expert_idx}.up_proj.weight"] = torch.full(
+                    (config.hidden_size, config.moe_intermediate_size),
+                    2.0 + expert_idx,
+                )
+                state_dict[f"{mlp_prefix}.experts.{expert_idx}.down_proj.weight"] = torch.full(
+                    (config.moe_intermediate_size, config.hidden_size),
+                    3.0 + expert_idx,
+                )
+
+        for rank, expected_gate, expected_up, expected_down in (
+            (0, rank0_shared_gate, rank0_shared_up, rank0_shared_down),
+            (1, rank1_shared_gate, rank1_shared_up, rank1_shared_down),
+        ):
+            set_tensor_model_parallel_rank(rank)
+            model = DeepseekV2ForCausalLM(config)
+            model.load_weights(state_dict)
+
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].shared_experts.gate_proj,
+                    expected_gate,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].shared_experts.up_proj,
+                    expected_up,
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    model.model.layer_moe_weights[1].shared_experts.down_proj,
+                    expected_down,
+                )
+            )
 
 
 if __name__ == "__main__":

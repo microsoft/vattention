@@ -429,6 +429,12 @@ Keep from V3, but make the dependency explicit.
 25. reach first full DeepSeek-V2-Lite inference
 
 - end-to-end inference through the real model architecture in this repo
+- use the documented server startup path against the real `deepseek-ai/DeepSeek-V2-Lite` weights, not only scaffold checkpoints
+- treat each real pretrained load failure as the active blocker and fix it before broadening scope again
+- current active blocker:
+  - shared-expert MLP tensor layout during real `TP=2` server load
+  - real checkpoint uses `n_shared_experts * moe_intermediate_size` width for `shared_experts.{gate,up,down}_proj`
+  - loader must normalize and tensor-parallel slice that width correctly before the next real rerun
 
 ### Phase 9: Add telemetry and experiment support
 

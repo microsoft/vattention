@@ -1745,7 +1745,12 @@ class DeepseekV2ForCausalLM(nn.Module):
             shared_expert_tensors = self._normalize_mlp_tensor_layouts(
                 shared_expert_tensors,
                 hidden_size=hidden_size,
-                intermediate_size=getattr(self.config, "moe_intermediate_size", None),
+                intermediate_size=(
+                    getattr(self.config, "moe_intermediate_size", 0)
+                    * max(1, getattr(self.config, "n_shared_experts", 1))
+                    if getattr(self.config, "moe_intermediate_size", None) is not None
+                    else None
+                ),
             )
             routed_experts = []
             for expert_idx in range(n_routed_experts):
