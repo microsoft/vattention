@@ -5,8 +5,8 @@ set -euo pipefail
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 VATTN_SERVER_OUTPUT_DIR=${VATTN_SERVER_OUTPUT_DIR:-/tmp/vattention/${VATTN_CONTAINER_NAME}}
-DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES=${DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES:-0,1}
-DEEPSEEK_V2_LITE_DEFAULT_TP=${DEEPSEEK_V2_LITE_DEFAULT_TP:-2}
+DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES=${DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES:-0,1,2,3}
+DEEPSEEK_V2_LITE_DEFAULT_TP=${DEEPSEEK_V2_LITE_DEFAULT_TP:-4}
 
 requested_tp="${DEEPSEEK_V2_LITE_DEFAULT_TP}"
 requested_max_model_len=""
@@ -69,12 +69,12 @@ shift
 exec python -m sarathi.entrypoints.openai_server.api_server \
     --output_dir "$output_dir" \
     --model_name deepseek-ai/DeepSeek-V2-Lite \
-    --model_tensor_parallel_degree 4 \
+    --model_tensor_parallel_degree '"${requested_tp}"' \
     --model_attention_backend fa_vattn \
     --model_block_size 2097152 \
     --model_load_format auto \
     --model_max_model_len '"${requested_max_model_len}"' \
-    --gpu_memory_utilization 0.8 \
+    --gpu_memory_utilization 0.85 \
     --replica_scheduler_max_batch_size 1 \
     --host 0.0.0.0 \
     --port 8000 \
