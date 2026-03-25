@@ -6,6 +6,46 @@ source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
 VATTN_SERVER_OUTPUT_DIR=${VATTN_SERVER_OUTPUT_DIR:-/tmp/vattention/${VATTN_CONTAINER_NAME}}
 DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES=${DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES:-0,1}
+DEEPSEEK_V2_LITE_DEFAULT_TP=${DEEPSEEK_V2_LITE_DEFAULT_TP:-2}
+
+requested_tp="${DEEPSEEK_V2_LITE_DEFAULT_TP}"
+requested_max_model_len=""
+next_is_tp=0
+next_is_max_model_len=0
+for arg in "$@"; do
+    if [[ "${next_is_tp}" == 1 ]]; then
+        requested_tp="${arg}"
+        next_is_tp=0
+        continue
+    fi
+    if [[ "${next_is_max_model_len}" == 1 ]]; then
+        requested_max_model_len="${arg}"
+        next_is_max_model_len=0
+        continue
+    fi
+    case "${arg}" in
+        --model_tensor_parallel_degree)
+            next_is_tp=1
+            ;;
+        --model_tensor_parallel_degree=*)
+            requested_tp="${arg#*=}"
+            ;;
+        --model_max_model_len)
+            next_is_max_model_len=1
+            ;;
+        --model_max_model_len=*)
+            requested_max_model_len="${arg#*=}"
+            ;;
+    esac
+done
+
+if [[ -z "${requested_max_model_len}" ]]; then
+    if [[ "${requested_tp}" -ge 4 ]]; then
+        requested_max_model_len=512
+    else
+        requested_max_model_len=128
+    fi
+fi
 
 if ! container_exists; then
     printf 'Container does not exist yet: %s\nRun scripts/docker/create-container.sh first.\n' "${VATTN_CONTAINER_NAME}" >&2
@@ -33,7 +73,7 @@ exec python -m sarathi.entrypoints.openai_server.api_server \
     --model_attention_backend fa_vattn \
     --model_block_size 2097152 \
     --model_load_format auto \
-    --model_max_model_len 128 \
+    --model_max_model_len '"${requested_max_model_len}"' \
     --gpu_memory_utilization 1.0 \
     --replica_scheduler_max_batch_size 1 \
     --host 0.0.0.0 \
