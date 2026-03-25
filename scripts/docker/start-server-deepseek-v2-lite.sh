@@ -69,12 +69,12 @@ shift
 exec python -m sarathi.entrypoints.openai_server.api_server \
     --output_dir "$output_dir" \
     --model_name deepseek-ai/DeepSeek-V2-Lite \
-    --model_tensor_parallel_degree 2 \
+    --model_tensor_parallel_degree 4 \
     --model_attention_backend fa_vattn \
     --model_block_size 2097152 \
     --model_load_format auto \
     --model_max_model_len '"${requested_max_model_len}"' \
-    --gpu_memory_utilization 1.0 \
+    --gpu_memory_utilization 0.8 \
     --replica_scheduler_max_batch_size 1 \
     --host 0.0.0.0 \
     --port 8000 \
