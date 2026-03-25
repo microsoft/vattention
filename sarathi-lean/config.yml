@@ -11,11 +11,11 @@ seed: 42
 pipeline_parallel_size: 1
 tensor_parallel_size: 2
 block_size: 2097152
-gpu_memory_utilization: 0.8
+gpu_memory_utilization: 1.0
 revision: null
 scheduler_type: vllm
 max_model_len: 128
-max_num_seqs: 128
+max_num_seqs: 1
 max_num_batched_tokens: null
 chunk_size: null
 enable_dynamic_chunking_schedule: false

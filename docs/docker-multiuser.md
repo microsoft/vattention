@@ -134,7 +134,28 @@ Or start the same Yi-6B server with the checked-in preset wrapper, also from the
 scripts/docker/start-server-yi6b.sh
 ```
 
+For the current known-good `DeepSeek-V2-Lite` bring-up on `2 x 24 GB` GPUs, use the checked-in preset wrapper from the host shell:
+
+```bash
+scripts/docker/start-server-deepseek-v2-lite.sh
+```
+
+That preset currently uses the tight startup settings that were verified to reach real serving for `DeepSeek-V2-Lite` in this repo and defaults to `CUDA_VISIBLE_DEVICES=0,1` inside the container:
+
+- `--model_tensor_parallel_degree 2`
+- `--model_max_model_len 128`
+- `--gpu_memory_utilization 1.0`
+- `--replica_scheduler_max_batch_size 1`
+
+To target a different GPU pair, override the wrapper-local env var from the host shell:
+
+```bash
+DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES=2,3 scripts/docker/start-server-deepseek-v2-lite.sh
+```
+
 Do not run `start-server.sh` or `start-server-yi6b.sh` from inside the container shell opened by `enter-container.sh`. Those wrapper scripts are intended to be launched from the host and will `docker exec` into the container for you.
+
+The same guidance applies to `start-server-deepseek-v2-lite.sh`.
 
 By default, the server wrapper writes generated runtime files such as `config.yml` and `benchmark_config.yml` to a container-local directory under `/tmp/vattention/<container-name>` instead of modifying files in the repo checkout.
 
