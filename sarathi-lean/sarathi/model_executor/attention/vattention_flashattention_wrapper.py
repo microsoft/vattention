@@ -14,6 +14,53 @@ from sarathi.cache_ops import cache_flat
 logger = init_logger(__name__)
 
 
+def _split_resident_cache_by_lengths(cache, lengths):
+    if cache is None:
+        return tuple(None for _ in lengths)
+
+    chunks = []
+    token_offset = 0
+    for length in lengths:
+        next_offset = token_offset + length
+        chunks.append(
+            cache.__class__(
+                kv_latent=cache.kv_latent[token_offset:next_offset],
+                k_rope=cache.k_rope[token_offset:next_offset],
+            )
+        )
+        token_offset = next_offset
+
+    if token_offset != cache.num_tokens:
+        raise ValueError("resident cache token count does not match wrapper metadata lengths")
+    return tuple(chunks)
+
+
+def _pad_value_heads_for_flash_attention(
+    value: torch.Tensor,
+    target_head_dim: int,
+) -> Tuple[torch.Tensor, int]:
+    if value.ndim != 4:
+        raise ValueError("value must have shape [batch, tokens, heads, head_dim]")
+    value_head_dim = value.shape[-1]
+    if value_head_dim > target_head_dim:
+        raise ValueError("value head_dim must not exceed flash-attention target head_dim")
+    if value_head_dim == target_head_dim:
+        return value, value_head_dim
+    padded = torch.nn.functional.pad(value, (0, target_head_dim - value_head_dim))
+    return padded, value_head_dim
+
+
+def _trim_flash_attention_output(
+    output: torch.Tensor,
+    value_head_dim: int,
+) -> torch.Tensor:
+    if output.ndim != 4:
+        raise ValueError("flash-attention output must have shape [batch, tokens, heads, head_dim]")
+    if value_head_dim > output.shape[-1]:
+        raise ValueError("value_head_dim must not exceed flash-attention output head_dim")
+    return output[..., :value_head_dim]
+
+
 class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
     _inst = None
 
@@ -106,6 +153,34 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
     def set_batch_idx(self, batch_idx: torch.Tensor, batch_idx_gen: torch.Tensor) -> None:
         self.batch_index = batch_idx.to(torch.int32)
         self.batch_index_gen = batch_idx_gen.to(torch.int32)
+
+    def set_mla_runtime_metadata(
+        self,
+        *,
+        prefill_query_lens,
+        prefill_cache_lens,
+        decode_cache_lens=None,
+        batch_index=None,
+        batch_index_gen=None,
+    ) -> None:
+        self.is_metadata_initialized = True
+        self.prefill_query_lens = list(prefill_query_lens)
+        self.prefill_cache_lens = list(prefill_cache_lens)
+        self.decode_cache_lens = (
+            None
+            if decode_cache_lens is None
+            else torch.tensor(decode_cache_lens, dtype=torch.int32, device=self.device)
+        )
+        self.batch_index = (
+            None
+            if batch_index is None
+            else torch.tensor(batch_index, dtype=torch.int32, device=self.device)
+        )
+        self.batch_index_gen = (
+            None
+            if batch_index_gen is None
+            else torch.tensor(batch_index_gen, dtype=torch.int32, device=self.device)
+        )
 
     def forward(
         self,
@@ -220,5 +295,116 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
             output[token_offset : token_offset + self.decode_batch_size].copy_(
                 decode_output.reshape(-1, self.num_q_heads * self.head_dim)
             )
+
+        return output
+
+    def forward_mla(self, wrapper_inputs) -> torch.Tensor:
+        from sarathi.model_executor.models.deepseek_v2 import (
+            append_resident_cache,
+            is_component_mla_kv_cache,
+            get_layer_cache_kv_handle,
+            read_component_mla_kv_cache,
+            reconstruct_dense_kv,
+            resolve_layer_cache,
+            write_component_mla_kv_cache,
+        )
+
+        assert self.is_metadata_initialized, "Metadata is not initialized."
+
+        if self.is_profiling_iteration:
+            return torch.zeros(
+                wrapper_inputs.query.shape[0],
+                wrapper_inputs.mla_dims.o_proj_input_dim_local,
+                device=self.device,
+                dtype=wrapper_inputs.query.dtype,
+            )
+
+        if self.decode_cache_lens is None:
+            decode_cache_lens = []
+        else:
+            decode_cache_lens = self.decode_cache_lens.tolist()
+        query_lens = self.prefill_query_lens + [1] * len(decode_cache_lens)
+        past_lens = self.prefill_cache_lens + decode_cache_lens
+
+        runtime_kv_cache, past_resident_cache = resolve_layer_cache(
+            wrapper_inputs.kv_cache,
+            wrapper_inputs.past_resident_cache,
+        )
+        runtime_kv_cache = get_layer_cache_kv_handle(runtime_kv_cache)
+        current_cache_chunks = _split_resident_cache_by_lengths(
+            wrapper_inputs.new_resident_cache,
+            query_lens,
+        )
+
+        if is_component_mla_kv_cache(runtime_kv_cache):
+            batch_indices = self.batch_index.tolist() if self.batch_index is not None else []
+            decode_batch_indices = (
+                self.batch_index_gen.tolist() if self.batch_index_gen is not None else []
+            )
+            all_batch_indices = batch_indices[: len(self.prefill_query_lens)] + decode_batch_indices
+            past_cache_chunks = tuple(
+                read_component_mla_kv_cache(runtime_kv_cache, batch_idx, past_len)
+                for batch_idx, past_len in zip(all_batch_indices, past_lens)
+            )
+        else:
+            past_cache_chunks = _split_resident_cache_by_lengths(
+                past_resident_cache,
+                past_lens,
+            )
+
+        output = torch.empty(
+            wrapper_inputs.query.shape[0],
+            wrapper_inputs.mla_dims.o_proj_input_dim_local,
+            device=wrapper_inputs.query.device,
+            dtype=wrapper_inputs.query.dtype,
+        )
+        token_offset = 0
+        if is_component_mla_kv_cache(runtime_kv_cache):
+            batch_indices = self.batch_index.tolist() if self.batch_index is not None else []
+            decode_batch_indices = (
+                self.batch_index_gen.tolist() if self.batch_index_gen is not None else []
+            )
+            all_batch_indices = batch_indices[: len(self.prefill_query_lens)] + decode_batch_indices
+        else:
+            all_batch_indices = [None for _ in query_lens]
+
+        for query_len, past_len, batch_idx, past_cache, current_cache in zip(
+            query_lens,
+            past_lens,
+            all_batch_indices,
+            past_cache_chunks,
+            current_cache_chunks,
+        ):
+            if is_component_mla_kv_cache(runtime_kv_cache):
+                write_component_mla_kv_cache(
+                    runtime_kv_cache,
+                    batch_idx,
+                    past_len,
+                    current_cache,
+                )
+            full_cache = append_resident_cache(past_cache, current_cache)
+            key, value = reconstruct_dense_kv(
+                full_cache,
+                wrapper_inputs.kv_up_proj_weight,
+                wrapper_inputs.mla_dims,
+            )
+            seq_query = wrapper_inputs.query[token_offset : token_offset + query_len].unsqueeze(0)
+            seq_key = key.unsqueeze(0)
+            seq_value, value_head_dim = _pad_value_heads_for_flash_attention(
+                value.unsqueeze(0),
+                wrapper_inputs.mla_dims.q_head_dim,
+            )
+            seq_output = flash_attn_func(
+                seq_query,
+                seq_key,
+                seq_value,
+                causal=True,
+                softmax_scale=wrapper_inputs.softmax_scale,
+            )
+            seq_output = _trim_flash_attention_output(seq_output, value_head_dim)
+            output[token_offset : token_offset + query_len].copy_(
+                seq_output.reshape(query_len, -1)
+            )
+            token_offset += query_len
 
         return output

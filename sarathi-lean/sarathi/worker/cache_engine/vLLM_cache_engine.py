@@ -46,15 +46,7 @@ class vLLMCacheEngine(BaseCacheEngine):
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
-        head_size = model_config.get_head_size()
-        num_heads = model_config.get_num_kv_heads(parallel_config)
-        num_layers = model_config.get_num_layers(parallel_config)
-
-        key_cache_block = block_size * num_heads * head_size
-        value_cache_block = key_cache_block
-        total = num_layers * (key_cache_block + value_cache_block)
-        dtype_size = _get_dtype_size(model_config.dtype)
-        return dtype_size * total
+        return model_config.get_cache_block_size_bytes(block_size, parallel_config)
 
     def step(self, seq_metadata_list: List[SequenceMetadata]) -> None:
         pass
@@ -69,7 +61,3 @@ class vLLMCacheEngine(BaseCacheEngine):
 
     def cleanup_kvcache(self) -> None:
         pass
-
-
-def _get_dtype_size(dtype: torch.dtype) -> int:
-    return torch.tensor([], dtype=dtype).element_size()

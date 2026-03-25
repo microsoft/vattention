@@ -12,6 +12,13 @@ std::vector<at::Tensor> init_kvcache(unsigned long num_layers, unsigned long num
     return tensors;
 }
 
+std::vector<at::Tensor> init_kvcache_component_spec(py::dict payload) {
+    std::vector<at::Tensor> tensors;
+    vattn.init_kvcache_component_spec(payload);
+    tensors = vattn.init_kvcache_component_spec_virtual();
+    return tensors;
+}
+
 void show_kvcache_config() {
     vattn.show_kvcache_config();
 }
@@ -44,6 +51,18 @@ void cleanup() {
 
 void set_deferred_reclamation(bool val) {
     vattn.set_deferred_reclamation(val);
+}
+
+py::dict get_allocator_debug_info() {
+    return vattn.get_allocator_debug_info();
+}
+
+u64 debug_tokens_to_pages(unsigned long num_tokens) {
+    return vattn.debug_tokens_to_pages(num_tokens);
+}
+
+py::dict debug_fragmentation_metrics(u64 seq_len, u64 mapped_blocks) {
+    return vattn.debug_fragmentation_metrics(seq_len, mapped_blocks);
 }
 
 void map_common_pages(u64 num_tokens) {

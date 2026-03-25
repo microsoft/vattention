@@ -28,6 +28,7 @@ from sarathi.model_executor.attention import AttentionBackend
 from sarathi.core.block_space_manager.vattention_block_space_manager import (
     vAttentionBlockSpaceManager
 )
+from sarathi.worker.cache_engine import get_cache_engine
 
 logger = init_logger(__name__)
 
@@ -241,6 +242,14 @@ class BaseLLMEngine:
         # operators can be applied to all workers.
         num_gpu_blocks = min(num_gpu_blocks_across_workers)
         physical_memory = min(physical_memory_all)
+        cache_block_size = get_cache_engine(self.model_config.attention_backend).get_cache_block_size(
+            self.cache_config.page_size
+            if AttentionBackend.is_vATTN(self.model_config.attention_backend)
+            else self.cache_config.block_size,
+            self.model_config,
+            self.parallel_config,
+        )
+        cache_memory_budget = num_gpu_blocks * cache_block_size
 
         # FIXME(woosuk): Change to debug log.
         logger.info(f"# GPU blocks: {num_gpu_blocks}")
@@ -254,6 +263,11 @@ class BaseLLMEngine:
         max_blocks_per_request = math.ceil(
             self.model_config.max_model_len / self.cache_config.block_size
         )
+        max_schedulable_gpu_blocks = (
+            max_blocks_per_request * self.scheduler_config.max_num_seqs
+        )
+        num_gpu_blocks = min(num_gpu_blocks, max_schedulable_gpu_blocks)
+        cache_memory_budget = num_gpu_blocks * cache_block_size
         if num_gpu_blocks < max_blocks_per_request:
             raise ValueError(
                 f"Not enough available memory to schedule a request will maximum allowed length {self.model_config.max_model_len}. "
@@ -261,7 +275,7 @@ class BaseLLMEngine:
                 f"Try decreasing `max_batch_size`, `max_model_len`."
             )
         self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.memory_for_gpu = physical_memory
+        self.cache_config.memory_for_gpu = min(physical_memory, cache_memory_budget)
         # Initialize the cache.
         self._run_workers(
             "init_cache_engine", cache_config=self.cache_config, get_all_outputs=True

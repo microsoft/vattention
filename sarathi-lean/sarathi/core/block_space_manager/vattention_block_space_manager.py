@@ -49,11 +49,13 @@ class vAttentionBlockSpaceManager():
         self.active_requests[seq.seq_id] = seq
         self.promised_blocks += self.get_num_blocks(seq)
     
-    def can_append_slot(self) -> bool:
-        # num_free_gpu_blocks = self.free_blocks
-        # return (num_free_gpu_blocks - self.promised_blocks) > 0
-        # return True
-        # return self.free_blocks > self.promised_blocks *1.1
+    def can_append_slot(self, seq: Sequence = None) -> bool:
+        if seq is not None:
+            len_seq = seq.get_len()
+            num_blocks_current = math.ceil(len_seq / self.block_size)
+            num_blocks_new = math.ceil((len_seq + 1) / self.block_size)
+            if num_blocks_new <= num_blocks_current:
+                return True
         return self.free_blocks - self.promised_blocks > 0
         
 
