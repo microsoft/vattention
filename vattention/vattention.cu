@@ -54,23 +54,22 @@ public:
 
     void init_buffer_sizes()
     {
-        u64 remainder;
-
         if (component_spec_enabled)
             virt_buff_size_per_token = page_buffer_token_bytes;
         else if (megacache_enabled)
             virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem * num_layers;
         else
             virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem;
-        virt_buff_size_per_req = virt_buff_size_per_token * max_context_length;
-        virt_buff_size_per_req = ROUND_UP(virt_buff_size_per_req, page_size);
-
-        max_pages_per_req = virt_buff_size_per_req / page_size;
-
-        /* align to ensure that each request begins at a mappable offset */
-        remainder = virt_buff_size_per_req % page_size;
-        if (remainder != 0)
-            virt_buff_size_per_req += page_size - remainder;
+        /*
+         * Reserve virtual address space in whole-page units based on the same
+         * ceil(tokens / tokens_per_page) math used by page growth.
+         *
+         * Using raw per-token bytes can under-reserve when max_context_length
+         * is not an exact multiple of tokens_per_page, which makes later page
+         * mappings walk past the reserved VA range for smaller MLA components.
+         */
+        max_pages_per_req = tokens_to_pages(max_context_length);
+        virt_buff_size_per_req = max_pages_per_req * page_size;
 
         virt_buff_size = virt_buff_size_per_req * max_batch_size;
         virt_buff_num_kv_tokens = max_batch_size * max_context_length;
@@ -213,7 +212,13 @@ public:
         else
             shape = {max_batch_size, max_context_length, num_kv_heads, head_size};
 
-        at::Tensor t = alloc_vtensor(shape, page_size, type_, allocator, device);
+        at::Tensor t = alloc_vtensor(
+            shape,
+            page_size,
+            virt_buff_size_per_req,
+            type_,
+            allocator,
+            device);
         return t;
     }
 
@@ -225,7 +230,13 @@ public:
         else
             shape = {max_batch_size, max_context_length, component_token_dim};
 
-        at::Tensor t = alloc_vtensor(shape, page_size, scalar_type, allocator, device);
+        at::Tensor t = alloc_vtensor(
+            shape,
+            page_size,
+            virt_buff_size_per_req,
+            scalar_type,
+            allocator,
+            device);
         return t;
     }
 
@@ -747,6 +758,8 @@ public:
         info["megacache_enabled"] = py::bool_(megacache_enabled);
         info["num_layers"] = py::int_(num_layers);
         info["num_cache_components"] = py::int_(get_num_cache_components());
+        info["max_pages_per_req"] = py::int_(max_pages_per_req);
+        info["virt_buff_size_per_req"] = py::int_(virt_buff_size_per_req);
         return info;
     }
 

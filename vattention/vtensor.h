@@ -37,7 +37,7 @@ public:
         CUdeviceptr ptr_gpu;
         if (!is_uvm_backend(this->page_size))
         {
-            CHECK_CUDA(cuMemAddressReserve(&ptr_gpu, size, 0, 0, 0));
+            CHECK_CUDA(cuMemAddressReserve(&ptr_gpu, size, this->page_size, 0, 0));
         }
         else
         {
@@ -56,6 +56,7 @@ template <typename T>
 at::Tensor _alloc_vtensor(
     at::ArrayRef<T> shape,
     size_t page_size,
+    size_t min_request_bytes,
     c10::Allocator *allocator,
     c10::DispatchKeySet ks,
     at::ScalarType scalar_type,
@@ -65,18 +66,32 @@ at::Tensor _alloc_vtensor(
     at::detail::check_size_nonnegative(shape);
     raise_warning_for_complex_half(scalar_type);
     caffe2::TypeMeta dtype = scalarTypeToTypeMeta(scalar_type);
-    size_t request_alignment = page_size * shape[0];
-    auto size_bytes = at::detail::computeStorageNbytesContiguous(shape, dtype.itemsize());
-    size_bytes = ROUND_UP(size_bytes, request_alignment);
+    if (shape.empty() || shape[0] == 0)
+        throw std::runtime_error("vtensor shape must include a positive batch dimension");
+
+    const size_t batch_size = shape[0];
+    auto logical_size_bytes = at::detail::computeStorageNbytesContiguous(shape, dtype.itemsize());
+    size_t per_request_bytes = logical_size_bytes / batch_size;
+    if (logical_size_bytes % batch_size != 0)
+        throw std::runtime_error("logical_size_bytes is not divisible by batch size");
+
+    if (per_request_bytes < min_request_bytes)
+        per_request_bytes = min_request_bytes;
+    per_request_bytes = ROUND_UP(per_request_bytes, page_size);
+    size_t size_bytes = per_request_bytes * batch_size;
     /*
      * ensure that each request's buffer is at least as big as the page size
      * first element of shape should always be batch size
      */
-    if (size_bytes < request_alignment)
-        size_bytes = request_alignment;
+    if (size_bytes < page_size * batch_size)
+        size_bytes = page_size * batch_size;
 
-    if (size_bytes % request_alignment != 0)
-        throw std::runtime_error("size_bytes is not a multiple of page_size * shape[0]");
+    if (size_bytes % batch_size != 0)
+        throw std::runtime_error("size_bytes is not divisible by batch size");
+
+    size_t request_alignment = size_bytes / batch_size;
+    if (request_alignment % page_size != 0)
+        throw std::runtime_error("request stride is not a multiple of page_size");
 
     auto storage_impl = c10::make_intrusive<c10::StorageImpl>(
         c10::StorageImpl::use_byte_size_t(),
@@ -101,6 +116,7 @@ at::Tensor _alloc_vtensor(
 TORCH_CUDA_CPP_API at::Tensor alloc_vtensor(
     at::IntArrayRef shape,
     size_t page_size,
+    size_t min_request_bytes,
     at::ScalarType dtype,
     VirtualTensorAllocator *allocator,
     int device_idx)
@@ -112,5 +128,13 @@ TORCH_CUDA_CPP_API at::Tensor alloc_vtensor(
     const c10::DeviceGuard device_guard(device);
     // VirtualTensorAllocator *allocator = new VirtualTensorAllocator();
     constexpr c10::DispatchKeySet cuda_dks(c10::DispatchKey::CUDA);
-    return _alloc_vtensor(shape, page_size, allocator, cuda_dks, dtype, device_idx, memory_format_opt);
+    return _alloc_vtensor(
+        shape,
+        page_size,
+        min_request_bytes,
+        allocator,
+        cuda_dks,
+        dtype,
+        device_idx,
+        memory_format_opt);
 }

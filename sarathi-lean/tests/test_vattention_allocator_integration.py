@@ -252,6 +252,49 @@ class VAttentionAllocatorIntegrationTests(unittest.TestCase):
         self.assertEqual(vattention.debug_tokens_to_pages(tokens_per_page), 1)
         self.assertEqual(vattention.debug_tokens_to_pages(tokens_per_page + 1), 2)
 
+    def test_component_spec_virtual_storage_covers_ceiling_page_reservation(self):
+        hf_config = types.SimpleNamespace(
+            model_type="deepseek_v2",
+            hidden_size=5120,
+            num_attention_heads=128,
+            num_hidden_layers=60,
+            q_lora_rank=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        )
+        model_config = self._make_model_config(hf_config=hf_config)
+        parallel_config = config_module.ParallelConfig(
+            pipeline_parallel_size=3,
+            tensor_parallel_size=4,
+        )
+        init_spec = model_config.get_vattention_init_spec(
+            page_size=2 * 1024 * 1024,
+            parallel_config=parallel_config,
+            megacache=False,
+            max_batch_size=1,
+            max_context_length=32768,
+            device_idx=0,
+        )
+
+        tensors = vattention.init_kvcache_component_spec(
+            init_spec.get_extension_init_request()["payload"]
+        )
+        debug_info = vattention.get_allocator_debug_info()
+        expected_pages = (
+            init_spec.max_context_length + init_spec.cache_spec.tokens_per_page - 1
+        ) // init_spec.cache_spec.tokens_per_page
+        expected_reserved_bytes = expected_pages * init_spec.cache_spec.page_size
+
+        self.assertEqual(debug_info["max_pages_per_req"], expected_pages)
+        self.assertEqual(debug_info["virt_buff_size_per_req"], expected_reserved_bytes)
+        for tensor in tensors:
+            self.assertGreaterEqual(
+                tensor.storage().nbytes(),
+                expected_reserved_bytes,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
