@@ -1,7 +1,7 @@
-model: 01-ai/Yi-6B-200k
+model: deepseek-ai/DeepSeek-V2-Lite
 replica_id: 0
 replica_resource_mapping: []
-tokenizer: 01-ai/Yi-6B-200k
+tokenizer: deepseek-ai/DeepSeek-V2-Lite
 tokenizer_mode: auto
 trust_remote_code: true
 download_dir: null
@@ -9,12 +9,12 @@ load_format: auto
 dtype: float16
 seed: 42
 pipeline_parallel_size: 1
-tensor_parallel_size: 4
+tensor_parallel_size: 2
 block_size: 2097152
 gpu_memory_utilization: 0.8
 revision: null
 scheduler_type: vllm
-max_model_len: 32768
+max_model_len: 128
 max_num_seqs: 128
 max_num_batched_tokens: null
 chunk_size: null
