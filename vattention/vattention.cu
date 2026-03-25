@@ -489,43 +489,75 @@ public:
     }
 
     /* Map physical memory for the current iteration before returning control */
+    py::dict compute_fragmentation_metrics(u64 seq_len, u64 nr_mapped)
+    {
+        py::dict metrics;
+
+        u64 mapped_token_capacity = nr_mapped * tokens_per_page;
+        u64 resident_tokens = (seq_len < mapped_token_capacity)
+            ? seq_len
+            : mapped_token_capacity;
+        u64 slack_tokens = mapped_token_capacity - resident_tokens;
+        u64 useful_payload_bytes = resident_tokens * cached_token_bytes_local;
+        u64 mapped_physical_bytes = nr_mapped * get_pages_per_kvblock() * page_size;
+
+        double token_fill_pct = mapped_token_capacity > 0
+            ? (100.0 * static_cast<double>(resident_tokens) / static_cast<double>(mapped_token_capacity))
+            : 0.0;
+        double token_frag_pct = mapped_token_capacity > 0
+            ? (100.0 * static_cast<double>(slack_tokens) / static_cast<double>(mapped_token_capacity))
+            : 0.0;
+        double payload_util_pct = mapped_physical_bytes > 0
+            ? (100.0 * static_cast<double>(useful_payload_bytes) / static_cast<double>(mapped_physical_bytes))
+            : 0.0;
+        double payload_overhead_pct = mapped_physical_bytes > 0
+            ? (100.0 - payload_util_pct)
+            : 0.0;
+
+        metrics["seq_len"] = py::int_(seq_len);
+        metrics["mapped_blocks"] = py::int_(nr_mapped);
+        metrics["pages_per_kvblock"] = py::int_(get_pages_per_kvblock());
+        metrics["tokens_per_page"] = py::int_(tokens_per_page);
+        metrics["mapped_token_capacity"] = py::int_(mapped_token_capacity);
+        metrics["resident_tokens"] = py::int_(resident_tokens);
+        metrics["slack_tokens"] = py::int_(slack_tokens);
+        metrics["useful_payload_bytes"] = py::int_(useful_payload_bytes);
+        metrics["mapped_physical_bytes"] = py::int_(mapped_physical_bytes);
+        metrics["token_fill_pct"] = py::float_(token_fill_pct);
+        metrics["token_frag_pct"] = py::float_(token_frag_pct);
+        metrics["payload_util_pct"] = py::float_(payload_util_pct);
+        metrics["payload_overhead_pct"] = py::float_(payload_overhead_pct);
+        return metrics;
+    }
+
     void map_pages_for_curr_step(int reqId, u64 seq_len)
     {
         if (seq_len == 0) return;
 
         u64 nr_required = tokens_to_pages(seq_len);
         u64 nr_mapped = get_req_pages(reqId);
-        
-        // --- START FRAGMENTATION LOGIC ---
-        
-        // 1. Calculate physical token capacity in currently mapped logical kvblocks.
-        u64 physical_token_capacity = nr_mapped * tokens_per_page;
-
-        // 2. Calculate "Resident" Useful Tokens
-        // We only count tokens actually residing in the currently mapped physical blocks.
-        u64 resident_useful_tokens = (seq_len < physical_token_capacity) ? seq_len : physical_token_capacity;
-
-        // 3. Convert to bytes for the full resident payload tracked by the allocator.
-        u64 bytes_useful = resident_useful_tokens * cached_token_bytes_local;
-
-        // 4. Calculate total physical memory mapped for the full logical kvblocks.
-        u64 bytes_allocated = nr_mapped * get_pages_per_kvblock() * page_size;
 
         if (nr_mapped > 0) {
-            double frag_percent = (bytes_allocated > 0) 
-                ? (1.0 - ((double)bytes_useful / bytes_allocated)) * 100.0 
-                : 0.0;
-
-            printf("[vAttention FRAG] Req: %d | TotalSeq: %llu | Mapped Blocks: %llu | Resident: %llu | Useful: %.2f MB | Physical: %.2f MB | Internal Frag: %.2f%%\n",
-                reqId, 
+            py::dict metrics = compute_fragmentation_metrics(seq_len, nr_mapped);
+            printf(
+                "[vAttention FRAG] Req: %d | TotalSeq: %llu | Mapped Blocks: %llu | "
+                "Capacity: %llu | Resident: %llu | Slack: %llu | "
+                "Token Fill: %.2f%% | Token Frag: %.2f%% | "
+                "Useful Payload: %.2f MB | Physical: %.2f MB | "
+                "Payload Util: %.2f%% | Payload Overhead: %.2f%%\n",
+                reqId,
                 (unsigned long long)seq_len,
                 (unsigned long long)nr_mapped,
-                (unsigned long long)resident_useful_tokens,
-                (double)bytes_useful / (1024.0 * 1024.0),
-                (double)bytes_allocated / (1024.0 * 1024.0),
-                frag_percent);
+                (unsigned long long)py::cast<u64>(metrics["mapped_token_capacity"]),
+                (unsigned long long)py::cast<u64>(metrics["resident_tokens"]),
+                (unsigned long long)py::cast<u64>(metrics["slack_tokens"]),
+                py::cast<double>(metrics["token_fill_pct"]),
+                py::cast<double>(metrics["token_frag_pct"]),
+                py::cast<u64>(metrics["useful_payload_bytes"]) / (1024.0 * 1024.0),
+                py::cast<u64>(metrics["mapped_physical_bytes"]) / (1024.0 * 1024.0),
+                py::cast<double>(metrics["payload_util_pct"]),
+                py::cast<double>(metrics["payload_overhead_pct"]));
         }
-        // --- END FRAGMENTATION LOGIC ---
 
         if (nr_required <= nr_mapped)
             return;
@@ -768,6 +800,11 @@ public:
         return tokens_to_pages(num_tokens);
     }
 
+    py::dict debug_fragmentation_metrics(u64 seq_len, u64 mapped_blocks)
+    {
+        return compute_fragmentation_metrics(seq_len, mapped_blocks);
+    }
+
     /* TODO(ashish): check if this is compatible with PyTorch destructor */
     void cleanup()
     {
@@ -802,6 +839,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("set_deferred_reclamation", &set_deferred_reclamation, "enable/disable deferred freeing...");
     m.def("get_allocator_debug_info", &get_allocator_debug_info, "return allocator sizing metadata...");
     m.def("debug_tokens_to_pages", &debug_tokens_to_pages, "convert token count to logical kvblocks...");
+    m.def("debug_fragmentation_metrics", &debug_fragmentation_metrics, "compute fragmentation metrics for a given seq len and mapped block count...");
     /* Testing APIs */
     m.def("show_kvcache_config", &show_kvcache_config, "show kv cache configuration...");
     m.def("show_allocator_state", &show_allocator_state, "show free pool of physical memory blocks...");

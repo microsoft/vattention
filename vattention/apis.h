@@ -61,6 +61,10 @@ u64 debug_tokens_to_pages(unsigned long num_tokens) {
     return vattn.debug_tokens_to_pages(num_tokens);
 }
 
+py::dict debug_fragmentation_metrics(u64 seq_len, u64 mapped_blocks) {
+    return vattn.debug_fragmentation_metrics(seq_len, mapped_blocks);
+}
+
 void map_common_pages(u64 num_tokens) {
     vattn.map_common_pages_in_batch(num_tokens);
 }
