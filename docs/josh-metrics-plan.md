@@ -79,6 +79,24 @@ What matters:
   - `KV_FRAGMENTATION_PERCENT`
 - Why: metric constants prevent string drift and keep plots/CSV naming consistent.
 
+Example starter shape in [constants.py](../sarathi-lean/sarathi/metrics/constants.py#L79):
+
+```python
+class SequenceMetricsHistogram(enum.Enum):
+    REQUEST_INTER_ARRIVAL_DELAY = "request_inter_arrival_delay"
+    REQUEST_NUM_TOKENS = "request_num_tokens"
+    REQUEST_PREFILL_TOKENS = "request_num_prefill_tokens"
+    REQUEST_DECODE_TOKENS = "request_num_decode_tokens"
+    REQUEST_PD_RATIO = "request_pd_ratio"
+    REQUEST_NUM_RESTARTS = "request_num_restarts"
+    REQUEST_NUM_PAUSES = "request_num_pauses"
+    REQUEST_NUM_IGNORED = "request_num_ignored"
+    KV_BLOCKS_MAPPED = "kv_blocks_mapped"
+    KV_FRAGMENTATION_PERCENT = "kv_fragmentation_percent"
+```
+
+This works well because `sequence_metrics.csv` is already built from request-level metric series keyed by `Request Id`.
+
 2. Add a request-level allocator snapshot helper in `vATTN_cache_engine.py`.
 
 - Add a method (for example `get_request_allocator_metrics(seq_id)` or `get_allocator_metrics_for_requests(seq_ids)`) that:
@@ -89,11 +107,44 @@ What matters:
   - returns structured values
 - Why: the cache engine already owns allocator-facing state and is the correct layer to translate runtime request state into metrics.
 
+Example starter shape in [vATTN_cache_engine.py](../sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py#L753):
+
+```python
+def get_request_allocator_metrics(self, seq_id: int) -> dict | None:
+    batch_idx = self.seq_to_batch_idx.get(seq_id)
+    if batch_idx is None:
+        return None
+
+    seq_len = int(self.curr_seq_lens[batch_idx])
+    if seq_len <= 0:
+        return None
+
+    mapped_blocks = int(vattention.debug_tokens_to_pages(seq_len))
+    metrics = dict(vattention.debug_fragmentation_metrics(seq_len, mapped_blocks))
+    return {
+        "mapped_blocks": mapped_blocks,
+        "fragmentation_percent": float(metrics["token_frag_pct"]),
+    }
+```
+
+This is a good first version because it only returns the two fields needed for the initial experiment.
+
 3. Add storage for request-level allocator metrics in `MetricsStore`.
 
 - Create new `DataSeries` entries keyed by `Request Id` (same key used by sequence metrics).
 - Add a method like `push_request_allocator_metric(metric_name, request_id, value)`.
 - Why: request-keyed storage is required to compare against `request_num_prefill_tokens` per request.
+
+Example helper in [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py#L155):
+
+```python
+@check_enabled
+@if_write_metrics
+def push_request_metric(self, metric_name, request_id: str, value: float) -> None:
+    self.seq_metrics_histogram[metric_name].put(request_id, value)
+```
+
+This keeps the request-finalization call site small and reuses the existing request-keyed `DataSeries`.
 
 4. Hook allocator metric capture at request-finalization time.
 
@@ -101,16 +152,62 @@ What matters:
 - Ensure request ID uses the same format as existing sequence metrics (`replica_id + seq_id` via `_get_seq_id`).
 - Why: this guarantees one aligned row per completed request.
 
+Example call shape near [`_on_request_end(...)`](../sarathi-lean/sarathi/metrics/metrics_store.py#L295):
+
+```python
+request_id = self._get_seq_id(seq.seq_id)
+
+self.push_request_metric(
+    SequenceMetricsHistogram.KV_BLOCKS_MAPPED,
+    request_id,
+    allocator_metrics["mapped_blocks"],
+)
+self.push_request_metric(
+    SequenceMetricsHistogram.KV_FRAGMENTATION_PERCENT,
+    request_id,
+    allocator_metrics["fragmentation_percent"],
+)
+```
+
+This is the key step that ensures `request_num_prefill_tokens` and fragmentation end up on the same request row.
+
 5. Emit allocator request metrics into `sequence_metrics.csv`.
 
 - Include new request-level allocator `DataSeries` in `_store_seq_metrics(...)` so output lands with existing request columns.
 - Optional: also keep a separate `allocator_metrics.csv` if you want batch-level debugging.
 - Why: the experiment needs one table that already contains both context length and fragmentation.
 
+Success should look conceptually like this:
+
+```csv
+Request Id,request_num_prefill_tokens,kv_blocks_mapped,kv_fragmentation_percent
+0_17,32000,47,5.9
+0_18,64000,94,3.0
+0_19,128000,188,1.5
+```
+
+This is the main reason to prefer request-level storage over a batch-only CSV for this experiment.
+
 6. Keep current allocator `printf` temporarily.
 
 - Do not remove existing stdout fragmentation prints during rollout.
 - Why: use stdout to spot-check values while validating CSV integration.
+
+Quick sanity check before full wiring:
+
+```python
+import vattention
+
+seq_len = 32000
+mapped_blocks = vattention.debug_tokens_to_pages(seq_len)
+metrics = vattention.debug_fragmentation_metrics(seq_len, mapped_blocks)
+
+print("mapped_blocks:", mapped_blocks)
+print("token_frag_pct:", metrics["token_frag_pct"])
+print("mapped_physical_bytes:", metrics["mapped_physical_bytes"])
+```
+
+If this output already looks wrong, debug the allocator path before touching CSV-writing code.
 
 ## Validation procedure (Docker)
 
@@ -135,134 +232,6 @@ What matters:
 5. Spot-check against stdout:
 
 - compare a few requests against allocator print values to ensure parity
-
-## Small code examples to get started
-
-These are intentionally small and local to the code paths you will touch. The goal is to give you something you can paste in, adapt, and test quickly.
-
-### Example 1: add new metric names
-
-Start by extending the request-level metric enum in [constants.py](../sarathi-lean/sarathi/metrics/constants.py#L79).
-
-```python
-class SequenceMetricsHistogram(enum.Enum):
-    REQUEST_INTER_ARRIVAL_DELAY = "request_inter_arrival_delay"
-    REQUEST_NUM_TOKENS = "request_num_tokens"
-    REQUEST_PREFILL_TOKENS = "request_num_prefill_tokens"
-    REQUEST_DECODE_TOKENS = "request_num_decode_tokens"
-    REQUEST_PD_RATIO = "request_pd_ratio"
-    REQUEST_NUM_RESTARTS = "request_num_restarts"
-    REQUEST_NUM_PAUSES = "request_num_pauses"
-    REQUEST_NUM_IGNORED = "request_num_ignored"
-    KV_BLOCKS_MAPPED = "kv_blocks_mapped"
-    KV_FRAGMENTATION_PERCENT = "kv_fragmentation_percent"
-```
-
-Why this helps:
-
-- `sequence_metrics.csv` is already built from request-level metric series
-- adding the names here gives you columns with stable CSV headers
-
-### Example 2: smallest useful cache-engine helper
-
-This is the basic shape of the helper to add in [vATTN_cache_engine.py](../sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py#L753).
-
-```python
-def get_request_allocator_metrics(self, seq_id: int) -> dict | None:
-    batch_idx = self.seq_to_batch_idx.get(seq_id)
-    if batch_idx is None:
-        return None
-
-    seq_len = int(self.curr_seq_lens[batch_idx])
-    if seq_len <= 0:
-        return None
-
-    mapped_blocks = int(vattention.debug_tokens_to_pages(seq_len))
-    metrics = dict(vattention.debug_fragmentation_metrics(seq_len, mapped_blocks))
-    return {
-        "mapped_blocks": mapped_blocks,
-        "fragmentation_percent": float(metrics["token_frag_pct"]),
-    }
-```
-
-Why this helps:
-
-- it keeps all allocator-facing logic in the cache engine
-- it returns exactly the first two fields needed for the initial experiment
-
-### Example 3: request-level metric push helper in `MetricsStore`
-
-This is the smallest helper shape to add in [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py#L155).
-
-```python
-@check_enabled
-@if_write_metrics
-def push_request_metric(self, metric_name, request_id: str, value: float) -> None:
-    self.seq_metrics_histogram[metric_name].put(request_id, value)
-```
-
-Why this helps:
-
-- it lets you reuse the existing request-keyed `DataSeries`
-- it keeps the call site in request-finalization code simple
-
-### Example 4: record fragmentation at request end
-
-This is the kind of call you want near `_on_request_end(...)` in [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py#L295), once you have access to the allocator snapshot for that request.
-
-```python
-request_id = self._get_seq_id(seq.seq_id)
-
-self.push_request_metric(
-    SequenceMetricsHistogram.KV_BLOCKS_MAPPED,
-    request_id,
-    allocator_metrics["mapped_blocks"],
-)
-self.push_request_metric(
-    SequenceMetricsHistogram.KV_FRAGMENTATION_PERCENT,
-    request_id,
-    allocator_metrics["fragmentation_percent"],
-)
-```
-
-Why this helps:
-
-- it guarantees the new values land in the same request row as `request_num_prefill_tokens`
-- it keeps the first milestone narrowly scoped
-
-### Example 5: quick local sanity check in Python
-
-Before wiring the full metrics path, it can help to verify the `vattention` debug API by hand in a Python shell inside the environment where the extension is installed.
-
-```python
-import vattention
-
-seq_len = 32000
-mapped_blocks = vattention.debug_tokens_to_pages(seq_len)
-metrics = vattention.debug_fragmentation_metrics(seq_len, mapped_blocks)
-
-print("mapped_blocks:", mapped_blocks)
-print("token_frag_pct:", metrics["token_frag_pct"])
-print("mapped_physical_bytes:", metrics["mapped_physical_bytes"])
-```
-
-Why this helps:
-
-- it isolates the binding and accounting logic from the CSV-writing work
-- if this output looks wrong, you know to debug the allocator path first
-
-### Example 6: what success should look like in `sequence_metrics.csv`
-
-After the wiring is complete, each request row should look conceptually like this:
-
-```csv
-Request Id,request_num_prefill_tokens,kv_blocks_mapped,kv_fragmentation_percent
-0_17,32000,47,5.9
-0_18,64000,94,3.0
-0_19,128000,188,1.5
-```
-
-This is the main reason to prefer request-level storage over a batch-only CSV for this experiment.
 
 ## First milestone (minimum useful result)
 
