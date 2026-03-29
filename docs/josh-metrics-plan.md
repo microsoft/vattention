@@ -19,8 +19,8 @@ The target result is a request-level dataset where each request row includes:
 
 ### 1. vAttention allocator and fragmentation source
 
-- [vattention/vattention.cu](../vattention/vattention.cu)
-- [vattention/apis.h](../vattention/apis.h)
+- [vattention/vattention.cu](../vattention/vattention.cu#L509)
+- [vattention/apis.h](../vattention/apis.h#L64)
 
 What matters:
 
@@ -30,7 +30,7 @@ What matters:
 
 ### 2. Cache engine runtime state (where seq lengths live)
 
-- [vATTN_cache_engine.py](../sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py)
+- [vATTN_cache_engine.py](../sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py#L753)
 
 What matters:
 
@@ -41,8 +41,8 @@ What matters:
 
 ### 3. Where request metrics are written
 
-- [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py)
-- [constants.py](../sarathi-lean/sarathi/metrics/constants.py)
+- [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py#L155)
+- [constants.py](../sarathi-lean/sarathi/metrics/constants.py#L79)
 
 What matters:
 
@@ -52,8 +52,8 @@ What matters:
 
 ### 4. Worker and engine hooks
 
-- [base_worker.py](../sarathi-lean/sarathi/worker/base_worker.py)
-- [base_llm_engine.py](../sarathi-lean/sarathi/engine/base_llm_engine.py)
+- [base_worker.py](../sarathi-lean/sarathi/worker/base_worker.py#L135)
+- [base_llm_engine.py](../sarathi-lean/sarathi/engine/base_llm_engine.py#L293)
 
 What matters:
 
@@ -62,7 +62,7 @@ What matters:
 
 ### 5. Docker output path
 
-- [scripts/docker/start-server.sh](../scripts/docker/start-server.sh)
+- [scripts/docker/start-server.sh](../scripts/docker/start-server.sh#L7)
 
 What matters:
 
@@ -142,7 +142,7 @@ These are intentionally small and local to the code paths you will touch. The go
 
 ### Example 1: add new metric names
 
-Start by extending the request-level metric enum in [constants.py](../sarathi-lean/sarathi/metrics/constants.py).
+Start by extending the request-level metric enum in [constants.py](../sarathi-lean/sarathi/metrics/constants.py#L79).
 
 ```python
 class SequenceMetricsHistogram(enum.Enum):
@@ -165,7 +165,7 @@ Why this helps:
 
 ### Example 2: smallest useful cache-engine helper
 
-This is the basic shape of the helper to add in [vATTN_cache_engine.py](../sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py).
+This is the basic shape of the helper to add in [vATTN_cache_engine.py](../sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py#L753).
 
 ```python
 def get_request_allocator_metrics(self, seq_id: int) -> dict | None:
@@ -192,7 +192,7 @@ Why this helps:
 
 ### Example 3: request-level metric push helper in `MetricsStore`
 
-This is the smallest helper shape to add in [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py).
+This is the smallest helper shape to add in [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py#L155).
 
 ```python
 @check_enabled
@@ -208,7 +208,7 @@ Why this helps:
 
 ### Example 4: record fragmentation at request end
 
-This is the kind of call you want near `_on_request_end(...)` in [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py), once you have access to the allocator snapshot for that request.
+This is the kind of call you want near `_on_request_end(...)` in [metrics_store.py](../sarathi-lean/sarathi/metrics/metrics_store.py#L295), once you have access to the allocator snapshot for that request.
 
 ```python
 request_id = self._get_seq_id(seq.seq_id)

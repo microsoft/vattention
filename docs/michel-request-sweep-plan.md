@@ -21,7 +21,7 @@ Build a script that:
 
 ### 1. Server API path to call
 
-- [api_server.py](../sarathi-lean/sarathi/entrypoints/openai_server/api_server.py)
+- [api_server.py](../sarathi-lean/sarathi/entrypoints/openai_server/api_server.py#L65)
 
 What matters:
 
@@ -30,8 +30,8 @@ What matters:
 
 ### 2. Docker launch and metrics output location
 
-- [start-server.sh](../scripts/docker/start-server.sh)
-- [start-server-yi6b.sh](../scripts/docker/start-server-yi6b.sh)
+- [start-server.sh](../scripts/docker/start-server.sh#L7)
+- [start-server-yi6b.sh](../scripts/docker/start-server-yi6b.sh#L7)
 
 What matters:
 
@@ -41,8 +41,8 @@ What matters:
 
 ### 3. Existing request-driving scripts style
 
-- [benchmark_e2e_static_trace.py](../scripts/benchmark_e2e_static_trace.py)
-- [utils.py](../scripts/utils.py)
+- [benchmark_e2e_static_trace.py](../scripts/benchmark_e2e_static_trace.py#L24)
+- [utils.py](../scripts/utils.py#L26)
 
 What matters:
 
@@ -51,7 +51,7 @@ What matters:
 
 ### 4. Metrics columns you depend on from Josh
 
-- [josh-metrics-plan.md](./josh-metrics-plan.md)
+- [josh-metrics-plan.md](./josh-metrics-plan.md#implementation-steps-what-to-change-and-why)
 
 What matters:
 
