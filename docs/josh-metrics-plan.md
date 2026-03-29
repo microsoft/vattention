@@ -1,136 +1,155 @@
-# Josh Metrics Plan
+# Josh Metrics Plan: Fragmentation vs Context Length
 
-This note captures the current plan for wiring vAttention allocator stats into Sarathi's in-repo metrics system.
+This plan explains how to capture vAttention fragmentation metrics in Sarathi so you can compare fragmentation against request context length across many requests.
 
 ## Goal
 
-Capture the vAttention allocator information that is currently printed to stdout, especially:
+Measure fragmentation as a function of context length by:
 
-- number of mapped/free KV blocks
-- fragmentation percentage
+- sending requests with different prompt lengths
+- generating only a few decode tokens per request (to keep MLA decode cost low)
+- saving per-request fragmentation metrics in Sarathi's existing metrics outputs
 
-and save it through Sarathi's metrics pipeline so it lands in the run output directory alongside the other benchmark metrics.
+The target result is a request-level dataset where each request row includes:
 
-## What is already working
+- context length (`request_num_prefill_tokens`)
+- fragmentation metrics (for example `kv_blocks_mapped`, `kv_fragmentation_percent`)
 
-- The Docker multiuser server starts successfully with `scripts/docker/start-server-yi6b.sh`.
-- The OpenAI-compatible API is reachable on `/v1/completions`.
-- Ray logs warnings about its own metrics exporter agent, but the server still starts.
+## Codebase background you need first
 
-For this task, the better target is Sarathi's own metrics system, not Ray's internal metrics exporter.
-
-## Where the fragmentation information is printed today
-
-The current fragmentation print is in:
+### 1. vAttention allocator and fragmentation source
 
 - [vattention/vattention.cu](/home/anodyine/repos/vattention/vattention/vattention.cu)
+- [vattention/apis.h](/home/anodyine/repos/vattention/vattention/apis.h)
 
-Relevant lines:
+What matters:
 
-- [vattention.cu](/home/anodyine/repos/vattention/vattention/vattention.cu#L414): computes `frag_percent`
-- [vattention.cu](/home/anodyine/repos/vattention/vattention/vattention.cu#L418): prints the fragmentation line
+- Fragmentation math is implemented in `compute_fragmentation_metrics(...)`.
+- Python can already call `debug_fragmentation_metrics(seq_len, mapped_blocks)`.
+- This means you do **not** need a new C++ binding for first-pass integration.
 
-The current print format includes:
+### 2. Cache engine runtime state (where seq lengths live)
 
-- request id
-- total sequence length
-- mapped blocks
-- resident useful tokens
-- useful MB
-- physical MB
-- internal fragmentation percent
+- [vATTN_cache_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py)
 
-Related block and cache logging already exists here:
+What matters:
 
-- [base_llm_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/engine/base_llm_engine.py#L246) logs `# GPU blocks`
-- [vATTN_cache_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py#L48) prints KV-cache init details
-- [vATTN_cache_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py#L85) prints reserved physical memory
+- `curr_seq_lens` tracks current sequence lengths by batch index.
+- `seq_to_batch_idx` maps request `seq_id` to allocator batch index.
+- `num_free_blocks()` already exposes allocator free blocks.
+- This is the best place to build a Python helper that returns allocator metrics per active request.
 
-## Recommended implementation plan
+### 3. Where request metrics are written
 
-1. Add a Python-callable stats getter in the `vattention` extension.
+- [metrics_store.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/metrics/metrics_store.py)
+- [constants.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/metrics/constants.py)
 
-   In [vattention/vattention.cu](/home/anodyine/repos/vattention/vattention/vattention.cu), factor the current fragmentation calculation into a helper that returns structured values instead of only printing them.
+What matters:
 
-   Suggested fields:
+- `sequence_metrics.csv` is keyed by `Request Id` and is built from per-request `DataSeries`.
+- Request-level fields like `request_num_prefill_tokens` are already recorded in `_on_request_end(...)`.
+- If you add fragmentation series keyed by `Request Id`, they can be emitted into the same CSV.
 
-   - `mapped_blocks`
-   - `resident_useful_tokens`
-   - `useful_mb`
-   - `physical_mb`
-   - `frag_percent`
+### 4. Worker and engine hooks
 
-   Expose the helper through the existing pybind module near functions like `num_free_kvblocks`.
+- [base_worker.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/base_worker.py)
+- [base_llm_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/engine/base_llm_engine.py)
 
-2. Add a cache-engine wrapper for those stats.
+What matters:
 
-   In [vATTN_cache_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py), add a method such as `get_allocator_metrics()` that calls the new `vattention` binding and returns the current allocator snapshot.
+- Requests are finalized in the normal batch/step flow.
+- Metrics should be captured at a deterministic point in that flow (same place request metrics are already finalized) so request IDs and final lengths are stable.
 
-3. Sample the metrics once per batch.
+### 5. Docker output path
 
-   The cleanest hook is in [base_worker.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/base_worker.py#L199), right next to:
+- [scripts/docker/start-server.sh](/home/anodyine/repos/vattention/scripts/docker/start-server.sh)
 
-   - `self.metrics_store.on_batch_stage_end(...)`
+What matters:
 
-   After the batch completes, pull the allocator stats from the cache engine and push them into the metrics store.
+- Docker already passes `--output_dir` into the in-container server process.
+- Sarathi metrics write to that output dir.
+- Ray exporter warnings are separate and should not block this lab.
 
-4. Add new metric names to Sarathi.
+## Implementation steps (what to change and why)
 
-   Extend [constants.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/metrics/constants.py) with allocator-specific metric names.
+1. Add allocator metric names in `constants.py`.
 
-   Suggested initial metrics:
+- Add names for at least:
+  - `KV_BLOCKS_MAPPED`
+  - `KV_FRAGMENTATION_PERCENT`
+- Why: metric constants prevent string drift and keep plots/CSV naming consistent.
 
-   - `KV_BLOCKS_FREE`
-   - `KV_BLOCKS_MAPPED`
-   - `KV_FRAGMENTATION_PERCENT`
-   - `KV_USEFUL_MB`
-   - `KV_PHYSICAL_MB`
+2. Add a request-level allocator snapshot helper in `vATTN_cache_engine.py`.
 
-5. Extend `MetricsStore` for allocator metrics.
+- Add a method (for example `get_request_allocator_metrics(seq_id)` or `get_allocator_metrics_for_requests(seq_ids)`) that:
+  - resolves `seq_id -> batch_idx` using `seq_to_batch_idx`
+  - reads current sequence length from `curr_seq_lens[batch_idx]`
+  - computes mapped blocks from allocator state for that request
+  - calls `vattention.debug_fragmentation_metrics(seq_len, mapped_blocks)`
+  - returns structured values
+- Why: the cache engine already owns allocator-facing state and is the correct layer to translate runtime request state into metrics.
 
-   In [metrics_store.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/metrics/metrics_store.py), add a new per-batch `DataSeries` collection for allocator metrics, similar to the existing per-batch metric handling.
+3. Add storage for request-level allocator metrics in `MetricsStore`.
 
-   Add a helper like:
+- Create new `DataSeries` entries keyed by `Request Id` (same key used by sequence metrics).
+- Add a method like `push_request_allocator_metric(metric_name, request_id, value)`.
+- Why: request-keyed storage is required to compare against `request_num_prefill_tokens` per request.
 
-   - `push_allocator_metric(metric_name, value)`
+4. Hook allocator metric capture at request-finalization time.
 
-   keyed by the current batch id.
+- In the request completion path (where `_on_request_end(...)` is effectively finalized), push fragmentation fields for that request ID.
+- Ensure request ID uses the same format as existing sequence metrics (`replica_id + seq_id` via `_get_seq_id`).
+- Why: this guarantees one aligned row per completed request.
 
-6. Save allocator metrics to their own CSV output.
+5. Emit allocator request metrics into `sequence_metrics.csv`.
 
-   Follow the existing CSV-writing patterns in [metrics_store.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/metrics/metrics_store.py).
+- Include new request-level allocator `DataSeries` in `_store_seq_metrics(...)` so output lands with existing request columns.
+- Optional: also keep a separate `allocator_metrics.csv` if you want batch-level debugging.
+- Why: the experiment needs one table that already contains both context length and fragmentation.
 
-   Recommended output:
+6. Keep current allocator `printf` temporarily.
 
-   - `allocator_metrics.csv`
+- Do not remove existing stdout fragmentation prints during rollout.
+- Why: use stdout to spot-check values while validating CSV integration.
 
-   in the same run output directory used by the rest of Sarathi's metrics.
+## Validation procedure (Docker)
 
-7. Keep the current `printf` during rollout.
+1. Start server:
 
-   Do not remove the existing fragmentation print immediately. Keep it while validating the new metrics path so stdout can be compared against the saved CSV values.
+- `scripts/docker/start-server-yi6b.sh`
 
-8. Validate end to end.
+2. Send requests across a context-length sweep:
 
-   - Start the server with `scripts/docker/start-server-yi6b.sh`
-   - Send one or more requests to `/v1/completions`
-   - Inspect the output directory under `/tmp/vattention/<container-name>`
-   - Confirm `allocator_metrics.csv` contains the expected block and fragmentation values
-   - Compare those values with the existing stdout prints
+- vary prompt length significantly
+- keep generation short (`max_tokens` small, e.g. 1-4)
 
-## Suggested first milestone
+3. Verify output files under `/tmp/vattention/<container-name>`:
 
-The first useful milestone is:
+- `sequence_metrics.csv` exists
+- new fragmentation columns are present
 
-- expose allocator stats from `vattention`
-- record just `KV_BLOCKS_MAPPED` and `KV_FRAGMENTATION_PERCENT`
-- save them once per batch to `allocator_metrics.csv`
+4. Verify row-level alignment:
 
-That is enough to prove the integration path works before adding extra fields.
+- for each `Request Id`, check `request_num_prefill_tokens` and `kv_fragmentation_percent` are both populated
+
+5. Spot-check against stdout:
+
+- compare a few requests against allocator print values to ensure parity
+
+## First milestone (minimum useful result)
+
+Deliver this first:
+
+- add request-level `KV_BLOCKS_MAPPED` and `KV_FRAGMENTATION_PERCENT`
+- write both into `sequence_metrics.csv` keyed by `Request Id`
+- validate on a short Docker run with mixed context lengths
+
+This is enough to produce the fragmentation-vs-context curve for MLA-focused experiments.
 
 ## What not to block on
 
-- Ray's internal metrics exporter warnings
-- Ray dashboard or Prometheus integration
+- Ray internal metrics exporter warnings
+- Ray dashboard/Prometheus integration
+- adding every possible allocator field before first analysis
 
-Those are separate from Sarathi's in-repo metrics output and do not need to be solved first for this task.
+Those can be addressed later after request-level fragmentation capture is stable.
