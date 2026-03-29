@@ -1,4 +1,4 @@
-# Josh Metrics Plan: Fragmentation vs Context Length
+# Metrics Plan: Fragmentation vs Context Length
 
 This plan explains how to capture vAttention fragmentation metrics in Sarathi so you can compare fragmentation against request context length across many requests.
 
@@ -19,8 +19,8 @@ The target result is a request-level dataset where each request row includes:
 
 ### 1. vAttention allocator and fragmentation source
 
-- [vattention/vattention.cu](/home/anodyine/repos/vattention/vattention/vattention.cu)
-- [vattention/apis.h](/home/anodyine/repos/vattention/vattention/apis.h)
+- [vattention/vattention.cu](~/repos/vattention/vattention/vattention.cu)
+- [vattention/apis.h](~/repos/vattention/vattention/apis.h)
 
 What matters:
 
@@ -30,7 +30,7 @@ What matters:
 
 ### 2. Cache engine runtime state (where seq lengths live)
 
-- [vATTN_cache_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py)
+- [vATTN_cache_engine.py](~/repos/vattention/sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py)
 
 What matters:
 
@@ -41,8 +41,8 @@ What matters:
 
 ### 3. Where request metrics are written
 
-- [metrics_store.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/metrics/metrics_store.py)
-- [constants.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/metrics/constants.py)
+- [metrics_store.py](~/repos/vattention/sarathi-lean/sarathi/metrics/metrics_store.py)
+- [constants.py](~/repos/vattention/sarathi-lean/sarathi/metrics/constants.py)
 
 What matters:
 
@@ -52,8 +52,8 @@ What matters:
 
 ### 4. Worker and engine hooks
 
-- [base_worker.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/worker/base_worker.py)
-- [base_llm_engine.py](/home/anodyine/repos/vattention/sarathi-lean/sarathi/engine/base_llm_engine.py)
+- [base_worker.py](~/repos/vattention/sarathi-lean/sarathi/worker/base_worker.py)
+- [base_llm_engine.py](~/repos/vattention/sarathi-lean/sarathi/engine/base_llm_engine.py)
 
 What matters:
 
@@ -62,13 +62,13 @@ What matters:
 
 ### 5. Docker output path
 
-- [scripts/docker/start-server.sh](/home/anodyine/repos/vattention/scripts/docker/start-server.sh)
+- [scripts/docker/start-server.sh](~/repos/vattention/scripts/docker/start-server.sh)
 
 What matters:
 
 - Docker already passes `--output_dir` into the in-container server process.
 - Sarathi metrics write to that output dir.
-- Ray exporter warnings are separate and should not block this lab.
+- Ray exporter warnings are separate and should not block this work.
 
 ## Implementation steps (what to change and why)
 
@@ -135,6 +135,134 @@ What matters:
 5. Spot-check against stdout:
 
 - compare a few requests against allocator print values to ensure parity
+
+## Small code examples to get started
+
+These are intentionally small and local to the code paths you will touch. The goal is to give you something you can paste in, adapt, and test quickly.
+
+### Example 1: add new metric names
+
+Start by extending the request-level metric enum in [constants.py](~/repos/vattention/sarathi-lean/sarathi/metrics/constants.py).
+
+```python
+class SequenceMetricsHistogram(enum.Enum):
+    REQUEST_INTER_ARRIVAL_DELAY = "request_inter_arrival_delay"
+    REQUEST_NUM_TOKENS = "request_num_tokens"
+    REQUEST_PREFILL_TOKENS = "request_num_prefill_tokens"
+    REQUEST_DECODE_TOKENS = "request_num_decode_tokens"
+    REQUEST_PD_RATIO = "request_pd_ratio"
+    REQUEST_NUM_RESTARTS = "request_num_restarts"
+    REQUEST_NUM_PAUSES = "request_num_pauses"
+    REQUEST_NUM_IGNORED = "request_num_ignored"
+    KV_BLOCKS_MAPPED = "kv_blocks_mapped"
+    KV_FRAGMENTATION_PERCENT = "kv_fragmentation_percent"
+```
+
+Why this helps:
+
+- `sequence_metrics.csv` is already built from request-level metric series
+- adding the names here gives you columns with stable CSV headers
+
+### Example 2: smallest useful cache-engine helper
+
+This is the basic shape of the helper to add in [vATTN_cache_engine.py](~/repos/vattention/sarathi-lean/sarathi/worker/cache_engine/vATTN_cache_engine.py).
+
+```python
+def get_request_allocator_metrics(self, seq_id: int) -> dict | None:
+    batch_idx = self.seq_to_batch_idx.get(seq_id)
+    if batch_idx is None:
+        return None
+
+    seq_len = int(self.curr_seq_lens[batch_idx])
+    if seq_len <= 0:
+        return None
+
+    mapped_blocks = int(vattention.debug_tokens_to_pages(seq_len))
+    metrics = dict(vattention.debug_fragmentation_metrics(seq_len, mapped_blocks))
+    return {
+        "mapped_blocks": mapped_blocks,
+        "fragmentation_percent": float(metrics["token_frag_pct"]),
+    }
+```
+
+Why this helps:
+
+- it keeps all allocator-facing logic in the cache engine
+- it returns exactly the first two fields needed for the initial experiment
+
+### Example 3: request-level metric push helper in `MetricsStore`
+
+This is the smallest helper shape to add in [metrics_store.py](~/repos/vattention/sarathi-lean/sarathi/metrics/metrics_store.py).
+
+```python
+@check_enabled
+@if_write_metrics
+def push_request_metric(self, metric_name, request_id: str, value: float) -> None:
+    self.seq_metrics_histogram[metric_name].put(request_id, value)
+```
+
+Why this helps:
+
+- it lets you reuse the existing request-keyed `DataSeries`
+- it keeps the call site in request-finalization code simple
+
+### Example 4: record fragmentation at request end
+
+This is the kind of call you want near `_on_request_end(...)` in [metrics_store.py](~/repos/vattention/sarathi-lean/sarathi/metrics/metrics_store.py), once you have access to the allocator snapshot for that request.
+
+```python
+request_id = self._get_seq_id(seq.seq_id)
+
+self.push_request_metric(
+    SequenceMetricsHistogram.KV_BLOCKS_MAPPED,
+    request_id,
+    allocator_metrics["mapped_blocks"],
+)
+self.push_request_metric(
+    SequenceMetricsHistogram.KV_FRAGMENTATION_PERCENT,
+    request_id,
+    allocator_metrics["fragmentation_percent"],
+)
+```
+
+Why this helps:
+
+- it guarantees the new values land in the same request row as `request_num_prefill_tokens`
+- it keeps the first milestone narrowly scoped
+
+### Example 5: quick local sanity check in Python
+
+Before wiring the full metrics path, it can help to verify the `vattention` debug API by hand in a Python shell inside the environment where the extension is installed.
+
+```python
+import vattention
+
+seq_len = 32000
+mapped_blocks = vattention.debug_tokens_to_pages(seq_len)
+metrics = vattention.debug_fragmentation_metrics(seq_len, mapped_blocks)
+
+print("mapped_blocks:", mapped_blocks)
+print("token_frag_pct:", metrics["token_frag_pct"])
+print("mapped_physical_bytes:", metrics["mapped_physical_bytes"])
+```
+
+Why this helps:
+
+- it isolates the binding and accounting logic from the CSV-writing work
+- if this output looks wrong, you know to debug the allocator path first
+
+### Example 6: what success should look like in `sequence_metrics.csv`
+
+After the wiring is complete, each request row should look conceptually like this:
+
+```csv
+Request Id,request_num_prefill_tokens,kv_blocks_mapped,kv_fragmentation_percent
+0_17,32000,47,5.9
+0_18,64000,94,3.0
+0_19,128000,188,1.5
+```
+
+This is the main reason to prefer request-level storage over a batch-only CSV for this experiment.
 
 ## First milestone (minimum useful result)
 

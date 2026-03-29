@@ -1,6 +1,6 @@
-# Londy Plotting Plan: Context Length vs Fragmentation
+# Plotting Plan: Context Length vs Fragmentation
 
-This plan is for Londy to read the metrics produced by Josh's pipeline and generate publication-ready plots of context length vs fragmentation percentage.
+This plan is for you to read the metrics produced by Josh's pipeline and generate publication-ready plots of context length vs fragmentation percentage.
 
 ## Goal
 
@@ -16,6 +16,159 @@ Target x/y for the main figure:
 
 - x-axis: `request_num_prefill_tokens`
 - y-axis: `kv_fragmentation_percent`
+
+## Theoretical curves to plot first
+
+Before reading Josh's real metrics output, start by plotting the theoretical amortization curves described in the proposal.
+
+The relevant expressions from the proposal are:
+
+1. Average system-wide fragmentation waste:
+
+`Wavg = B * k * L * Psize`
+
+This comes from assuming half of each of the `2 * L` tail pages is wasted on each worker, which simplifies to `B * k * L * Psize`.
+
+2. Percentage waste as a function of context length `C`:
+
+`W_percent(C) = Wavg / (C * Stoken + Wavg)`
+
+3. Memory footprint per token:
+
+`Stoken = 2 * L * H * Dhead * Pbyte`
+
+Where:
+
+- `L` = number of transformer layers
+- `B` = batch size
+- `k` = tensor parallelism degree
+- `Psize` = physical page size in bytes
+- `C` = context length in tokens
+- `Stoken` = bytes used per token across all layers
+- `H` = number of attention heads
+- `Dhead` = head dimension
+- `Pbyte` = bytes per element of KV storage precision
+
+For the proposal's worked example:
+
+- `L = 94`
+- `B = 1`
+- `Psize = 2 * 1024 * 1024`
+- `Stoken ~= 94 * 1024` bytes
+- compare `k = 1` and `k = 2`
+
+### First theoretical plotting task
+
+Plot `context length` vs `fragmentation %` using the formula above for one or more values of `k`.
+
+### Minimal example
+
+```python
+#!/usr/bin/env python3
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+
+def wavg_bytes(batch_size: int, tp_degree: int, num_layers: int, page_size_bytes: int) -> float:
+    return batch_size * tp_degree * num_layers * page_size_bytes
+
+
+def waste_percent(
+    context_lengths: np.ndarray,
+    *,
+    batch_size: int,
+    tp_degree: int,
+    num_layers: int,
+    page_size_bytes: int,
+    bytes_per_token: float,
+) -> np.ndarray:
+    fixed_waste = wavg_bytes(batch_size, tp_degree, num_layers, page_size_bytes)
+    utilized = context_lengths * bytes_per_token
+    return 100.0 * fixed_waste / (utilized + fixed_waste)
+
+
+def main() -> None:
+    out_path = Path("~/repos/vattention/tmp/theoretical_fragmentation_curve.png").expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    context_lengths = np.array([1000, 2000, 4000, 8000, 16000, 32000, 64000, 128000, 256000])
+
+    L = 94
+    B = 1
+    page_size_bytes = 2 * 1024 * 1024
+    bytes_per_token = 94 * 1024
+
+    fig, ax = plt.subplots(figsize=(9, 6), dpi=140)
+
+    for k in [1, 2]:
+        y = waste_percent(
+            context_lengths,
+            batch_size=B,
+            tp_degree=k,
+            num_layers=L,
+            page_size_bytes=page_size_bytes,
+            bytes_per_token=bytes_per_token,
+        )
+        ax.plot(context_lengths, y, marker="o", linewidth=2.0, label=f"TP degree k={k}")
+
+    ax.set_xlabel("Context Length (tokens)")
+    ax.set_ylabel("Fragmentation (%)")
+    ax.set_title("Theoretical Fragmentation Amortization Curve")
+    ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.5)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+    print(f"Saved plot to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Example with a denser smooth curve
+
+Use this version if you want a continuous-looking line instead of a small table of hand-picked context lengths.
+
+```python
+context_lengths = np.linspace(1000, 256000, 300)
+```
+
+If lower-context behavior is important, a log-scaled x-axis is often easier to read:
+
+```python
+ax.set_xscale("log")
+```
+
+### Example with proposal-style MB tables
+
+If you want to reproduce the proposal tables more directly, it can help to compute utilized memory, fixed waste, and total allocated memory in MB before plotting.
+
+```python
+def bytes_to_mb(x: np.ndarray | float) -> np.ndarray | float:
+    return x / (1024 * 1024)
+
+
+context_lengths = np.array([1000, 32000, 64000, 128000, 256000])
+fixed_waste = wavg_bytes(B, 2, L, page_size_bytes)
+utilized = context_lengths * bytes_per_token
+total = utilized + fixed_waste
+percent = 100.0 * fixed_waste / total
+
+for c, u, t, p in zip(context_lengths, bytes_to_mb(utilized), bytes_to_mb(total), percent):
+    print(f"context={c:6d}  utilized_mb={u:8.1f}  total_mb={t:8.1f}  waste_pct={p:5.1f}")
+```
+
+### Suggested first outputs
+
+Before touching real metrics, produce:
+
+- one theoretical curve plot for `k = 1`
+- one theoretical curve plot comparing `k = 1` vs `k = 2`
+- one small CSV or printed table reproducing the proposal's example values
 
 ## Inputs and assumptions
 
@@ -35,21 +188,81 @@ Optional useful columns (if available):
 - `request_num_decode_tokens`
 - `request_num_ignored`
 
+## Does this need Docker?
+
+No, not usually.
+
+- Your work is offline analysis of CSV output that Josh's system already wrote.
+- If `sequence_metrics.csv` is visible on the host filesystem, you can do everything from a normal local Python environment.
+- Docker is only relevant if the metrics file exists only inside the container and has not been written to a host-visible path.
+
+The normal path for this work should be:
+
+- run the server in Docker
+- let Josh's metrics system write `sequence_metrics.csv`
+- read that CSV from the host and plot it locally
+
 ## Directory and environment setup
 
-Create a small plotting workspace under `scripts/` or a dedicated analysis folder.
+The easiest setup for you is a small local `uv` virtual environment in the repo.
 
-Example:
-
-```bash
-mkdir -p /home/anodyine/repos/vattention/scripts/plotting
-```
-
-Install dependencies in your active environment if needed:
+### 1. Create a plotting workspace
 
 ```bash
-pip install pandas matplotlib numpy
+mkdir -p ~/repos/vattention/scripts/plotting
 ```
+
+### 2. Create a local virtual environment with `uv`
+
+From the repo root:
+
+```bash
+cd ~/repos/vattention
+uv venv .venv-londy
+```
+
+This creates a dedicated virtual environment at `.venv-londy`.
+
+### 3. Activate the virtual environment
+
+For `zsh` or `bash`:
+
+```bash
+source ~/repos/vattention/.venv-londy/bin/activate
+```
+
+After activation, `python` and `pip` should point into `.venv-londy`.
+
+### 4. Install the plotting dependencies with `uv`
+
+```bash
+uv pip install pandas matplotlib numpy
+```
+
+These are enough for the first version of the plotting script.
+
+### 5. Verify the environment before writing code
+
+```bash
+python -c "import pandas, matplotlib, numpy; print('ok')"
+```
+
+If this prints `ok`, the environment is ready.
+
+### 6. Run the plotting script from the same environment
+
+Example pattern:
+
+```bash
+source ~/repos/vattention/.venv-londy/bin/activate
+python ~/repos/vattention/scripts/plotting/plot_context_vs_fragmentation.py --help
+```
+
+Why this setup is preferable:
+
+- it avoids mixing plotting dependencies into the shared Docker runtime
+- it keeps your work lightweight and independent from model-serving code
+- it makes it easier to rerun analysis without touching the server setup
 
 ## Step 1: Load and validate metrics
 
@@ -374,7 +587,7 @@ if __name__ == "__main__":
 ## Step 7: Example commands
 
 ```bash
-python /home/anodyine/repos/vattention/scripts/plotting/plot_context_vs_fragmentation.py \
+python ~/repos/vattention/scripts/plotting/plot_context_vs_fragmentation.py \
   --input /tmp/vattention/vattn-anodyine/sequence_metrics.csv \
   --out-plot /tmp/vattention/vattn-anodyine/plots/context_vs_fragmentation.png \
   --out-summary /tmp/vattention/vattn-anodyine/plots/context_vs_fragmentation_summary.csv \
