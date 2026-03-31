@@ -103,3 +103,11 @@ That makes it easy to inspect files such as `config.yml`, `benchmark_config.yml`
 2. Michel runs the controlled context-length sweep experiments and coordinates report assembly.
 3. Josh captures the request-level fragmentation metrics in the codebase.
 4. Londy produces the figures and presents the background and motivation for the chosen approach.
+
+## Presentation
+Introductions
+Required Terminology - Michel
+Research and Background - Londy
+Theory (Attn Architectures) and Project - Kyle
+Results - Josh
+
