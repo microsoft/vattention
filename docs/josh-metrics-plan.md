@@ -188,7 +188,36 @@ Request Id,request_num_prefill_tokens,kv_blocks_mapped,kv_fragmentation_percent
 
 This is the main reason to prefer request-level storage over a batch-only CSV for this experiment.
 
-6. Keep current allocator `printf` temporarily.
+6. Add an explicit metrics flush path for the OpenAI server flow.
+
+- Add a small, intentional way to flush metrics from the long-running API-server path after requests have been served.
+- The flush path should mirror the benchmark runner's existing behavior:
+  - call `pull_worker_metrics()`
+  - then call `plot_metrics()` or `metrics_store.plot()`
+- Keep this path simple and explicit, for example:
+  - a small internal helper on the server-side engine wrapper
+  - or a lightweight admin/debug endpoint that triggers metrics export after a sweep
+- Why: the benchmark runner already writes `sequence_metrics.csv`, but the OpenAI server flow does not currently guarantee that metrics are materialized into files after requests complete.
+
+This step matters because Michel's sequential request driver is using the OpenAI-compatible server path rather than the benchmark runner, so CSV export must work there too.
+
+7. Add a shutdown hook that flushes metrics automatically.
+
+- On graceful server shutdown, trigger the same metrics flush path automatically.
+- The shutdown path should:
+  - gather worker metrics back to the driver
+  - write `sequence_metrics.csv`
+  - write any associated plots/artifacts to the configured output directory
+- Why: this gives a reliable end-of-run export path even if the user does not invoke the explicit flush command manually.
+
+This makes the metrics workflow much easier to use in practice:
+
+- run the server
+- send the sweep requests
+- stop the server
+- inspect `sequence_metrics.csv`
+
+8. Keep current allocator `printf` temporarily.
 
 - Do not remove existing stdout fragmentation prints during rollout.
 - Why: use stdout to spot-check values while validating CSV integration.
@@ -220,16 +249,21 @@ If this output already looks wrong, debug the allocator path before touching CSV
 - vary prompt length significantly
 - keep generation short (`max_tokens` small, e.g. 1-4)
 
-3. Verify output files under `/tmp/vattention/<container-name>`:
+3. Trigger metrics export.
+
+- either call the explicit flush path after the sweep
+- or stop the server cleanly and rely on the shutdown hook
+
+4. Verify output files under `/tmp/vattention/<container-name>`:
 
 - `sequence_metrics.csv` exists
 - new fragmentation columns are present
 
-4. Verify row-level alignment:
+5. Verify row-level alignment:
 
 - for each `Request Id`, check `request_num_prefill_tokens` and `kv_fragmentation_percent` are both populated
 
-5. Spot-check against stdout:
+6. Spot-check against stdout:
 
 - compare a few requests against allocator print values to ensure parity
 
@@ -239,6 +273,7 @@ Deliver this first:
 
 - add request-level `KV_BLOCKS_MAPPED` and `KV_FRAGMENTATION_PERCENT`
 - write both into `sequence_metrics.csv` keyed by `Request Id`
+- add a reliable flush path for the OpenAI server flow
 - validate on a short Docker run with mixed context lengths
 
 This is enough to produce the fragmentation-vs-context curve for MLA-focused experiments.

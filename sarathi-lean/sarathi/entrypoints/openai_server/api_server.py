@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # )
     print(config.model_block_size)
     engine = AsyncLLMEngine.from_engine_args(
-            # output_dir=config.output_dir,
+            output_dir=config.output_dir,
             # model config
             model=config.model_name,
             tokenizer=config.model_name,
