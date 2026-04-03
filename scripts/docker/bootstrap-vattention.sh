@@ -9,5 +9,7 @@ ensure_container_running
 run_in_container "
 set -euo pipefail
 cd /workspace/vattention
+rm -rf build
+rm -f vattention*.so
 python setup.py install
 "
