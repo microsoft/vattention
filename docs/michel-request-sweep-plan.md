@@ -37,6 +37,10 @@ What matters:
 
 - Server runs inside container.
 - Output directory is passed via `--output_dir` and defaults under `/tmp/vattention/<container-name>`.
+- When starting the server from the host-side wrapper scripts, prefer setting
+  `VATTN_SERVER_OUTPUT_DIR=/workspace/server-output/<run-name>` so metrics land
+  in the bind-mounted workspace and can be inspected directly from the host at
+  `server-output/<run-name>`.
 - You do not need to implement metrics writing in your script.
 
 ### 3. Existing request-driving scripts style
@@ -124,6 +128,15 @@ What matters:
 1. Start server in Docker.
 
 - Example: `scripts/docker/start-server-yi6b.sh --model_name <target-model>` if needed.
+- Prefer a host-visible output path for metrics, for example:
+
+```bash
+VATTN_SERVER_OUTPUT_DIR=/workspace/server-output/manual-frag-test \
+scripts/docker/start-server-yi6b.sh --model_name <target-model>
+```
+
+- With that setting, metrics will be readable from the host under
+  `~/repos/vattention/server-output/manual-frag-test/`.
 
 2. Run one manual smoke-test request first.
 
