@@ -19,6 +19,7 @@ from sarathi.core.datatypes.sequence import SamplerOutputs, Sequence
 from sarathi.core.sequence_manager.worker_sequence_manager import WorkerSequenceManager
 from sarathi.logger import init_logger
 from sarathi.metrics.metrics_store import MetricsStore
+from sarathi.metrics.constants import SequenceMetricsHistogram
 from sarathi.model_executor import set_random_seed
 from sarathi.model_executor.attention import set_attention_backend
 from sarathi.model_executor.model_runner import ModelRunner
@@ -272,6 +273,47 @@ class BaseWorker:
         )
 
         self.on_step_completed(scheduler_outputs, sampler_outputs)
+
+        get_allocator_metrics = getattr(
+            self.cache_engine, "get_request_allocator_metrics", None
+        )
+        push_request_metric = getattr(self.metrics_store, "push_request_metric", None)
+        get_request_id = getattr(self.metrics_store, "_get_seq_id", None)
+        if (
+            get_allocator_metrics is not None
+            and push_request_metric is not None
+            and get_request_id is not None
+        ):
+            # Emit allocator metrics only once per request and only from one
+            # tensor-parallel rank to avoid duplicate rows per Request Id.
+            if not hasattr(self, "_allocator_metrics_emitted_seq_ids"):
+                self._allocator_metrics_emitted_seq_ids = set()
+            should_emit_allocator_metrics = (
+                self.tensor_model_parallel_rank == 0
+                and self.pipeline_model_parallel_rank == 0
+            )
+            for seq_metadata in seq_metadata_list:
+                if not seq_metadata.seq.is_finished():
+                    continue
+                if not should_emit_allocator_metrics:
+                    continue
+                if seq_metadata.seq.seq_id in self._allocator_metrics_emitted_seq_ids:
+                    continue
+                allocator_metrics = get_allocator_metrics(seq_metadata.seq.seq_id)
+                if not allocator_metrics:
+                    continue
+                request_id = get_request_id(seq_metadata.seq.seq_id)
+                push_request_metric(
+                    SequenceMetricsHistogram.KV_BLOCKS_MAPPED,
+                    request_id,
+                    float(allocator_metrics["mapped_blocks"]),
+                )
+                push_request_metric(
+                    SequenceMetricsHistogram.KV_FRAGMENTATION_PERCENT,
+                    request_id,
+                    float(allocator_metrics["fragmentation_percent"]),
+                )
+                self._allocator_metrics_emitted_seq_ids.add(seq_metadata.seq.seq_id)
         self.cache_engine.on_step_completion(seq_metadata_list)
         
 
