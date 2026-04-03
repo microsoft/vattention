@@ -291,6 +291,16 @@ class MetricsStore(metaclass=Singleton):
             )
         self._last_request_arrived_at = seq.state.arrived_at
 
+    @check_enabled
+    @if_write_metrics
+    def push_request_metric(
+        self,
+        metric_name: SequenceMetricsHistogram,
+        request_id: str,
+        value: float,
+    ) -> None:
+        self.seq_metrics_histogram[metric_name].put(request_id, value)
+
     @if_write_metrics
     def _on_request_end(self, seq: Sequence) -> None:
         assert seq.is_finished()
@@ -640,11 +650,40 @@ class MetricsStore(metaclass=Singleton):
     ):
         os.makedirs(base_path, exist_ok=True)
 
-        dataseries_dfs = [dataseries.to_df() for dataseries in dataseries_list]
-        assert [
-            df[key_to_join].is_unique and pd.notnull(df[key_to_join])
-            for df in dataseries_dfs
-        ]
+        dataseries_dfs = []
+        for dataseries in dataseries_list:
+            df = dataseries.to_df()
+            if key_to_join not in df.columns:
+                continue
+
+            # Drop null join keys (shouldn't happen, but avoid crashing flush).
+            df = df[df[key_to_join].notnull()]
+
+            # Some flows can produce duplicate join keys (e.g., per-rank metrics
+            # arriving at the driver). De-duplicate here so metrics export is
+            # resilient and returns a single row per key.
+            if not df[key_to_join].is_unique:
+                metric_cols = [c for c in df.columns if c != key_to_join]
+                if len(metric_cols) == 1:
+                    metric_col = metric_cols[0]
+                    if pd.api.types.is_numeric_dtype(df[metric_col]):
+                        df = df.groupby(key_to_join, as_index=False)[metric_col].mean()
+                    else:
+                        df = df.groupby(key_to_join, as_index=False)[metric_col].first()
+                else:
+                    agg = {}
+                    for col in metric_cols:
+                        agg[col] = (
+                            "mean" if pd.api.types.is_numeric_dtype(df[col]) else "first"
+                        )
+                    df = df.groupby(key_to_join, as_index=False).agg(agg)
+
+            dataseries_dfs.append(df)
+
+        if not dataseries_dfs:
+            # Nothing to write.
+            return
+
         merged_df = reduce(
             lambda left, right: left.merge(right, on=key_to_join, how="outer"),
             dataseries_dfs,
@@ -682,7 +721,14 @@ class MetricsStore(metaclass=Singleton):
                 step=0,
             )
 
-        fig.write_image(f"{base_path}/{plot_name}.png")
+        try:
+            fig.write_image(f"{base_path}/{plot_name}.png")
+        except Exception as exc:
+            logger.warning(
+                "Failed to write plot image %s (%s); skipping PNG export",
+                f"{base_path}/{plot_name}.png",
+                exc,
+            )
 
     def _store_request_outputs(self):
         if not self._enable_request_outputs:
@@ -768,6 +814,22 @@ class MetricsStore(metaclass=Singleton):
             key_to_join=REQUEST_ID_STR,
             base_path=self._output_dir,
             file_name="sequence_metrics",
+        )
+
+        allocator_request_metrics = [
+            self.seq_metrics_histogram[
+                SequenceMetricsHistogram.REQUEST_PREFILL_TOKENS
+            ],
+            self.seq_metrics_histogram[SequenceMetricsHistogram.KV_BLOCKS_MAPPED],
+            self.seq_metrics_histogram[
+                SequenceMetricsHistogram.KV_FRAGMENTATION_PERCENT
+            ],
+        ]
+        self._save_as_csv(
+            dataseries_list=allocator_request_metrics,
+            key_to_join=REQUEST_ID_STR,
+            base_path=self._output_dir,
+            file_name="allocator_metrics",
         )
 
         for dataseries in self.seq_metrics_histogram.values():

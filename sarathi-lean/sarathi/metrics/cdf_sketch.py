@@ -157,5 +157,12 @@ class CDFSketch:
                 step=0,
             )
 
-        fig.write_image(f"{path}/{plot_name}.png")
+        try:
+            fig.write_image(f"{path}/{plot_name}.png")
+        except Exception as exc:
+            logger.warning(
+                "Failed to write plot image %s (%s); skipping PNG export",
+                f"{path}/{plot_name}.png",
+                exc,
+            )
         self._save_df(df, path, plot_name)

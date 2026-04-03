@@ -286,6 +286,12 @@ class VAttentionFlashAttentionWrapper(BaseAttentionWrapper):
                     logger.warning(
                         "Ran into transient error with flash attention: Key length is greater than the cache length. Skipping the attention computation."
                     )
+                    # `output` is created with torch.empty, and the decode slice has
+                    # not been written yet. If we return it as-is, uninitialized
+                    # values can propagate and lead to NaNs in sampling.
+                    output[
+                        token_offset : token_offset + self.decode_batch_size
+                    ].zero_()
                     return output
                 else:
                     raise e
