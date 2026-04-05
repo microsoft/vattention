@@ -653,6 +653,9 @@ class ModelConfig:
         )
 
     def get_head_size(self) -> int:
+        head_dim = getattr(self.hf_config, "head_dim", None)
+        if head_dim is not None:
+            return head_dim
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 

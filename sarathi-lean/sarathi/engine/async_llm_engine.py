@@ -221,12 +221,14 @@ class _AsyncLLMEngine(LLMEngine):
         seq_id: str,
         prompt: Optional[str],
         sampling_params: SamplingParams,
+        prompt_token_ids: Optional[List[int]] = None,
     ) -> None:
        
         self.engine.add_request(
             prompt=prompt,
             sampling_params=sampling_params,
             seq_id=seq_id,
+            prompt_token_ids=prompt_token_ids,
         )
 
     async def step_async(self) -> List[RequestOutput]:
@@ -378,12 +380,18 @@ class AsyncLLMEngine(LLMEngine):
     async def add_request(
         self,
         request_id: str,
-        prompt: str,
+        prompt: Optional[str],
         sampling_params: SamplingParams,
+        prompt_token_ids: Optional[List[int]] = None,
     ) -> AsyncStream:
         if True:
+            prompt_preview = (
+                prompt[:MAX_PROMPT_LOG_LEN]
+                if prompt is not None
+                else f"<{len(prompt_token_ids or [])} prompt tokens>"
+            )
             logger.info(
-                f"Received request {request_id}: prompt: {prompt[:MAX_PROMPT_LOG_LEN]}, sampling_params: {sampling_params}"
+                f"Received request {request_id}: prompt: {prompt_preview}, sampling_params: {sampling_params}"
             )
 
         if not self.is_running:
@@ -393,6 +401,7 @@ class AsyncLLMEngine(LLMEngine):
             request_id,
             prompt=prompt,
             sampling_params=sampling_params,
+            prompt_token_ids=prompt_token_ids,
         )
         # print(f"stream: {stream}")
         return stream
@@ -400,8 +409,9 @@ class AsyncLLMEngine(LLMEngine):
     async def generate(
         self,
         request_id: str,
-        prompt: str,
+        prompt: Optional[str],
         sampling_params: SamplingParams,
+        prompt_token_ids: Optional[List[int]] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -465,6 +475,7 @@ class AsyncLLMEngine(LLMEngine):
             request_id,
             prompt,
             sampling_params,
+            prompt_token_ids=prompt_token_ids,
         ):
          
             yield output
@@ -472,8 +483,9 @@ class AsyncLLMEngine(LLMEngine):
     async def _process_request(
         self,
         request_id: str,
-        prompt: str,
+        prompt: Optional[str],
         sampling_params: SamplingParams,
+        prompt_token_ids: Optional[List[int]] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
@@ -481,6 +493,7 @@ class AsyncLLMEngine(LLMEngine):
             request_id,
             prompt,
             sampling_params,
+            prompt_token_ids=prompt_token_ids,
         )
     
         

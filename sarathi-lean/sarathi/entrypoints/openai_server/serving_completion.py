@@ -85,15 +85,17 @@ class OpenAIServingCompletion(OpenAIServing):
             sampling_params = request.to_sampling_params()
             prompt_is_tokens, prompts = parse_prompt_format(request.prompt)
 
-            for i, prompt in enumerate(prompts):
-                if prompt_is_tokens:
-                    raise ValueError(
-                        "array of tokens, or array of token arrays not supported")
+            if prompt_is_tokens and request.echo:
+                return self.create_error_response(
+                    "echo is not supported for token-array prompts"
+                )
 
+            for i, prompt in enumerate(prompts):
                 generator = self.engine.generate(
                     f"{request_id}-{i}",
-                    prompt,
+                    None if prompt_is_tokens else prompt,
                     sampling_params,
+                    prompt_token_ids=prompt if prompt_is_tokens else None,
                 )
 
                 generators.append(generator)
