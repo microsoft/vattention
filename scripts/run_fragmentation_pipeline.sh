@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODEL_KEY}" ]]; then
-    printf 'Usage: %s --model-key {qwen-14b|llama-3-8b|deepseek-v2-lite} [--context-lengths CSV] [--port N]\n' "$0" >&2
+    printf 'Usage: %s --model-key {qwen-14b|mistral-nemo-12b|llama-3-8b|deepseek-v2-lite} [--context-lengths CSV] [--port N]\n' "$0" >&2
     exit 1
 fi
 
@@ -62,6 +62,12 @@ case "${MODEL_KEY}" in
         MODEL_NAME="Qwen/Qwen-14B"
         MODEL_SLUG="qwen-14b"
         PLOT_TITLE="Qwen-14B (MHA): Context Length vs Fragmentation"
+        ;;
+    mistral-nemo-12b)
+        WRAPPER="${REPO_ROOT}/scripts/docker/start-server-mistral-nemo-12b.sh"
+        MODEL_NAME="mistralai/Mistral-Nemo-Base-2407"
+        MODEL_SLUG="mistral-nemo-12b"
+        PLOT_TITLE="Mistral-Nemo-12B (GQA): Context Length vs Fragmentation"
         ;;
     llama-3-8b)
         WRAPPER="${REPO_ROOT}/scripts/docker/start-server-llama3-8b.sh"
@@ -101,6 +107,9 @@ export MPLCONFIGDIR=/tmp/mplconfig
 mkdir -p "${SERVER_PLOTS_DIR}"
 
 ensure_container_running
+docker exec "${VATTN_CONTAINER_NAME}" bash -lc "pkill -SIGINT -f 'python -m sarathi.entrypoints.openai_server.api_server'" >/dev/null 2>&1 || true
+sleep 2
+docker exec "${VATTN_CONTAINER_NAME}" bash -lc "pkill -SIGTERM -f 'python -m sarathi.entrypoints.openai_server.api_server'" >/dev/null 2>&1 || true
 docker exec "${VATTN_CONTAINER_NAME}" bash -lc 'output_dir="$1"; rm -rf "$output_dir"; mkdir -p "$output_dir"' bash "${SERVER_OUTPUT_CONTAINER}"
 
 server_pid=""
@@ -134,6 +143,12 @@ done
 
 if [[ "${ready}" != "1" ]]; then
     printf 'Server did not become ready within %s seconds.\n' "${WAIT_TIMEOUT}" >&2
+    exit 1
+fi
+
+models_response=$(curl -fsS "http://127.0.0.1:${PORT}/v1/models")
+if [[ "${models_response}" != *"${MODEL_NAME}"* ]]; then
+    printf 'Ready endpoint does not match expected model.\nExpected: %s\nResponse: %s\n' "${MODEL_NAME}" "${models_response}" >&2
     exit 1
 fi
 

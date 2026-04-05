@@ -1,0 +1,3 @@
+label,n_requests,min_context,max_context,max_allocated_cache_mib,max_waste_cache_mib,mean_waste_cache_mib
+DeepSeek-V2-Lite (MLA),66,128,32768,38.0,1.9956043956043956,1.024309024309024
+Mistral-Nemo-12B (GQA),45,128,32768,16.0,2.0,1.1708333333333334
