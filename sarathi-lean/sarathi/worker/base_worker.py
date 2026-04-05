@@ -295,6 +295,8 @@ class BaseWorker:
             for seq_metadata in seq_metadata_list:
                 if not seq_metadata.seq.is_finished():
                     continue
+                if seq_metadata.seq.state.is_ignore_finished:
+                    continue
                 if not should_emit_allocator_metrics:
                     continue
                 if seq_metadata.seq.seq_id in self._allocator_metrics_emitted_seq_ids:
