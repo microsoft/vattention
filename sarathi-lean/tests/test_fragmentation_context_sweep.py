@@ -32,6 +32,16 @@ class _TokenizerWithoutSpecialTokenFlag:
 
 
 class FragmentationContextSweepTests(unittest.TestCase):
+    def test_parse_context_lengths_uses_defaults_when_not_provided(self):
+        lengths = sweep_module.parse_context_lengths(None)
+
+        self.assertEqual(lengths, list(sweep_module.CONTEXT_LENGTHS))
+
+    def test_parse_context_lengths_normalizes_and_sorts_values(self):
+        lengths = sweep_module.parse_context_lengths("2048, 512,2048,1024")
+
+        self.assertEqual(lengths, [512, 1024, 2048])
+
     def test_encode_without_special_tokens_uses_flag_when_supported(self):
         tokenizer = _TokenizerWithSpecialTokenSupport()
 
@@ -59,13 +69,48 @@ class FragmentationContextSweepTests(unittest.TestCase):
             sweep_module.build_exact_prompt_token_ids(4, [])
 
     def test_select_context_lengths_filters_by_server_limit(self):
-        filtered = sweep_module.select_context_lengths(32768)
+        filtered = sweep_module.select_context_lengths(
+            sweep_module.CONTEXT_LENGTHS,
+            32768,
+        )
 
-        self.assertEqual(filtered, [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
+        self.assertEqual(
+            filtered,
+            [
+                128,
+                256,
+                384,
+                512,
+                640,
+                768,
+                896,
+                1024,
+                1280,
+                1536,
+                1792,
+                2048,
+                2560,
+                3072,
+                3584,
+                4096,
+                5120,
+                6144,
+                7168,
+                8192,
+                10240,
+                12288,
+                14336,
+                16384,
+                20480,
+                24576,
+                28672,
+                32768,
+            ],
+        )
 
     def test_select_context_lengths_rejects_too_small_limit(self):
         with self.assertRaisesRegex(RuntimeError, "smaller than the smallest"):
-            sweep_module.select_context_lengths(64)
+            sweep_module.select_context_lengths(sweep_module.CONTEXT_LENGTHS, 64)
 
 
 if __name__ == "__main__":

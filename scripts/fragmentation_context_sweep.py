@@ -22,15 +22,42 @@ RUNNER_OUTPUT_ROOT = Path(
 CONTEXT_LENGTHS = (
     128,
     256,
+    384,
     512,
+    640,
+    768,
+    896,
     1024,
+    1280,
+    1408,
+    1536,
+    1664,
+    1792,
+    1920,
     2048,
+    2304,
+    2560,
+    2816,
+    3072,
+    3328,
+    3584,
+    3840,
     4096,
+    4352,
+    4608,
+    4864,
+    5120,
+    6144,
+    7168,
     8192,
+    10240,
+    12288,
+    14336,
     16384,
+    20480,
+    24576,
+    28672,
     32768,
-    65536,
-    131072,
 )
 
 PROMPT_SEED_TEXT = (
@@ -47,6 +74,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", required=True, help="Served model name.")
     parser.add_argument(
+        "--context-lengths",
+        type=str,
+        default=None,
+        help="Optional comma-separated override for sweep prefill lengths.",
+    )
+    parser.add_argument(
         "--fail-fast",
         action="store_true",
         help="Stop immediately after the first failed request.",
@@ -60,6 +93,26 @@ def repo_root() -> Path:
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_context_lengths(value: str | None) -> List[int]:
+    if value is None:
+        return list(CONTEXT_LENGTHS)
+
+    lengths: List[int] = []
+    for part in value.split(","):
+        stripped = part.strip()
+        if not stripped:
+            continue
+        parsed = int(stripped)
+        if parsed <= 0:
+            raise ValueError("context lengths must be positive integers")
+        lengths.append(parsed)
+
+    if not lengths:
+        raise ValueError("at least one context length must be provided")
+
+    return sorted(set(lengths))
 
 
 def ensure_hf_cache_dirs() -> None:
@@ -153,14 +206,16 @@ def fetch_server_model_max_length(base_url: str, model_name: str) -> int | None:
     )
 
 
-def select_context_lengths(max_model_len: int | None) -> List[int]:
+def select_context_lengths(
+    configured_lengths: Sequence[int], max_model_len: int | None
+) -> List[int]:
     if max_model_len is None:
-        return list(CONTEXT_LENGTHS)
-    filtered = [length for length in CONTEXT_LENGTHS if length <= max_model_len]
+        return list(configured_lengths)
+    filtered = [length for length in configured_lengths if length <= max_model_len]
     if not filtered:
         raise RuntimeError(
             f"Server-reported max_model_len={max_model_len} is smaller than the smallest "
-            f"configured sweep length ({CONTEXT_LENGTHS[0]})."
+            f"configured sweep length ({configured_lengths[0]})."
         )
     return filtered
 
@@ -201,8 +256,11 @@ def summarize_attempts(attempts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    configured_context_lengths = parse_context_lengths(args.context_lengths)
     server_max_model_len = fetch_server_model_max_length(BASE_URL, args.model)
-    context_lengths = select_context_lengths(server_max_model_len)
+    context_lengths = select_context_lengths(
+        configured_context_lengths, server_max_model_len
+    )
     tokenizer = load_tokenizer(args.model)
     token_pool = build_prompt_token_pool(tokenizer)
 
@@ -214,6 +272,7 @@ def main() -> int:
         "started_at_utc": utc_timestamp(),
         "model": args.model,
         "base_url": BASE_URL,
+        "configured_context_lengths": configured_context_lengths,
         "context_lengths": context_lengths,
         "server_max_model_len": server_max_model_len,
         "max_tokens": MAX_TOKENS,
@@ -229,7 +288,7 @@ def main() -> int:
     print(f"Manifest: {manifest_path}")
     if server_max_model_len is not None:
         print(f"Server max model length: {server_max_model_len}")
-    if context_lengths != list(CONTEXT_LENGTHS):
+    if context_lengths != configured_context_lengths:
         print(f"Filtered sweep lengths: {context_lengths}")
 
     for request_index, target_context_length in enumerate(context_lengths, start=1):

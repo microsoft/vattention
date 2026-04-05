@@ -57,8 +57,10 @@ if ! container_running; then
     run_cmd docker start "${VATTN_CONTAINER_NAME}"
 fi
 
+readarray -t exec_args < <(docker_exec_args)
+
 run_cmd docker exec \
-    -it \
+    "${exec_args[@]}" \
     -e "CUDA_VISIBLE_DEVICES=${DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES}" \
     "${VATTN_CONTAINER_NAME}" \
     bash -lc '
