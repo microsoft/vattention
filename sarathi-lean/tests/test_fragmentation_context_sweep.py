@@ -58,6 +58,15 @@ class FragmentationContextSweepTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             sweep_module.build_exact_prompt_token_ids(4, [])
 
+    def test_select_context_lengths_filters_by_server_limit(self):
+        filtered = sweep_module.select_context_lengths(32768)
+
+        self.assertEqual(filtered, [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768])
+
+    def test_select_context_lengths_rejects_too_small_limit(self):
+        with self.assertRaisesRegex(RuntimeError, "smaller than the smallest"):
+            sweep_module.select_context_lengths(64)
+
 
 if __name__ == "__main__":
     unittest.main()

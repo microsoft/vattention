@@ -4,9 +4,10 @@ set -euo pipefail
 
 source "$(cd "$(dirname "$0")" && pwd)/common.sh"
 
-VATTN_SERVER_OUTPUT_DIR=${VATTN_SERVER_OUTPUT_DIR:-/tmp/vattention/${VATTN_CONTAINER_NAME}}
+VATTN_SERVER_OUTPUT_DIR=${VATTN_SERVER_OUTPUT_DIR:-/workspace/server-output/deepseek-v2-lite}
 DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES=${DEEPSEEK_V2_LITE_CUDA_VISIBLE_DEVICES:-0,1,2,3}
 DEEPSEEK_V2_LITE_DEFAULT_TP=${DEEPSEEK_V2_LITE_DEFAULT_TP:-4}
+export VATTN_SERVER_OUTPUT_DIR
 
 requested_tp="${DEEPSEEK_V2_LITE_DEFAULT_TP}"
 requested_max_model_len=""

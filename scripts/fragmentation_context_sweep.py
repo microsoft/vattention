@@ -133,6 +133,38 @@ def post_json(url: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]
         }
 
 
+def get_json(url: str, timeout: int) -> Dict[str, Any]:
+    request = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read().decode("utf-8")
+        return json.loads(body) if body else {}
+
+
+def fetch_server_model_max_length(base_url: str, model_name: str) -> int | None:
+    body = get_json(f"{base_url}/v1/models", timeout=REQUEST_TIMEOUT_SECONDS)
+    for model_card in body.get("data", []):
+        if model_card.get("id") == model_name:
+            max_model_len = model_card.get("max_model_len")
+            if max_model_len is None:
+                return None
+            return int(max_model_len)
+    raise RuntimeError(
+        f"Server is up, but model `{model_name}` was not listed by {base_url}/v1/models."
+    )
+
+
+def select_context_lengths(max_model_len: int | None) -> List[int]:
+    if max_model_len is None:
+        return list(CONTEXT_LENGTHS)
+    filtered = [length for length in CONTEXT_LENGTHS if length <= max_model_len]
+    if not filtered:
+        raise RuntimeError(
+            f"Server-reported max_model_len={max_model_len} is smaller than the smallest "
+            f"configured sweep length ({CONTEXT_LENGTHS[0]})."
+        )
+    return filtered
+
+
 def append_jsonl(path: Path, record: Dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
@@ -169,6 +201,8 @@ def summarize_attempts(attempts: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    server_max_model_len = fetch_server_model_max_length(BASE_URL, args.model)
+    context_lengths = select_context_lengths(server_max_model_len)
     tokenizer = load_tokenizer(args.model)
     token_pool = build_prompt_token_pool(tokenizer)
 
@@ -180,7 +214,8 @@ def main() -> int:
         "started_at_utc": utc_timestamp(),
         "model": args.model,
         "base_url": BASE_URL,
-        "context_lengths": list(CONTEXT_LENGTHS),
+        "context_lengths": context_lengths,
+        "server_max_model_len": server_max_model_len,
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE,
         "manifest_path": str(manifest_path),
@@ -192,8 +227,12 @@ def main() -> int:
 
     print(f"Run directory: {run_dir}")
     print(f"Manifest: {manifest_path}")
+    if server_max_model_len is not None:
+        print(f"Server max model length: {server_max_model_len}")
+    if context_lengths != list(CONTEXT_LENGTHS):
+        print(f"Filtered sweep lengths: {context_lengths}")
 
-    for request_index, target_context_length in enumerate(CONTEXT_LENGTHS, start=1):
+    for request_index, target_context_length in enumerate(context_lengths, start=1):
         prompt_token_ids = build_exact_prompt_token_ids(target_context_length, token_pool)
         payload = {
             "model": args.model,
@@ -214,7 +253,7 @@ def main() -> int:
         }
 
         print(
-            f"[{request_index}/{len(CONTEXT_LENGTHS)}] sending request with "
+            f"[{request_index}/{len(context_lengths)}] sending request with "
             f"{target_context_length} prompt tokens"
         )
 
