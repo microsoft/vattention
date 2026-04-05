@@ -13,6 +13,7 @@ fi
 
 run_cmd docker run -d \
     --name "${VATTN_CONTAINER_NAME}" \
+    --init \
     --gpus all \
     --network host \
     --shm-size "${VATTN_SHM_SIZE}" \

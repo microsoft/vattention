@@ -706,6 +706,22 @@ class vATTNCacheEngine(BaseCacheEngine):
 
     def get_v_cache(self, layer_idx: int) -> torch.Tensor:
         return self.gpu_cache[layer_idx][1]
+
+    def get_request_allocator_metrics(self, seq_id: int) -> dict | None:
+        batch_idx = self.seq_to_batch_idx.get(seq_id)
+        if batch_idx is None:
+            return None
+
+        seq_len = int(self.curr_seq_lens[batch_idx])
+        if seq_len <= 0:
+            return None
+
+        mapped_blocks = int(vattention.debug_request_mapped_blocks(batch_idx))
+        metrics = dict(vattention.debug_fragmentation_metrics(seq_len, mapped_blocks))
+        return {
+            "mapped_blocks": mapped_blocks,
+            "fragmentation_percent": float(metrics["token_frag_pct"]),
+        }
     
     def step(self, seq_metadata_list: List[SequenceMetadata]) -> None:
         b_idx_prompt = []
