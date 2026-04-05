@@ -99,21 +99,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-@app.post("/v1/internal/metrics/flush")
-async def flush_metrics():
-    try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _flush_metrics_sync)
-    except Exception as exc:
-        logger.exception("Metrics flush failed", exc_info=exc)
-        return JSONResponse(
-            content={"ok": False, "error": str(exc)},
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-        )
-
-    return JSONResponse(content={"ok": True})
-
-
 if __name__ == "__main__":
     config_openai = OpenAIServerConfig()
     config = ConfigParser().get_config()

@@ -65,6 +65,10 @@ py::dict debug_fragmentation_metrics(u64 seq_len, u64 mapped_blocks) {
     return vattn.debug_fragmentation_metrics(seq_len, mapped_blocks);
 }
 
+u64 debug_request_mapped_blocks(int reqId) {
+    return vattn.debug_request_mapped_blocks(reqId);
+}
+
 void map_common_pages(u64 num_tokens) {
     vattn.map_common_pages_in_batch(num_tokens);
 }

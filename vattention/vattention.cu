@@ -544,33 +544,12 @@ public:
         u64 nr_required = tokens_to_pages(seq_len);
         u64 nr_mapped = get_req_pages(reqId);
 
-        if (nr_mapped > 0) {
-            FragmentationMetrics metrics = compute_fragmentation_metrics(seq_len, nr_mapped);
-            printf(
-                "[vAttention FRAG] Req: %d | TotalSeq: %llu | Mapped Blocks: %llu | "
-                "Capacity: %llu | Resident: %llu | Slack: %llu | "
-                "Token Fill: %.2f%% | Token Frag: %.2f%% | "
-                "Useful Payload: %.2f MB | Physical: %.2f MB | "
-                "Payload Util: %.2f%% | Payload Overhead: %.2f%%\n",
-                reqId,
-                (unsigned long long)seq_len,
-                (unsigned long long)nr_mapped,
-                (unsigned long long)metrics.mapped_token_capacity,
-                (unsigned long long)metrics.resident_tokens,
-                (unsigned long long)metrics.slack_tokens,
-                metrics.token_fill_pct,
-                metrics.token_frag_pct,
-                metrics.useful_payload_bytes / (1024.0 * 1024.0),
-                metrics.mapped_physical_bytes / (1024.0 * 1024.0),
-                metrics.payload_util_pct,
-                metrics.payload_overhead_pct);
+        if (nr_required <= nr_mapped)
+        {
+            return;
         }
 
-        if (nr_required <= nr_mapped)
-            return;
-
         u64 nr_to_grow = nr_required - nr_mapped;
-        printf("[vAttention DEBUG] reqId: %d | Growing by %llu blocks\n", reqId, (unsigned long long)nr_to_grow);
 
         if (!kvblocks_available(nr_to_grow))
             reclaim_kvblocks_on_demand(nr_to_grow);
@@ -827,6 +806,11 @@ public:
         return result;
     }
 
+    u64 debug_request_mapped_blocks(int reqId)
+    {
+        return get_req_pages(reqId);
+    }
+
     /* TODO(ashish): check if this is compatible with PyTorch destructor */
     void cleanup()
     {
@@ -862,6 +846,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("get_allocator_debug_info", &get_allocator_debug_info, "return allocator sizing metadata...");
     m.def("debug_tokens_to_pages", &debug_tokens_to_pages, "convert token count to logical kvblocks...");
     m.def("debug_fragmentation_metrics", &debug_fragmentation_metrics, "compute fragmentation metrics for a given seq len and mapped block count...");
+    m.def("debug_request_mapped_blocks", &debug_request_mapped_blocks, "return the allocator's current mapped block count for a request...");
     /* Testing APIs */
     m.def("show_kvcache_config", &show_kvcache_config, "show kv cache configuration...");
     m.def("show_allocator_state", &show_allocator_state, "show free pool of physical memory blocks...");

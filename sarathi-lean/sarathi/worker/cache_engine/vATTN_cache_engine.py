@@ -716,7 +716,7 @@ class vATTNCacheEngine(BaseCacheEngine):
         if seq_len <= 0:
             return None
 
-        mapped_blocks = int(vattention.debug_tokens_to_pages(seq_len))
+        mapped_blocks = int(vattention.debug_request_mapped_blocks(batch_idx))
         metrics = dict(vattention.debug_fragmentation_metrics(seq_len, mapped_blocks))
         return {
             "mapped_blocks": mapped_blocks,
