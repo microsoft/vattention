@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODEL_KEY}" ]]; then
-    printf 'Usage: %s --model-key {qwen-14b|mistral-nemo-12b|llama-3-8b|deepseek-v2-lite} [--context-lengths CSV] [--port N]\n' "$0" >&2
+    printf 'Usage: %s --model-key {qwen-14b|mistral-nemo-12b|mistral-nemo-12b-mla|llama-3-8b|deepseek-v2-lite} [--context-lengths CSV] [--port N]\n' "$0" >&2
     exit 1
 fi
 
@@ -68,6 +68,12 @@ case "${MODEL_KEY}" in
         MODEL_NAME="mistralai/Mistral-Nemo-Base-2407"
         MODEL_SLUG="mistral-nemo-12b"
         PLOT_TITLE="Mistral-Nemo-12B (GQA): Context Length vs Fragmentation"
+        ;;
+    mistral-nemo-12b-mla)
+        WRAPPER="${REPO_ROOT}/scripts/docker/start-server-mistral-nemo-12b-mla.sh"
+        MODEL_NAME="mistralai/Mistral-Nemo-Base-2407"
+        MODEL_SLUG="mistral-nemo-12b-mla"
+        PLOT_TITLE="Mistral-Nemo-12B (Synthetic MLA): Context Length vs Fragmentation"
         ;;
     llama-3-8b)
         WRAPPER="${REPO_ROOT}/scripts/docker/start-server-llama3-8b.sh"
