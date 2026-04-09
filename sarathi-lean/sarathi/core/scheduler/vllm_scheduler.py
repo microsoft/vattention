@@ -115,7 +115,7 @@ class VLLMScheduler(BaseScheduler):
             assert seq.prompt_processing_finished
 
             
-            while not self.block_manager.can_append_slot():
+            while not self.block_manager.can_append_slot(seq):
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq = self.running.pop(-1)

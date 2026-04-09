@@ -25,11 +25,36 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
+async_engine: Optional[AsyncLLMEngine] = None
 
 logger = init_logger(__name__)
 
 
 app = fastapi.FastAPI()
+
+
+def _flush_metrics_sync() -> None:
+    if async_engine is None:
+        raise RuntimeError("Engine is not initialized")
+
+    base_engine = async_engine.engine.engine
+    base_engine.pull_worker_metrics()
+    base_engine.plot_metrics()
+
+
+@app.on_event("shutdown")
+async def _flush_metrics_on_shutdown() -> None:
+    if async_engine is None:
+        return
+
+    try:
+        if hasattr(asyncio, "to_thread"):
+            await asyncio.to_thread(_flush_metrics_sync)
+        else:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _flush_metrics_sync)
+    except Exception as exc:
+        logger.exception("Metrics flush on shutdown failed", exc_info=exc)
 
 
 @app.exception_handler(RequestValidationError)
@@ -123,7 +148,7 @@ if __name__ == "__main__":
     # )
     print(config.model_block_size)
     engine = AsyncLLMEngine.from_engine_args(
-            # output_dir=config.output_dir,
+            output_dir=config.output_dir,
             # model config
             model=config.model_name,
             tokenizer=config.model_name,
@@ -165,6 +190,8 @@ if __name__ == "__main__":
             trust_remote_code=True,
 
     )
+
+    async_engine = engine
 
     event_loop: Optional[asyncio.AbstractEventLoop]
     try:

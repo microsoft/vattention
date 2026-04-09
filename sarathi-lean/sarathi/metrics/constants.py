@@ -85,6 +85,8 @@ class SequenceMetricsHistogram(enum.Enum):
     REQUEST_NUM_RESTARTS = "request_num_restarts"
     REQUEST_NUM_PAUSES = "request_num_pauses"
     REQUEST_NUM_IGNORED = "request_num_ignored"
+    KV_BLOCKS_MAPPED = "kv_blocks_mapped"
+    KV_FRAGMENTATION_PERCENT = "kv_fragmentation_percent"
 
 
 class BatchMetricsCountDistribution(enum.Enum):

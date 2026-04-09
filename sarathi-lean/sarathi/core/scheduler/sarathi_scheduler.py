@@ -149,7 +149,7 @@ class SarathiScheduler(BaseScheduler):
                 running_prefills.append(seq)
                 continue
 
-            while not self.block_manager.can_append_slot():
+            while not self.block_manager.can_append_slot(seq):
                 # print(f" [Sarathi] [{type(self.block_manager)}] : Cannot append seq {seq.seq_id} with {seq.get_len()} tokens")
                 # if type(self.block_manager) == vAttentionBlockSpaceManager:
                 #     print(f" [Sarathi] [{type(self.block_manager)}] : free blocks {self.block_manager.free_blocks - self.block_manager.promised_blocks} required blocks {self.block_manager.get_num_blocks(seq)}")
