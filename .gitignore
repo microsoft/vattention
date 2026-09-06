@@ -8,3 +8,13 @@ vllm/*.pdf
 vattention/dist
 vattention/*egg-info
 sarathi-lean/*egg-info
+
+experiments/**
+server-output/
+tmp/
+
+vAttention container command history.md
+vAttention Container Setup.md
+vAttention host cmd history.md
+
+.codex

@@ -10,7 +10,7 @@ from sarathi.benchmark.request_generator.static_request_interval_generator impor
 from sarathi.benchmark.request_generator.trace_request_interval_generator import (
     TraceRequestIntervalGenerator,
 )
-from sarathi.benchmark.types import RequestIntervalGeneratorType
+from sarathi.benchmark.sarathi_types import RequestIntervalGeneratorType
 from sarathi.utils.base_registry import BaseRegistry
 
 

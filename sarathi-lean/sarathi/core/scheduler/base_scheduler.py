@@ -146,7 +146,7 @@ class BaseScheduler(ABC):
         if seq.get_len() > self.scheduler_config.max_model_len:
             logger.warning(
                 f"Input prompt ({seq.get_len()} tokens) is too long"
-                f" and exceeds limit of {seq.sampling_params.max_tokens}"
+                f" and exceeds limit of {self.scheduler_config.max_model_len}"
             )
             seq.set_status(SequenceStatus.FINISHED_IGNORED)
             self.waiting.pop(0)

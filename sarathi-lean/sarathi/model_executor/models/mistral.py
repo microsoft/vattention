@@ -109,6 +109,7 @@ class MistralAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        head_dim: Optional[int] = None,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
@@ -122,7 +123,9 @@ class MistralAttention(nn.Module):
         self.total_num_kv_heads = num_kv_heads
         assert self.total_num_kv_heads % tp_size == 0
         self.num_kv_heads = self.total_num_kv_heads // tp_size
-        self.head_dim = hidden_size // self.total_num_heads
+        self.head_dim = (
+            head_dim if head_dim is not None else hidden_size // self.total_num_heads
+        )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -188,11 +191,13 @@ class MistralDecoderLayer(nn.Module):
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
+        head_dim = getattr(config, "head_dim", None)
         self.self_attn = MistralAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
+            head_dim=head_dim,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
         )
@@ -335,6 +340,35 @@ class MistralForCausalLM(nn.Module):
     _column_parallel_layers = []
     _row_parallel_layers = ["o_proj", "down_proj"]
 
+    @staticmethod
+    def _normalize_weight_name(name: str) -> str:
+        """Map legacy Mistral checkpoint keys to the HF-style names we serve."""
+        if name == "tok_embeddings.weight":
+            return "model.embed_tokens.weight"
+        if name == "norm.weight":
+            return "model.norm.weight"
+        if name == "output.weight":
+            return "lm_head.weight"
+
+        if name.startswith("layers."):
+            name = f"model.{name}"
+            replacements = {
+                ".attention.wq.weight": ".self_attn.q_proj.weight",
+                ".attention.wk.weight": ".self_attn.k_proj.weight",
+                ".attention.wv.weight": ".self_attn.v_proj.weight",
+                ".attention.wo.weight": ".self_attn.o_proj.weight",
+                ".attention_norm.weight": ".input_layernorm.weight",
+                ".ffn_norm.weight": ".post_attention_layernorm.weight",
+                ".feed_forward.w1.weight": ".mlp.gate_proj.weight",
+                ".feed_forward.w2.weight": ".mlp.down_proj.weight",
+                ".feed_forward.w3.weight": ".mlp.up_proj.weight",
+            }
+            for old, new in replacements.items():
+                if old in name:
+                    return name.replace(old, new)
+
+        return name
+
     def load_weights(
         self,
         model_name_or_path: str,
@@ -360,14 +394,20 @@ class MistralForCausalLM(nn.Module):
 
         assert self.config.num_hidden_layers % pp_size == 0
         layers_per_stage = self.config.num_hidden_layers // pp_size
+        head_dim = getattr(
+            self.config,
+            "head_dim",
+            self.config.hidden_size // self.config.num_attention_heads,
+        )
 
         first_layer_id = layers_per_stage * pp_model_parallel_rank
         last_layer_id = layers_per_stage * (pp_model_parallel_rank + 1) - 1
 
-        q_proj_shard_size = self.config.hidden_size // tp_size
+        q_proj_shard_size = (
+            self.config.num_attention_heads * head_dim // tp_size
+        )
         kv_proj_shard_size = (
-            self.config.hidden_size
-            // self.config.num_attention_heads
+            head_dim
             * self.config.num_key_value_heads
             // tp_size
         )
@@ -382,6 +422,8 @@ class MistralForCausalLM(nn.Module):
         for name, loaded_weight in hf_model_weights_iterator(
             model_name_or_path, cache_dir, load_format, revision
         ):
+            name = self._normalize_weight_name(name)
+
             if "rotary_emb.inv_freq" in name:
                 continue
 

@@ -10,7 +10,7 @@ from sarathi.benchmark.request_generator.uniform_request_length_generator import
 from sarathi.benchmark.request_generator.zipf_request_length_generator import (
     ZipfRequestLengthGenerator,
 )
-from sarathi.benchmark.types import RequestLengthGeneratorType
+from sarathi.benchmark.sarathi_types import RequestLengthGeneratorType
 from sarathi.utils.base_registry import BaseRegistry
 
 

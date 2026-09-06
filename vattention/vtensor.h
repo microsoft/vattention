@@ -18,9 +18,13 @@ public:
         this->page_size = page_size_;
     }
 
-    c10::DataPtr allocate(size_t size) override
+    // ADDED 'const' back - This specific PyTorch build requires it for the override
+    c10::DataPtr allocate(size_t size) const override
     {
-        c10::DeviceIndex device = this->device_idx;
+        // Use a standard int to match the GetDevice signature expected by this build
+        int device;
+        C10_CUDA_CHECK(c10::cuda::GetDevice(&device));
+
         constexpr size_t one_exa_bytes = 1152921504606846976ULL;
         TORCH_CHECK_WITH(
             OutOfMemoryError,
@@ -30,11 +34,10 @@ public:
         if (size == 0)
             throw std::runtime_error("can't allocate 0 sized tensor...");
 
-        C10_CUDA_CHECK(c10::cuda::GetDevice(&device));
         CUdeviceptr ptr_gpu;
         if (!is_uvm_backend(this->page_size))
         {
-            CHECK_CUDA(cuMemAddressReserve(&ptr_gpu, size, 0, 0, 0));
+            CHECK_CUDA(cuMemAddressReserve(&ptr_gpu, size, this->page_size, 0, 0));
         }
         else
         {
@@ -42,30 +45,18 @@ public:
             C10_CUDA_CHECK(cudaMallocManaged(&ptr, size));
             ptr_gpu = (CUdeviceptr)ptr;
         }
-        return {reinterpret_cast<void *>(ptr_gpu), reinterpret_cast<void *>(ptr_gpu), &release, c10::Device(c10::DeviceType::CUDA, device)};
+        return {reinterpret_cast<void *>(ptr_gpu), reinterpret_cast<void *>(ptr_gpu), &release, c10::Device(c10::DeviceType::CUDA, static_cast<c10::DeviceIndex>(device))};
     }
 
-    /*
-    TODO (ashish): check when this gets triggered
-    */
-    void copy_data(void *dest, const void *src, std::size_t count) const override
-    {
-        /* no-op */
-    }
-
-    /*
-    TODO(ashish): add logic to release virtual memory
-    */
-    static void release(void *ptr)
-    {
-        /* no-op */
-    }
+    void copy_data(void *dest, const void *src, std::size_t count) const override { /* no-op */ }
+    static void release(void *ptr) { /* no-op */ }
 };
 
 template <typename T>
 at::Tensor _alloc_vtensor(
     at::ArrayRef<T> shape,
     size_t page_size,
+    size_t min_request_bytes,
     c10::Allocator *allocator,
     c10::DispatchKeySet ks,
     at::ScalarType scalar_type,
@@ -75,17 +66,32 @@ at::Tensor _alloc_vtensor(
     at::detail::check_size_nonnegative(shape);
     raise_warning_for_complex_half(scalar_type);
     caffe2::TypeMeta dtype = scalarTypeToTypeMeta(scalar_type);
-    auto size_bytes = at::detail::computeStorageNbytesContiguous(shape, dtype.itemsize());
-    size_bytes = ROUND_UP(size_bytes, page_size);
+    if (shape.empty() || shape[0] == 0)
+        throw std::runtime_error("vtensor shape must include a positive batch dimension");
+
+    const size_t batch_size = shape[0];
+    auto logical_size_bytes = at::detail::computeStorageNbytesContiguous(shape, dtype.itemsize());
+    size_t per_request_bytes = logical_size_bytes / batch_size;
+    if (logical_size_bytes % batch_size != 0)
+        throw std::runtime_error("logical_size_bytes is not divisible by batch size");
+
+    if (per_request_bytes < min_request_bytes)
+        per_request_bytes = min_request_bytes;
+    per_request_bytes = ROUND_UP(per_request_bytes, page_size);
+    size_t size_bytes = per_request_bytes * batch_size;
     /*
      * ensure that each request's buffer is at least as big as the page size
      * first element of shape should always be batch size
      */
-    if (size_bytes < page_size * shape[0])
-        size_bytes = page_size * shape[0];
+    if (size_bytes < page_size * batch_size)
+        size_bytes = page_size * batch_size;
 
-    if (size_bytes % (page_size * shape[0]) != 0)
-        throw std::runtime_error("size_bytes is not a multiple of page_size * shape[0]");
+    if (size_bytes % batch_size != 0)
+        throw std::runtime_error("size_bytes is not divisible by batch size");
+
+    size_t request_alignment = size_bytes / batch_size;
+    if (request_alignment % page_size != 0)
+        throw std::runtime_error("request stride is not a multiple of page_size");
 
     auto storage_impl = c10::make_intrusive<c10::StorageImpl>(
         c10::StorageImpl::use_byte_size_t(),
@@ -110,6 +116,7 @@ at::Tensor _alloc_vtensor(
 TORCH_CUDA_CPP_API at::Tensor alloc_vtensor(
     at::IntArrayRef shape,
     size_t page_size,
+    size_t min_request_bytes,
     at::ScalarType dtype,
     VirtualTensorAllocator *allocator,
     int device_idx)
@@ -121,5 +128,13 @@ TORCH_CUDA_CPP_API at::Tensor alloc_vtensor(
     const c10::DeviceGuard device_guard(device);
     // VirtualTensorAllocator *allocator = new VirtualTensorAllocator();
     constexpr c10::DispatchKeySet cuda_dks(c10::DispatchKey::CUDA);
-    return _alloc_vtensor(shape, page_size, allocator, cuda_dks, dtype, device_idx, memory_format_opt);
+    return _alloc_vtensor(
+        shape,
+        page_size,
+        min_request_bytes,
+        allocator,
+        cuda_dks,
+        dtype,
+        device_idx,
+        memory_format_opt);
 }

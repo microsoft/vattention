@@ -40,6 +40,7 @@ class ModelRunner:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.cache_config = cache_config
         self.device = device
         self.rank = rank
 
@@ -65,6 +66,78 @@ class ModelRunner:
         )
         self._model_execution_e2e_timer = CpuTimer(
             CpuOperationMetrics.MODEL_EXECUTION_E2E, rank=self.rank
+        )
+
+    def load_model_weights(self, *args, **kwargs):
+        if not hasattr(self.model, "load_weights"):
+            raise AttributeError("model does not implement load_weights")
+        return self.model.load_weights(*args, **kwargs)
+
+    def _execute_model(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches,
+        model_kwargs: Optional[dict] = None,
+    ):
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        projection_weights = model_kwargs.pop("projection_weights", None)
+        mlp_weights = model_kwargs.pop("mlp_weights", None)
+        caches = model_kwargs.pop("caches", None)
+        softmax_scale = model_kwargs.pop("softmax_scale", None)
+
+        if projection_weights is not None:
+            if model_kwargs:
+                raise ValueError(
+                    "Unsupported model_kwargs for projection-weight execution: "
+                    + ", ".join(sorted(model_kwargs.keys()))
+                )
+            if hasattr(self.model, "forward_with_attention_wrapper"):
+                return self.model.forward_with_attention_wrapper(
+                    hidden_states=hidden_states,
+                    projection_weights=projection_weights,
+                    mlp_weights=mlp_weights,
+                    kv_caches=kv_caches,
+                    attention_wrapper=get_attention_wrapper(),
+                    caches=caches,
+                    softmax_scale=softmax_scale,
+                )
+            return self.model(
+                hidden_states=hidden_states,
+                projection_weights=projection_weights,
+                mlp_weights=mlp_weights,
+                caches=caches,
+                softmax_scale=softmax_scale,
+            )
+
+        uses_installed_scaffold_kwargs = any(
+            value is not None for value in (mlp_weights, caches, softmax_scale)
+        )
+        if uses_installed_scaffold_kwargs:
+            if model_kwargs:
+                raise ValueError(
+                    "Unsupported model_kwargs for installed-scaffold execution: "
+                    + ", ".join(sorted(model_kwargs.keys()))
+                )
+            return self.model(
+                hidden_states=hidden_states,
+                positions=positions,
+                kv_caches=kv_caches,
+                mlp_weights=mlp_weights,
+                caches=caches,
+                softmax_scale=softmax_scale,
+                attention_wrapper=get_attention_wrapper(),
+            )
+
+        if model_kwargs:
+            raise ValueError(
+                "Unsupported model_kwargs for standard execution: "
+                + ", ".join(sorted(model_kwargs.keys()))
+            )
+        return self.model(
+            hidden_states=hidden_states,
+            positions=positions,
+            kv_caches=kv_caches,
         )
 
     def _prepare_inputs(
@@ -103,10 +176,17 @@ class ModelRunner:
             context_len = seq_metadata.seq.get_len()
             position = context_len - 1
             input_positions.append(position)
-        # Optimization: Pad the input length to be a multiple of 8.
-        # This is required for utilizing the Tensor Cores in NVIDIA GPUs.
-        input_tokens = pad_to_alignment(input_tokens, multiple_of=8)
-        input_positions = pad_to_alignment(input_positions, multiple_of=8)
+        is_mla_vattention = (
+            AttentionBackend.is_vATTN(self.model_config.attention_backend)
+            and hasattr(self.model_config, "is_mla_model")
+            and self.model_config.is_mla_model()
+        )
+        if not is_mla_vattention:
+            # Optimization: Pad the input length to be a multiple of 8.
+            # MLA/vATTN uses exact token counts for wrapper metadata, so
+            # padding there would desynchronize runtime cache writes.
+            input_tokens = pad_to_alignment(input_tokens, multiple_of=8)
+            input_positions = pad_to_alignment(input_positions, multiple_of=8)
 
         # Convert to tensors.
         tokens_tensor = torch.tensor(input_tokens, dtype=torch.long, device=self.device)
@@ -208,8 +288,15 @@ class ModelRunner:
         total_gpu_memory = get_gpu_memory()
         # print(f"peak_memory: {peak_memory}, total_gpu_memory: {total_gpu_memory}")
         physical_memory = int(total_gpu_memory * gpu_memory_utilization - peak_memory)
+        cache_block_arg = (
+            self.cache_config.page_size
+            if AttentionBackend.is_vATTN(self.model_config.attention_backend)
+            else block_size
+        )
         cache_block_size = get_cache_engine(self.model_config.attention_backend).get_cache_block_size(
-            block_size, self.model_config, self.parallel_config
+            cache_block_arg,
+            self.model_config,
+            self.parallel_config,
         )
         num_gpu_blocks = int(
             physical_memory // cache_block_size
@@ -228,6 +315,7 @@ class ModelRunner:
         self,
         seq_metadata_list: List[SequenceMetadata],
         gpu_cache: Optional[List[torch.Tensor]] = None,
+        model_kwargs: Optional[dict] = None,
     ) -> torch.Tensor:
         # Prepare input tensors.
         with self._prepare_inputs_e2e_timer:
@@ -239,10 +327,11 @@ class ModelRunner:
         with self._model_execution_e2e_timer:
             # Execute the model.
             try:
-                output = self.model(
+                output = self._execute_model(
                     hidden_states=input_tokens,
                     positions=input_positions,
                     kv_caches=gpu_cache,
+                    model_kwargs=model_kwargs,
                 )
             except RuntimeError as e:
                 logger.error(
@@ -252,8 +341,102 @@ class ModelRunner:
 
         with self._sampler_e2e_timer:
             if self.sampler is not None:
+                model_output = output
+                if (
+                    isinstance(model_output, tuple)
+                    and len(model_output) == 2
+                    and torch.is_tensor(model_output[0])
+                ):
+                    output = model_output[0]
                 output = self.sampler(output, seq_metadata_list)
 
         get_attention_wrapper().end_forward()
 
         return output
+
+    def run_prefill_tokens(
+        self,
+        token_ids: torch.Tensor,
+        gpu_cache=None,
+        model_kwargs: Optional[dict] = None,
+    ):
+        if not hasattr(self.model, "prefill_tokens"):
+            raise AttributeError("model does not implement prefill_tokens")
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        projection_weights = model_kwargs.pop("projection_weights", None)
+        mlp_weights = model_kwargs.pop("mlp_weights", None)
+        softmax_scale = model_kwargs.pop("softmax_scale", None)
+        if model_kwargs:
+            raise ValueError(
+                "Unsupported model_kwargs for token-prefill execution: "
+                + ", ".join(sorted(model_kwargs.keys()))
+            )
+        call_kwargs = {
+            "projection_weights": projection_weights,
+            "mlp_weights": mlp_weights,
+            "softmax_scale": softmax_scale,
+        }
+        if gpu_cache is not None:
+            call_kwargs["kv_caches"] = gpu_cache
+            call_kwargs["attention_wrapper"] = get_attention_wrapper()
+        return self.model.prefill_tokens(token_ids, **call_kwargs)
+
+    def run_decode_tokens(
+        self,
+        token_ids: torch.Tensor,
+        caches,
+        gpu_cache=None,
+        model_kwargs: Optional[dict] = None,
+    ):
+        if not hasattr(self.model, "decode_tokens"):
+            raise AttributeError("model does not implement decode_tokens")
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        projection_weights = model_kwargs.pop("projection_weights", None)
+        mlp_weights = model_kwargs.pop("mlp_weights", None)
+        softmax_scale = model_kwargs.pop("softmax_scale", None)
+        if model_kwargs:
+            raise ValueError(
+                "Unsupported model_kwargs for token-decode execution: "
+                + ", ".join(sorted(model_kwargs.keys()))
+            )
+        call_kwargs = {
+            "projection_weights": projection_weights,
+            "mlp_weights": mlp_weights,
+            "softmax_scale": softmax_scale,
+        }
+        if gpu_cache is not None:
+            call_kwargs["kv_caches"] = gpu_cache
+            call_kwargs["attention_wrapper"] = get_attention_wrapper()
+        return self.model.decode_tokens(token_ids, caches=caches, **call_kwargs)
+
+    def run_greedy_generation(
+        self,
+        token_ids: torch.Tensor,
+        max_new_tokens: int,
+        gpu_cache=None,
+        model_kwargs: Optional[dict] = None,
+    ):
+        if not hasattr(self.model, "generate_greedy"):
+            raise AttributeError("model does not implement generate_greedy")
+        model_kwargs = {} if model_kwargs is None else dict(model_kwargs)
+        projection_weights = model_kwargs.pop("projection_weights", None)
+        mlp_weights = model_kwargs.pop("mlp_weights", None)
+        softmax_scale = model_kwargs.pop("softmax_scale", None)
+        if model_kwargs:
+            raise ValueError(
+                "Unsupported model_kwargs for greedy token generation: "
+                + ", ".join(sorted(model_kwargs.keys()))
+            )
+        call_kwargs = {
+            "projection_weights": projection_weights,
+            "mlp_weights": mlp_weights,
+            "softmax_scale": softmax_scale,
+        }
+        if gpu_cache is not None:
+            call_kwargs["kv_caches"] = gpu_cache
+            call_kwargs["attention_wrapper"] = get_attention_wrapper()
+        return self.model.generate_greedy(
+            token_ids,
+            max_new_tokens=max_new_tokens,
+            **call_kwargs,
+        )

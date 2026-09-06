@@ -2,10 +2,12 @@
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
 from sarathi.transformers_utils.configs.falcon import RWConfig
+from sarathi.transformers_utils.configs.deepseek_v2 import DeepseekV2Config
 from sarathi.transformers_utils.configs.qwen import QWenConfig
 from sarathi.transformers_utils.configs.yi import YiConfig
 
 __all__ = [
+    "DeepseekV2Config",
     "QWenConfig",
     "RWConfig",
     "YiConfig",

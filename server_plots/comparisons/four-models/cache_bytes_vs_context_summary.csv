@@ -1,0 +1,5 @@
+label,n_requests,min_context,max_context,max_allocated_cache_mib,max_waste_cache_mib,mean_waste_cache_mib
+Qwen-14B (MHA),30,128,8192,22.0,1.9975579975579973,1.1004477004477005
+Mistral-Nemo-12B (GQA),45,128,32768,16.0,2.0,1.1708333333333334
+Mistral-Nemo-12B (Synthetic MLA),45,128,32768,14.0,1.999633766709394,1.0778327127713687
+DeepSeek-V2-Lite (MLA),66,128,32768,38.0,1.9956043956043956,1.024309024309024

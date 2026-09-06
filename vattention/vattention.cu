@@ -14,6 +14,7 @@
 #include <cuda.h>
 #include <Python.h>
 #include <utility>
+#include <string>
 
 #include <thread>
 #include <atomic>
@@ -38,7 +39,12 @@ public:
     void init_kv_block_size()
     {
         page_size = do_cuda_init(device, page_size);
-        if (megacache_enabled)
+        if (component_spec_enabled)
+        {
+            if (tokens_per_page == 0)
+                tokens_per_page = page_size / page_buffer_token_bytes;
+        }
+        else if (megacache_enabled)
             tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem * num_layers);
         else
             tokens_per_page = page_size / (num_kv_heads * head_size * bytes_per_elem);
@@ -48,21 +54,22 @@ public:
 
     void init_buffer_sizes()
     {
-        u64 remainder;
-
-        if (megacache_enabled)
+        if (component_spec_enabled)
+            virt_buff_size_per_token = page_buffer_token_bytes;
+        else if (megacache_enabled)
             virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem * num_layers;
         else
             virt_buff_size_per_token = num_kv_heads * head_size * bytes_per_elem;
-        virt_buff_size_per_req = virt_buff_size_per_token * max_context_length;
-        virt_buff_size_per_req = ROUND_UP(virt_buff_size_per_req, page_size);
-
-        max_pages_per_req = virt_buff_size_per_req / page_size;
-
-        /* align to ensure that each request begins at a mappable offset */
-        remainder = virt_buff_size_per_req % page_size;
-        if (remainder != 0)
-            virt_buff_size_per_req += page_size - remainder;
+        /*
+         * Reserve virtual address space in whole-page units based on the same
+         * ceil(tokens / tokens_per_page) math used by page growth.
+         *
+         * Using raw per-token bytes can under-reserve when max_context_length
+         * is not an exact multiple of tokens_per_page, which makes later page
+         * mappings walk past the reserved VA range for smaller MLA components.
+         */
+        max_pages_per_req = tokens_to_pages(max_context_length);
+        virt_buff_size_per_req = max_pages_per_req * page_size;
 
         virt_buff_size = virt_buff_size_per_req * max_batch_size;
         virt_buff_num_kv_tokens = max_batch_size * max_context_length;
@@ -77,10 +84,7 @@ public:
     {
         std::stringstream ss;
         u64 nr_pages = !is_uvm_backend(page_size) ? cuda_pages.size() : uvm_pages.size();
-        if (megacache_enabled)
-            log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(nr_pages)) + " KV blocks");
-        else
-            log.log("Free pool: " + std::to_string(PAGES_TO_KVBLOCKS(nr_pages)) + " KV blocks");
+        log.log("Free pool: " + std::to_string(pages_to_kvblocks(nr_pages)) + " KV blocks");
 
         log.log("reqId : seqlen: mapped: required");
         for (int i = 0; i < max_batch_size; i++)
@@ -115,9 +119,69 @@ public:
         max_context_length = max_context_length_;
         device = device_;
         dtype = dtype_;
+        scalar_type = torch::python::detail::py_object_to_dtype(dtype_);
         page_size = page_size_;
         megacache_enabled = megacache;
+        megacache_enabled_global = megacache;
         bytes_per_elem = dtype.attr("itemsize").cast<int>();
+        page_buffer_token_bytes = megacache_enabled
+            ? (u64)num_kv_heads * head_size * bytes_per_elem * num_layers
+            : (u64)num_kv_heads * head_size * bytes_per_elem;
+        cached_token_bytes_local = (u64)num_layers * 2 * num_kv_heads * head_size * bytes_per_elem;
+        component_spec_enabled = false;
+        cache_component_token_dims = {
+            num_kv_heads * head_size,
+            num_kv_heads * head_size,
+        };
+        init_kv_block_size();
+        init_buffer_sizes();
+        init_kvcache_batch_metadata();
+        k_ptr.resize(num_layers);
+        v_ptr.resize(num_layers);
+        allocator = new VirtualTensorAllocator(device, page_size);
+        is_configured = true;
+    }
+
+    static at::ScalarType parse_scalar_type(const std::string &dtype_name)
+    {
+        if (dtype_name == "float16" || dtype_name == "half")
+            return at::ScalarType::Half;
+        if (dtype_name == "bfloat16")
+            return at::ScalarType::BFloat16;
+        if (dtype_name == "float32" || dtype_name == "float")
+            return at::ScalarType::Float;
+        throw std::runtime_error("Unsupported dtype for component-spec initialization: " + dtype_name);
+    }
+
+    void init_kvcache_component_spec(py::dict payload)
+    {
+        py::dict cache_spec = payload["cache_spec"].cast<py::dict>();
+        py::list cache_components = cache_spec["cache_components"].cast<py::list>();
+
+        max_batch_size = payload["max_batch_size"].cast<int>();
+        max_context_length = payload["max_context_length"].cast<long>();
+        device = payload["device_idx"].cast<int>();
+        page_size = cache_spec["page_size"].cast<u64>();
+        megacache_enabled = cache_spec["megacache"].cast<bool>();
+        megacache_enabled_global = megacache_enabled;
+        num_layers = cache_spec["num_layers"].cast<int>();
+        num_kv_heads = cache_spec["num_kv_heads"].cast<int>();
+        head_size = cache_spec["head_size"].cast<int>();
+        tokens_per_page = cache_spec["tokens_per_page"].cast<u64>();
+        page_buffer_token_bytes = cache_spec["page_buffer_token_bytes"].cast<u64>();
+        cached_token_bytes_local = cache_spec["cached_token_bytes_local"].cast<u64>();
+        bytes_per_elem = cache_spec["dtype_size"].cast<int>();
+        scalar_type = parse_scalar_type(payload["dtype"].cast<std::string>());
+        component_spec_enabled = true;
+        cache_component_token_dims.clear();
+        for (auto component_obj : cache_components)
+        {
+            py::dict component = component_obj.cast<py::dict>();
+            cache_component_token_dims.push_back(component["token_dim"].cast<int>());
+        }
+        if (cache_component_token_dims.size() != 2)
+            throw std::runtime_error("component-spec initialization currently expects exactly 2 cache components");
+
         init_kv_block_size();
         init_buffer_sizes();
         init_kvcache_batch_metadata();
@@ -141,14 +205,38 @@ public:
 
     at::Tensor alloc_virtual_tensor()
     {
-        at::ScalarType type_ = torch::python::detail::py_object_to_dtype(dtype);
+        at::ScalarType type_ = scalar_type;
         at::IntArrayRef shape;
         if (megacache_enabled)
             shape = {max_batch_size, max_context_length, num_layers, num_kv_heads, head_size};
         else
             shape = {max_batch_size, max_context_length, num_kv_heads, head_size};
 
-        at::Tensor t = alloc_vtensor(shape, page_size, type_, allocator, device);
+        at::Tensor t = alloc_vtensor(
+            shape,
+            page_size,
+            virt_buff_size_per_req,
+            type_,
+            allocator,
+            device);
+        return t;
+    }
+
+    at::Tensor alloc_component_virtual_tensor(int component_token_dim)
+    {
+        at::IntArrayRef shape;
+        if (megacache_enabled)
+            shape = {max_batch_size, max_context_length, num_layers, component_token_dim};
+        else
+            shape = {max_batch_size, max_context_length, component_token_dim};
+
+        at::Tensor t = alloc_vtensor(
+            shape,
+            page_size,
+            virt_buff_size_per_req,
+            scalar_type,
+            allocator,
+            device);
         return t;
     }
 
@@ -186,19 +274,44 @@ public:
         return tensors;
     }
 
+    std::vector<at::Tensor> init_kvcache_component_spec_virtual()
+    {
+        if (!check_kvcache_config())
+        {
+            log.log("Invalid component-spec kv cache configuration...");
+            return std::vector<at::Tensor>();
+        }
+
+        if (megacache_enabled)
+        {
+            at::Tensor t0 = alloc_component_virtual_tensor(cache_component_token_dims[0]);
+            at::Tensor t1 = alloc_component_virtual_tensor(cache_component_token_dims[1]);
+            k_tensors.push_back(t0);
+            v_tensors.push_back(t1);
+        }
+        else
+        {
+            for (int layer_idx = 0; layer_idx < num_layers; layer_idx++)
+            {
+                k_tensors.push_back(alloc_component_virtual_tensor(cache_component_token_dims[0]));
+                v_tensors.push_back(alloc_component_virtual_tensor(cache_component_token_dims[1]));
+            }
+        }
+        std::vector<at::Tensor> tensors;
+        tensors.insert(tensors.end(), k_tensors.begin(), k_tensors.end());
+        tensors.insert(tensors.end(), v_tensors.begin(), v_tensors.end());
+        return tensors;
+    }
+
     u64 reserve_physical_pages(u64 free_memory)
     {
-        return reserve_gpu_pages(num_layers, free_memory, page_size);
+        return reserve_gpu_pages(free_memory, page_size);
     }
 
     inline u64 get_num_free_kvblocks()
     {
         u64 free_kvblocks;
-
-        if (megacache_enabled)
-            free_kvblocks = PAGES_TO_KVBLOCKS_MEGACACHE(get_num_free_pages(page_size));
-        else
-            free_kvblocks = PAGES_TO_KVBLOCKS(get_num_free_pages(page_size));
+        free_kvblocks = pages_to_kvblocks(get_num_free_pages(page_size));
 
         return free_kvblocks + get_num_overcommitted_kvblocks();
     }
@@ -211,9 +324,7 @@ public:
 
     inline bool kvblocks_available(u64 num_kvblocks)
     {
-        if (megacache_enabled)
-            return PAGES_TO_KVBLOCKS_MEGACACHE(get_num_free_pages(page_size)) >= num_kvblocks ? true : false;
-        return PAGES_TO_KVBLOCKS(get_num_free_pages(page_size)) >= num_kvblocks ? true : false;
+        return pages_to_kvblocks(get_num_free_pages(page_size)) >= num_kvblocks ? true : false;
     }
 
     inline void unmap_req_page_one(int reqId)
@@ -270,6 +381,11 @@ public:
         u64 req_offset;
         at::Storage k_storage, v_storage;
 
+        if (num_blocks > 0) {
+            printf("[vAttention ALLOC] reqId: %d | blocks: %llu | sync: %s\n", 
+               reqId, (unsigned long long)num_blocks, sync ? "true" : "false");
+        }
+
         if (num_blocks <= 0)
             return;
 
@@ -283,12 +399,12 @@ public:
             verbose = true;
             if (megacache_enabled)
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             else
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             show_allocator_state();
@@ -336,12 +452,12 @@ public:
         {
             if (megacache_enabled)
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS_MEGACACHE(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             else
             {
-                log.log("free pages: " + std::to_string(PAGES_TO_KVBLOCKS(cuda_pages.size())));
+                log.log("free pages: " + std::to_string(pages_to_kvblocks(cuda_pages.size())));
                 log.log("required: " + std::to_string(num_blocks));
             }
             throw std::runtime_error("***** OOM on demand: not enough free pages to continue *****");
@@ -372,25 +488,76 @@ public:
         }
     }
 
+    struct FragmentationMetrics
+    {
+        u64 seq_len;
+        u64 mapped_blocks;
+        u64 pages_per_kvblock;
+        u64 tokens_per_page;
+        u64 mapped_token_capacity;
+        u64 resident_tokens;
+        u64 slack_tokens;
+        u64 useful_payload_bytes;
+        u64 mapped_physical_bytes;
+        double token_fill_pct;
+        double token_frag_pct;
+        double payload_util_pct;
+        double payload_overhead_pct;
+    };
+
     /* Map physical memory for the current iteration before returning control */
+    FragmentationMetrics compute_fragmentation_metrics(u64 seq_len, u64 nr_mapped)
+    {
+        FragmentationMetrics metrics{};
+
+        metrics.seq_len = seq_len;
+        metrics.mapped_blocks = nr_mapped;
+        metrics.pages_per_kvblock = get_pages_per_kvblock();
+        metrics.tokens_per_page = tokens_per_page;
+        metrics.mapped_token_capacity = nr_mapped * tokens_per_page;
+        metrics.resident_tokens = (seq_len < metrics.mapped_token_capacity)
+            ? seq_len
+            : metrics.mapped_token_capacity;
+        metrics.slack_tokens = metrics.mapped_token_capacity - metrics.resident_tokens;
+        metrics.useful_payload_bytes = metrics.resident_tokens * cached_token_bytes_local;
+        metrics.mapped_physical_bytes = nr_mapped * metrics.pages_per_kvblock * page_size;
+
+        metrics.token_fill_pct = metrics.mapped_token_capacity > 0
+            ? (100.0 * static_cast<double>(metrics.resident_tokens) / static_cast<double>(metrics.mapped_token_capacity))
+            : 0.0;
+        metrics.token_frag_pct = metrics.mapped_token_capacity > 0
+            ? (100.0 * static_cast<double>(metrics.slack_tokens) / static_cast<double>(metrics.mapped_token_capacity))
+            : 0.0;
+        metrics.payload_util_pct = metrics.mapped_physical_bytes > 0
+            ? (100.0 * static_cast<double>(metrics.useful_payload_bytes) / static_cast<double>(metrics.mapped_physical_bytes))
+            : 0.0;
+        metrics.payload_overhead_pct = metrics.mapped_physical_bytes > 0
+            ? (100.0 - metrics.payload_util_pct)
+            : 0.0;
+        return metrics;
+    }
+
     void map_pages_for_curr_step(int reqId, u64 seq_len)
     {
+        if (seq_len == 0) return;
+
         u64 nr_required = tokens_to_pages(seq_len);
         u64 nr_mapped = get_req_pages(reqId);
 
         if (nr_required <= nr_mapped)
+        {
             return;
+        }
 
-        nr_required -= nr_mapped;
-        if (!kvblocks_available(nr_required))
-            reclaim_kvblocks_on_demand(nr_required);
+        u64 nr_to_grow = nr_required - nr_mapped;
 
-        /* this should not get triggered frequently with our optimizations */
-        log.log("[DEBUG] allocating " + std::to_string(nr_required) + " pages for reqId: " + std::to_string(reqId));
-        grow_kvcache_phys(reqId, nr_required, true);
+        if (!kvblocks_available(nr_to_grow))
+            reclaim_kvblocks_on_demand(nr_to_grow);
+
+        log.log("[DEBUG] allocating " + std::to_string(nr_to_grow) + " pages for reqId: " + std::to_string(reqId));
+        grow_kvcache_phys(reqId, nr_to_grow, true);
         set_req_seq_length(reqId, seq_len);
     }
-
     /* This is not meant for final use but to test vattention with sync allocation */
     void step_sync(std::vector<u64> seq_lens, bool eager_reclaim)
     {
@@ -598,6 +765,52 @@ public:
         deferred_reclaim = val;
     }
 
+    py::dict get_allocator_debug_info()
+    {
+        py::dict info;
+        info["tokens_per_page"] = py::int_(tokens_per_page);
+        info["page_buffer_token_bytes"] = py::int_(page_buffer_token_bytes);
+        info["cached_token_bytes_local"] = py::int_(cached_token_bytes_local);
+        info["pages_per_kvblock"] = py::int_(get_pages_per_kvblock());
+        info["component_spec_enabled"] = py::bool_(component_spec_enabled);
+        info["megacache_enabled"] = py::bool_(megacache_enabled);
+        info["num_layers"] = py::int_(num_layers);
+        info["num_cache_components"] = py::int_(get_num_cache_components());
+        info["max_pages_per_req"] = py::int_(max_pages_per_req);
+        info["virt_buff_size_per_req"] = py::int_(virt_buff_size_per_req);
+        return info;
+    }
+
+    u64 debug_tokens_to_pages(u64 num_tokens)
+    {
+        return tokens_to_pages(num_tokens);
+    }
+
+    py::dict debug_fragmentation_metrics(u64 seq_len, u64 mapped_blocks)
+    {
+        FragmentationMetrics metrics = compute_fragmentation_metrics(seq_len, mapped_blocks);
+        py::dict result;
+        result["seq_len"] = py::int_(metrics.seq_len);
+        result["mapped_blocks"] = py::int_(metrics.mapped_blocks);
+        result["pages_per_kvblock"] = py::int_(metrics.pages_per_kvblock);
+        result["tokens_per_page"] = py::int_(metrics.tokens_per_page);
+        result["mapped_token_capacity"] = py::int_(metrics.mapped_token_capacity);
+        result["resident_tokens"] = py::int_(metrics.resident_tokens);
+        result["slack_tokens"] = py::int_(metrics.slack_tokens);
+        result["useful_payload_bytes"] = py::int_(metrics.useful_payload_bytes);
+        result["mapped_physical_bytes"] = py::int_(metrics.mapped_physical_bytes);
+        result["token_fill_pct"] = py::float_(metrics.token_fill_pct);
+        result["token_frag_pct"] = py::float_(metrics.token_frag_pct);
+        result["payload_util_pct"] = py::float_(metrics.payload_util_pct);
+        result["payload_overhead_pct"] = py::float_(metrics.payload_overhead_pct);
+        return result;
+    }
+
+    u64 debug_request_mapped_blocks(int reqId)
+    {
+        return get_req_pages(reqId);
+    }
+
     /* TODO(ashish): check if this is compatible with PyTorch destructor */
     void cleanup()
     {
@@ -605,6 +818,12 @@ public:
         DO_KVCACHE_CLEANUP(page_size);
         k_tensors.clear();
         v_tensors.clear();
+        cache_component_token_dims.clear();
+        component_spec_enabled = false;
+        megacache_enabled_global = false;
+        tokens_per_page = 0;
+        page_buffer_token_bytes = 0;
+        cached_token_bytes_local = 0;
         log.log("released memory and cleaned up vattention ...");
     }
 };
@@ -619,10 +838,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
      */
     m.def("reserve_physical_pages", &reserve_physical_pages, "reserve physical memory blocks...");
     m.def("init_kvcache", &init_kvcache, "initialize KV cache...");
+    m.def("init_kvcache_component_spec", &init_kvcache_component_spec, "initialize KV cache from a structured component spec...");
     m.def("cleanup", &cleanup, "cleanup and release allocator resources context...");
     /* Tunables and other helper APIs */
     m.def("set_verbose", &set_verbose, "to enable/disable printing logs...");
     m.def("set_deferred_reclamation", &set_deferred_reclamation, "enable/disable deferred freeing...");
+    m.def("get_allocator_debug_info", &get_allocator_debug_info, "return allocator sizing metadata...");
+    m.def("debug_tokens_to_pages", &debug_tokens_to_pages, "convert token count to logical kvblocks...");
+    m.def("debug_fragmentation_metrics", &debug_fragmentation_metrics, "compute fragmentation metrics for a given seq len and mapped block count...");
+    m.def("debug_request_mapped_blocks", &debug_request_mapped_blocks, "return the allocator's current mapped block count for a request...");
     /* Testing APIs */
     m.def("show_kvcache_config", &show_kvcache_config, "show kv cache configuration...");
     m.def("show_allocator_state", &show_allocator_state, "show free pool of physical memory blocks...");

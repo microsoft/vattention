@@ -4,7 +4,7 @@ from sarathi.benchmark.request_generator.synthetic_request_generator import (
 from sarathi.benchmark.request_generator.trace_replay_request_generator import (
     TraceReplayRequestGenerator,
 )
-from sarathi.benchmark.types import RequestGeneratorType
+from sarathi.benchmark.sarathi_types import RequestGeneratorType
 from sarathi.utils.base_registry import BaseRegistry
 
 

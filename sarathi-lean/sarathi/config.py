@@ -1,5 +1,7 @@
 from abc import ABC
-from typing import List, Optional, Tuple
+from enum import Enum
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from transformers import PretrainedConfig
@@ -9,6 +11,214 @@ from sarathi.transformers_utils.config import get_config
 from sarathi.utils.base_int_enum import BaseIntEnum
 
 logger = init_logger(__name__)
+
+
+class CacheArchitecture(Enum):
+    DENSE_KV = "dense_kv"
+    MLA = "mla"
+
+
+@dataclass(frozen=True)
+class CacheLayout:
+    architecture: CacheArchitecture
+    megacache: bool
+    cached_token_bytes_per_layer: int
+    cached_token_bytes_local: int
+    page_buffer_token_bytes: int
+    tokens_per_page: int
+
+
+@dataclass(frozen=True)
+class MLAAttentionSpec:
+    q_lora_rank: Optional[int]
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    q_head_dim: int
+    resident_cache_dim: int
+
+
+@dataclass(frozen=True)
+class TensorParallelAttentionSpec:
+    tensor_parallel_size: int
+    num_q_heads_global: int
+    num_q_heads_local: int
+    num_kv_heads_global: int
+    num_kv_heads_local: int
+    head_size: int
+
+
+@dataclass(frozen=True)
+class MLATensorParallelAttentionSpec:
+    tp_attention: TensorParallelAttentionSpec
+    q_lora_rank: Optional[int]
+    kv_lora_rank: int
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+    q_head_dim: int
+    resident_cache_dim: int
+
+
+@dataclass(frozen=True)
+class CacheComponentSpec:
+    name: str
+    token_dim: int
+
+    def __post_init__(self):
+        if not self.name:
+            raise ValueError("Cache component name must be non-empty")
+        if self.token_dim <= 0:
+            raise ValueError("Cache component token_dim must be positive")
+
+
+@dataclass(frozen=True)
+class VAttentionCacheSpec:
+    architecture: CacheArchitecture
+    megacache: bool
+    page_size: int
+    tokens_per_page: int
+    cached_token_bytes_per_layer: int
+    cached_token_bytes_local: int
+    page_buffer_token_bytes: int
+    dtype_size: int
+    num_layers: int
+    num_kv_heads: int
+    head_size: int
+    tp_attention: TensorParallelAttentionSpec
+    cache_components: Tuple[CacheComponentSpec, ...]
+    mla_kv_lora_rank: Optional[int]
+    mla_qk_rope_head_dim: Optional[int]
+
+    def __post_init__(self):
+        if self.page_size <= 0:
+            raise ValueError("page_size must be positive")
+        if self.tokens_per_page <= 0:
+            raise ValueError("tokens_per_page must be positive")
+        if self.cached_token_bytes_per_layer <= 0:
+            raise ValueError("cached_token_bytes_per_layer must be positive")
+        if self.cached_token_bytes_local <= 0:
+            raise ValueError("cached_token_bytes_local must be positive")
+        if self.page_buffer_token_bytes <= 0:
+            raise ValueError("page_buffer_token_bytes must be positive")
+        if self.dtype_size <= 0:
+            raise ValueError("dtype_size must be positive")
+        if self.num_layers <= 0:
+            raise ValueError("num_layers must be positive")
+        if self.num_kv_heads <= 0:
+            raise ValueError("num_kv_heads must be positive")
+        if self.head_size <= 0:
+            raise ValueError("head_size must be positive")
+        if not self.cache_components:
+            raise ValueError("cache_components must be non-empty")
+
+        component_token_dim = sum(
+            component.token_dim for component in self.cache_components
+        )
+        if component_token_dim * self.dtype_size != self.cached_token_bytes_per_layer:
+            raise ValueError(
+                "cache_components do not match cached_token_bytes_per_layer"
+            )
+        if self.page_buffer_token_bytes > self.page_size:
+            raise ValueError("page_buffer_token_bytes cannot exceed page_size")
+        if self.tokens_per_page != self.page_size // self.page_buffer_token_bytes:
+            raise ValueError("tokens_per_page does not match page_size and page_buffer_token_bytes")
+
+        is_mla = self.architecture == CacheArchitecture.MLA
+        if is_mla:
+            if self.mla_kv_lora_rank is None or self.mla_qk_rope_head_dim is None:
+                raise ValueError("MLA cache spec requires MLA dimensions")
+        else:
+            if self.mla_kv_lora_rank is not None or self.mla_qk_rope_head_dim is not None:
+                raise ValueError("Dense KV cache spec cannot carry MLA dimensions")
+
+    def to_extension_dict(self) -> Dict[str, Any]:
+        return {
+            "architecture": self.architecture.value,
+            "megacache": self.megacache,
+            "page_size": self.page_size,
+            "tokens_per_page": self.tokens_per_page,
+            "cached_token_bytes_per_layer": self.cached_token_bytes_per_layer,
+            "cached_token_bytes_local": self.cached_token_bytes_local,
+            "page_buffer_token_bytes": self.page_buffer_token_bytes,
+            "dtype_size": self.dtype_size,
+            "num_layers": self.num_layers,
+            "num_kv_heads": self.num_kv_heads,
+            "head_size": self.head_size,
+            "tp_attention": {
+                "tensor_parallel_size": self.tp_attention.tensor_parallel_size,
+                "num_q_heads_global": self.tp_attention.num_q_heads_global,
+                "num_q_heads_local": self.tp_attention.num_q_heads_local,
+                "num_kv_heads_global": self.tp_attention.num_kv_heads_global,
+                "num_kv_heads_local": self.tp_attention.num_kv_heads_local,
+                "head_size": self.tp_attention.head_size,
+            },
+            "cache_components": [
+                {"name": component.name, "token_dim": component.token_dim}
+                for component in self.cache_components
+            ],
+            "mla_kv_lora_rank": self.mla_kv_lora_rank,
+            "mla_qk_rope_head_dim": self.mla_qk_rope_head_dim,
+        }
+
+
+@dataclass(frozen=True)
+class VAttentionInitSpec:
+    cache_spec: VAttentionCacheSpec
+    max_batch_size: int
+    max_context_length: int
+    device_idx: int
+    dtype: torch.dtype
+
+    def __post_init__(self):
+        if self.max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        if self.max_context_length <= 0:
+            raise ValueError("max_context_length must be positive")
+        if self.device_idx < 0:
+            raise ValueError("device_idx must be non-negative")
+
+    def get_extension_init_mode(self) -> str:
+        if self.cache_spec.architecture == CacheArchitecture.MLA:
+            return "component_spec"
+        return "legacy_dense_kv"
+
+    def get_extension_init_request(self) -> Dict[str, Any]:
+        mode = self.get_extension_init_mode()
+        request: Dict[str, Any] = {"init_mode": mode}
+        if mode == "legacy_dense_kv":
+            request["legacy_args"] = self.to_legacy_init_kvcache_args()
+        else:
+            request["payload"] = self.to_extension_dict()
+        return request
+
+    def to_legacy_init_kvcache_args(self) -> Tuple[int, int, int, int, int, int, torch.dtype, int, bool]:
+        if self.get_extension_init_mode() != "legacy_dense_kv":
+            raise ValueError(
+                "Legacy init_kvcache args are only valid for dense KV cache specs"
+            )
+        return (
+            self.cache_spec.num_layers,
+            self.cache_spec.num_kv_heads,
+            self.cache_spec.head_size,
+            self.max_batch_size,
+            self.max_context_length,
+            self.device_idx,
+            self.dtype,
+            self.cache_spec.page_size,
+            self.cache_spec.megacache,
+        )
+
+    def to_extension_dict(self) -> Dict[str, Any]:
+        return {
+            "init_mode": self.get_extension_init_mode(),
+            "cache_spec": self.cache_spec.to_extension_dict(),
+            "max_batch_size": self.max_batch_size,
+            "max_context_length": self.max_context_length,
+            "device_idx": self.device_idx,
+            "dtype": str(self.dtype).replace("torch.", ""),
+        }
 
 
 class SchedulerType(BaseIntEnum):
@@ -132,7 +342,320 @@ class ModelConfig:
     def get_hidden_size(self) -> int:
         return self.hf_config.hidden_size
 
+    def get_total_num_q_heads(self) -> int:
+        if getattr(self.hf_config, "num_attention_heads", None) is not None:
+            return self.hf_config.num_attention_heads
+        raise ValueError("num_attention_heads is not defined in the model config")
+
+    def get_total_num_kv_heads(self) -> int:
+        falcon_model_types = ["falcon", "RefinedWeb", "RefinedWebModel"]
+        new_decoder_arch_falcon = (
+            self.hf_config.model_type in falcon_model_types
+            and getattr(self.hf_config, "new_decoder_architecture", False)
+        )
+        if not new_decoder_arch_falcon and getattr(
+            self.hf_config, "multi_query", False
+        ):
+            return 1
+        if getattr(self.hf_config, "n_head_kv", None) is not None:
+            return self.hf_config.n_head_kv
+        if getattr(self.hf_config, "num_kv_heads", None) is not None:
+            return self.hf_config.num_kv_heads
+        if getattr(self.hf_config, "num_key_value_heads", None) is not None:
+            return self.hf_config.num_key_value_heads
+        return self.get_total_num_q_heads()
+
+    def is_mla_model(self) -> bool:
+        return (
+            getattr(self.hf_config, "kv_lora_rank", None) is not None
+            and getattr(self.hf_config, "qk_rope_head_dim", None) is not None
+        )
+
+    def get_cache_architecture(self) -> CacheArchitecture:
+        if self.is_mla_model():
+            return CacheArchitecture.MLA
+        return CacheArchitecture.DENSE_KV
+
+    def get_mla_kv_lora_rank(self) -> int:
+        kv_lora_rank = getattr(self.hf_config, "kv_lora_rank", None)
+        if kv_lora_rank is None:
+            raise ValueError("kv_lora_rank is not defined for this model")
+        return kv_lora_rank
+
+    def get_mla_q_lora_rank(self) -> Optional[int]:
+        return getattr(self.hf_config, "q_lora_rank", None)
+
+    def get_mla_qk_nope_head_dim(self) -> int:
+        qk_nope_head_dim = getattr(self.hf_config, "qk_nope_head_dim", None)
+        if qk_nope_head_dim is None:
+            raise ValueError("qk_nope_head_dim is not defined for this model")
+        return qk_nope_head_dim
+
+    def get_mla_qk_rope_head_dim(self) -> int:
+        qk_rope_head_dim = getattr(self.hf_config, "qk_rope_head_dim", None)
+        if qk_rope_head_dim is None:
+            raise ValueError("qk_rope_head_dim is not defined for this model")
+        return qk_rope_head_dim
+
+    def get_mla_v_head_dim(self) -> int:
+        v_head_dim = getattr(self.hf_config, "v_head_dim", None)
+        if v_head_dim is None:
+            raise ValueError("v_head_dim is not defined for this model")
+        return v_head_dim
+
+    def get_mla_q_head_dim(self) -> int:
+        return self.get_mla_qk_nope_head_dim() + self.get_mla_qk_rope_head_dim()
+
+    def get_mla_resident_cache_dim(self) -> int:
+        return self.get_mla_kv_lora_rank() + self.get_mla_qk_rope_head_dim()
+
+    def get_mla_attention_spec(self) -> MLAAttentionSpec:
+        if not self.is_mla_model():
+            raise ValueError("MLA attention spec is only defined for MLA models")
+
+        return MLAAttentionSpec(
+            q_lora_rank=self.get_mla_q_lora_rank(),
+            kv_lora_rank=self.get_mla_kv_lora_rank(),
+            qk_nope_head_dim=self.get_mla_qk_nope_head_dim(),
+            qk_rope_head_dim=self.get_mla_qk_rope_head_dim(),
+            v_head_dim=self.get_mla_v_head_dim(),
+            q_head_dim=self.get_mla_q_head_dim(),
+            resident_cache_dim=self.get_mla_resident_cache_dim(),
+        )
+
+    def get_tensor_parallel_attention_spec(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> TensorParallelAttentionSpec:
+        return TensorParallelAttentionSpec(
+            tensor_parallel_size=parallel_config.tensor_parallel_size,
+            num_q_heads_global=self.get_total_num_q_heads(),
+            num_q_heads_local=self.get_num_q_heads(parallel_config),
+            num_kv_heads_global=self.get_total_num_kv_heads(),
+            num_kv_heads_local=self.get_num_kv_heads(parallel_config),
+            head_size=self.get_head_size(),
+        )
+
+    def get_mla_tensor_parallel_attention_spec(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> MLATensorParallelAttentionSpec:
+        if not self.is_mla_model():
+            raise ValueError("MLA tensor-parallel spec is only defined for MLA models")
+
+        mla_spec = self.get_mla_attention_spec()
+        return MLATensorParallelAttentionSpec(
+            tp_attention=self.get_tensor_parallel_attention_spec(parallel_config),
+            q_lora_rank=mla_spec.q_lora_rank,
+            kv_lora_rank=mla_spec.kv_lora_rank,
+            qk_nope_head_dim=mla_spec.qk_nope_head_dim,
+            qk_rope_head_dim=mla_spec.qk_rope_head_dim,
+            v_head_dim=mla_spec.v_head_dim,
+            q_head_dim=mla_spec.q_head_dim,
+            resident_cache_dim=mla_spec.resident_cache_dim,
+        )
+
+    def get_cache_component_specs(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> Tuple[CacheComponentSpec, ...]:
+        if self.get_cache_architecture() == CacheArchitecture.MLA:
+            mla_spec = self.get_mla_attention_spec()
+            return (
+                CacheComponentSpec(
+                    name="kv_latent",
+                    token_dim=mla_spec.kv_lora_rank,
+                ),
+                CacheComponentSpec(
+                    name="k_rope",
+                    token_dim=mla_spec.qk_rope_head_dim,
+                ),
+            )
+
+        dense_token_dim = self.get_num_kv_heads(parallel_config) * self.get_head_size()
+        return (
+            CacheComponentSpec(name="k", token_dim=dense_token_dim),
+            CacheComponentSpec(name="v", token_dim=dense_token_dim),
+        )
+
+    def get_resident_cache_token_dim(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> int:
+        return sum(
+            component.token_dim
+            for component in self.get_cache_component_specs(parallel_config)
+        )
+
+    def get_cached_token_bytes_per_layer(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> int:
+        dtype_size = torch.tensor([], dtype=self.dtype).element_size()
+        return dtype_size * self.get_resident_cache_token_dim(parallel_config)
+
+    def get_cached_token_bytes_local(
+        self,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        del megacache  # Reserved for call-site clarity; resident bytes are unchanged.
+        num_layers = self.get_num_layers(parallel_config)
+        return num_layers * self.get_cached_token_bytes_per_layer(parallel_config)
+
+    def get_page_buffer_token_bytes(
+        self,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        dtype_size = torch.tensor([], dtype=self.dtype).element_size()
+
+        if self.get_cache_architecture() == CacheArchitecture.MLA:
+            per_layer_bytes = self.get_cached_token_bytes_per_layer(parallel_config)
+            if megacache:
+                return self.get_num_layers(parallel_config) * per_layer_bytes
+            return per_layer_bytes
+
+        per_layer_per_side_bytes = (
+            self.get_num_kv_heads(parallel_config) * self.get_head_size() * dtype_size
+        )
+        if megacache:
+            return self.get_num_layers(parallel_config) * per_layer_per_side_bytes
+        return per_layer_per_side_bytes
+
+    def get_num_cached_tokens_per_page(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        return page_size // self.get_page_buffer_token_bytes(
+            parallel_config,
+            megacache=megacache,
+        )
+
+    def get_cache_block_size_bytes(
+        self,
+        block_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        return block_size * self.get_cached_token_bytes_local(
+            parallel_config,
+            megacache=megacache,
+        )
+
+    def get_cache_layout(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> CacheLayout:
+        return CacheLayout(
+            architecture=self.get_cache_architecture(),
+            megacache=megacache,
+            cached_token_bytes_per_layer=self.get_cached_token_bytes_per_layer(
+                parallel_config
+            ),
+            cached_token_bytes_local=self.get_cached_token_bytes_local(
+                parallel_config,
+                megacache=megacache,
+            ),
+            page_buffer_token_bytes=self.get_page_buffer_token_bytes(
+                parallel_config,
+                megacache=megacache,
+            ),
+            tokens_per_page=self.get_num_cached_tokens_per_page(
+                page_size,
+                parallel_config,
+                megacache=megacache,
+            ),
+        )
+
+    def get_vattention_cache_spec(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> VAttentionCacheSpec:
+        layout = self.get_cache_layout(
+            page_size,
+            parallel_config,
+            megacache=megacache,
+        )
+        dtype_size = torch.tensor([], dtype=self.dtype).element_size()
+        is_mla = self.get_cache_architecture() == CacheArchitecture.MLA
+        mla_spec = self.get_mla_attention_spec() if is_mla else None
+        cache_components = self.get_cache_component_specs(parallel_config)
+        tp_attention = self.get_tensor_parallel_attention_spec(parallel_config)
+        return VAttentionCacheSpec(
+            architecture=layout.architecture,
+            megacache=layout.megacache,
+            page_size=page_size,
+            tokens_per_page=layout.tokens_per_page,
+            cached_token_bytes_per_layer=layout.cached_token_bytes_per_layer,
+            cached_token_bytes_local=layout.cached_token_bytes_local,
+            page_buffer_token_bytes=layout.page_buffer_token_bytes,
+            dtype_size=dtype_size,
+            num_layers=self.get_num_layers(parallel_config),
+            num_kv_heads=self.get_num_kv_heads(parallel_config),
+            head_size=self.get_head_size(),
+            tp_attention=tp_attention,
+            cache_components=cache_components,
+            mla_kv_lora_rank=mla_spec.kv_lora_rank if is_mla else None,
+            mla_qk_rope_head_dim=mla_spec.qk_rope_head_dim if is_mla else None,
+        )
+
+    def get_vattention_pages_per_kvblock(
+        self,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        num_components = len(self.get_cache_component_specs(parallel_config))
+        if megacache:
+            return num_components
+        return self.get_num_layers(parallel_config) * num_components
+
+    def get_vattention_cache_block_size_bytes(
+        self,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool = False,
+    ) -> int:
+        return (
+            page_size
+            * self.get_vattention_pages_per_kvblock(
+                parallel_config,
+                megacache=megacache,
+            )
+        )
+
+    def get_vattention_init_spec(
+        self,
+        *,
+        page_size: int,
+        parallel_config: "ParallelConfig",
+        megacache: bool,
+        max_batch_size: int,
+        max_context_length: int,
+        device_idx: int,
+    ) -> VAttentionInitSpec:
+        return VAttentionInitSpec(
+            cache_spec=self.get_vattention_cache_spec(
+                page_size,
+                parallel_config,
+                megacache=megacache,
+            ),
+            max_batch_size=max_batch_size,
+            max_context_length=max_context_length,
+            device_idx=device_idx,
+            dtype=self.dtype,
+        )
+
     def get_head_size(self) -> int:
+        head_dim = getattr(self.hf_config, "head_dim", None)
+        if head_dim is not None:
+            return head_dim
         # FIXME(woosuk): This may not be true for all models.
         return self.hf_config.hidden_size // self.hf_config.num_attention_heads
 
@@ -525,15 +1048,15 @@ def _get_and_verify_max_len(
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None:
         if derived_max_model_len == float("inf"):
-            raise ValueError(
-                "When using rope_scaling, the model's config.json must "
-                "contain one of the following keys to determine the original "
-                f"maximum length of the model: {possible_keys}"
-            )
-        assert "factor" in rope_scaling
-        scaling_factor = rope_scaling["factor"]
-        if rope_scaling["type"] == "yarn":
-            derived_max_model_len = rope_scaling["original_max_position_embeddings"]
+            # Default to a sane value if context length keys aren't found
+            derived_max_model_len = 4096 
+        
+        # Relaxed check: default factor to 1.0 if missing
+        scaling_factor = rope_scaling.get("factor", 1.0)
+        
+        if rope_scaling.get("type") == "yarn":
+            derived_max_model_len = rope_scaling.get("original_max_position_embeddings", derived_max_model_len)
+        
         derived_max_model_len *= scaling_factor
 
     if max_model_len is None:

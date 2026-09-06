@@ -19,6 +19,7 @@ from sarathi.core.datatypes.sequence import SamplerOutputs, Sequence
 from sarathi.core.sequence_manager.worker_sequence_manager import WorkerSequenceManager
 from sarathi.logger import init_logger
 from sarathi.metrics.metrics_store import MetricsStore
+from sarathi.metrics.constants import SequenceMetricsHistogram
 from sarathi.model_executor import set_random_seed
 from sarathi.model_executor.attention import set_attention_backend
 from sarathi.model_executor.model_runner import ModelRunner
@@ -164,6 +165,85 @@ class BaseWorker:
     def get_model_parallel_ranks(self) -> Tuple[int, int]:
         return self.tensor_model_parallel_rank, self.pipeline_model_parallel_rank
 
+    @synchronized
+    def load_model_weights(self, *args, **kwargs):
+        return self.model_runner.load_model_weights(*args, **kwargs)
+
+    @synchronized
+    def get_cache_usage_stats(self):
+        if self.cache_engine is None or not hasattr(self.cache_engine, "get_cache_usage_stats"):
+            return None
+        return self.cache_engine.get_cache_usage_stats()
+
+    @synchronized
+    def get_cache_usage_history(self):
+        if self.cache_engine is None or not hasattr(self.cache_engine, "get_cache_usage_history"):
+            return ()
+        return self.cache_engine.get_cache_usage_history()
+
+    @synchronized
+    def get_cache_usage_transitions(self):
+        if self.cache_engine is None or not hasattr(self.cache_engine, "get_cache_usage_transitions"):
+            return ()
+        return self.cache_engine.get_cache_usage_transitions()
+
+    @synchronized
+    def get_cache_usage_summary(self):
+        if self.cache_engine is None or not hasattr(self.cache_engine, "get_cache_usage_summary"):
+            return None
+        return self.cache_engine.get_cache_usage_summary()
+
+    @synchronized
+    def evaluate_cache_usage_suite_profile(self, suite_summary, profile_name):
+        from sarathi.worker.cache_engine.vATTN_cache_engine import (
+            compare_vattention_cache_validation_suite_to_named_profile,
+        )
+
+        return compare_vattention_cache_validation_suite_to_named_profile(
+            suite_summary,
+            profile_name,
+        )
+
+    @synchronized
+    def evaluate_cache_usage_suite_profiles(self, suite_summary, profile_names=None):
+        from sarathi.worker.cache_engine.vATTN_cache_engine import (
+            compare_vattention_cache_validation_suite_to_named_profiles,
+        )
+
+        return compare_vattention_cache_validation_suite_to_named_profiles(
+            suite_summary,
+            profile_names=profile_names,
+        )
+
+    @synchronized
+    def select_cache_usage_suite_profile(self, suite_summary, profile_names=None):
+        from sarathi.worker.cache_engine.vATTN_cache_engine import (
+            select_vattention_cache_validation_profile,
+        )
+
+        return select_vattention_cache_validation_profile(
+            suite_summary,
+            profile_names=profile_names,
+        )
+
+    @synchronized
+    def recommend_cache_usage_suite_profile(
+        self,
+        suite_summary,
+        *,
+        preferred_profile="bounded_mla_suite_v1",
+        fallback_profiles=None,
+    ):
+        from sarathi.worker.cache_engine.vATTN_cache_engine import (
+            recommend_vattention_cache_validation_profile,
+        )
+
+        return recommend_vattention_cache_validation_profile(
+            suite_summary,
+            preferred_profile=preferred_profile,
+            fallback_profiles=fallback_profiles,
+        )
+
     def on_step_completed(
         self, scheduler_outputs: SchedulerOutputs, sampler_outputs: SamplerOutputs
     ) -> None:
@@ -175,6 +255,7 @@ class BaseWorker:
         self,
         scheduler_outputs: SchedulerOutputs,
         preempted_seq: Optional[List] = None,
+        model_runner_kwargs: Optional[dict] = None,
     ) -> Optional[SamplerOutputs]:
         
         batch_stage_start_time = time.monotonic()
@@ -188,9 +269,53 @@ class BaseWorker:
         sampler_outputs = self.model_runner.run(
             seq_metadata_list,
             self.gpu_cache,
+            model_kwargs=model_runner_kwargs,
         )
 
         self.on_step_completed(scheduler_outputs, sampler_outputs)
+
+        get_allocator_metrics = getattr(
+            self.cache_engine, "get_request_allocator_metrics", None
+        )
+        push_request_metric = getattr(self.metrics_store, "push_request_metric", None)
+        get_request_id = getattr(self.metrics_store, "_get_seq_id", None)
+        if (
+            get_allocator_metrics is not None
+            and push_request_metric is not None
+            and get_request_id is not None
+        ):
+            # Emit allocator metrics only once per request and only from one
+            # tensor-parallel rank to avoid duplicate rows per Request Id.
+            if not hasattr(self, "_allocator_metrics_emitted_seq_ids"):
+                self._allocator_metrics_emitted_seq_ids = set()
+            should_emit_allocator_metrics = (
+                self.tensor_model_parallel_rank == 0
+                and self.pipeline_model_parallel_rank == 0
+            )
+            for seq_metadata in seq_metadata_list:
+                if not seq_metadata.seq.is_finished():
+                    continue
+                if seq_metadata.seq.state.is_ignore_finished:
+                    continue
+                if not should_emit_allocator_metrics:
+                    continue
+                if seq_metadata.seq.seq_id in self._allocator_metrics_emitted_seq_ids:
+                    continue
+                allocator_metrics = get_allocator_metrics(seq_metadata.seq.seq_id)
+                if not allocator_metrics:
+                    continue
+                request_id = get_request_id(seq_metadata.seq.seq_id)
+                push_request_metric(
+                    SequenceMetricsHistogram.KV_BLOCKS_MAPPED,
+                    request_id,
+                    float(allocator_metrics["mapped_blocks"]),
+                )
+                push_request_metric(
+                    SequenceMetricsHistogram.KV_FRAGMENTATION_PERCENT,
+                    request_id,
+                    float(allocator_metrics["fragmentation_percent"]),
+                )
+                self._allocator_metrics_emitted_seq_ids.add(seq_metadata.seq.seq_id)
         self.cache_engine.on_step_completion(seq_metadata_list)
         
 
@@ -206,6 +331,113 @@ class BaseWorker:
         )
 
         return sampler_outputs #, self.cache_engine.num_free_blocks()
+
+    @torch.inference_mode()
+    def execute_model_with_attention_wrapper(
+        self,
+        scheduler_outputs: SchedulerOutputs,
+        projection_weights,
+        *,
+        caches=None,
+        softmax_scale: Optional[float] = None,
+        preempted_seq: Optional[List] = None,
+    ) -> Optional[SamplerOutputs]:
+        model_runner_kwargs = {
+            "projection_weights": projection_weights,
+        }
+        if caches is not None:
+            model_runner_kwargs["caches"] = caches
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.execute_model(
+            scheduler_outputs,
+            preempted_seq=preempted_seq,
+            model_runner_kwargs=model_runner_kwargs,
+        )
+
+    @torch.inference_mode()
+    def execute_model_with_installed_attention_wrapper(
+        self,
+        scheduler_outputs: SchedulerOutputs,
+        *,
+        mlp_weights=None,
+        caches=None,
+        softmax_scale: Optional[float] = None,
+        preempted_seq: Optional[List] = None,
+    ) -> Optional[SamplerOutputs]:
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if caches is not None:
+            model_runner_kwargs["caches"] = caches
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.execute_model(
+            scheduler_outputs,
+            preempted_seq=preempted_seq,
+            model_runner_kwargs=(model_runner_kwargs or None),
+        )
+
+    @synchronized
+    def prefill_tokens_with_installed_attention_wrapper(
+        self,
+        token_ids: torch.Tensor,
+        *,
+        mlp_weights=None,
+        softmax_scale: Optional[float] = None,
+    ):
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.model_runner.run_prefill_tokens(
+            token_ids,
+            self.gpu_cache,
+            model_kwargs=(model_runner_kwargs or None),
+        )
+
+    @synchronized
+    def decode_tokens_with_installed_attention_wrapper(
+        self,
+        token_ids: torch.Tensor,
+        caches,
+        *,
+        mlp_weights=None,
+        softmax_scale: Optional[float] = None,
+    ):
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.model_runner.run_decode_tokens(
+            token_ids,
+            caches,
+            self.gpu_cache,
+            model_kwargs=(model_runner_kwargs or None),
+        )
+
+    @synchronized
+    def generate_greedy_with_installed_attention_wrapper(
+        self,
+        token_ids: torch.Tensor,
+        max_new_tokens: int,
+        *,
+        mlp_weights=None,
+        softmax_scale: Optional[float] = None,
+    ):
+        model_runner_kwargs = {}
+        if mlp_weights is not None:
+            model_runner_kwargs["mlp_weights"] = mlp_weights
+        if softmax_scale is not None:
+            model_runner_kwargs["softmax_scale"] = softmax_scale
+        return self.model_runner.run_greedy_generation(
+            token_ids,
+            max_new_tokens,
+            self.gpu_cache,
+            model_kwargs=(model_runner_kwargs or None),
+        )
 
     @synchronized
     def get_metrics_store(self) -> MetricsStore:

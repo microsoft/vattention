@@ -11,7 +11,7 @@ from sarathi import LLMEngine, SamplingParams
 from sarathi.benchmark.config import Config
 from sarathi.benchmark.entities import Request
 from sarathi.benchmark.request_generator import RequestGeneratorRegistry
-from sarathi.benchmark.types import ReplicaResourceMapping, ResourceMapping
+from sarathi.benchmark.sarathi_types import ReplicaResourceMapping, ResourceMapping
 from sarathi.benchmark.utils.random import set_seeds
 from sarathi.config import MetricsConfig
 from sarathi.metrics.metrics_store import MetricsStore

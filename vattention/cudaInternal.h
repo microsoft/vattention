@@ -42,10 +42,10 @@ u64 do_cuda_init(int device, u64 page_size)
     return do_cuda_default_init(device, page_size);
 }
 
-u64 reserve_cuda_pages(u64 num_layers, u64 free_memory, u64 page_size)
+u64 reserve_cuda_pages(u64 free_memory, u64 page_size)
 {
     Log log;
-    u64 num_phys_blocks = get_num_phys_blocks(num_layers, free_memory, page_size);
+    u64 num_phys_blocks = get_num_phys_blocks(free_memory, page_size);
     log.log("Reserving " + std::to_string(num_phys_blocks) + " pages of size " + std::to_string(page_size) + " ...");
 
     while (cuda_pages.size() < num_phys_blocks)
@@ -59,12 +59,12 @@ u64 reserve_cuda_pages(u64 num_layers, u64 free_memory, u64 page_size)
 }
 
 /* This function must be called only after do_cuda_init */
-u64 reserve_gpu_pages(u64 num_layers, u64 free_memory, u64 page_size)
+u64 reserve_gpu_pages(u64 free_memory, u64 page_size)
 {
     if (is_uvm_backend(page_size))
-        return reserve_uvm_pages(num_layers, free_memory, page_size);
+        return reserve_uvm_pages(free_memory, page_size);
 
-    return reserve_cuda_pages(num_layers, free_memory, page_size);
+    return reserve_cuda_pages(free_memory, page_size);
 }
 
 inline void map_cuda_pages(int reqId,
@@ -83,10 +83,12 @@ inline void map_cuda_pages(int reqId,
 
 void do_cuda_kvcache_cleanup() {
     for (int i = 0; i < k_tensors.size(); i++) {
-        CHECK_CUDA(cuMemUnmap(reinterpret_cast<CUdeviceptr>(k_tensors[i].data_ptr()), virt_buff_size));
-        CHECK_CUDA(cuMemUnmap(reinterpret_cast<CUdeviceptr>(v_tensors[i].data_ptr()), virt_buff_size));
-        CHECK_CUDA(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(k_tensors[i].data_ptr()), virt_buff_size));
-        CHECK_CUDA(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(v_tensors[i].data_ptr()), virt_buff_size));
+        u64 k_bytes = k_tensors[i].storage().nbytes();
+        u64 v_bytes = v_tensors[i].storage().nbytes();
+        CHECK_CUDA(cuMemUnmap(reinterpret_cast<CUdeviceptr>(k_tensors[i].data_ptr()), k_bytes));
+        CHECK_CUDA(cuMemUnmap(reinterpret_cast<CUdeviceptr>(v_tensors[i].data_ptr()), v_bytes));
+        CHECK_CUDA(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(k_tensors[i].data_ptr()), k_bytes));
+        CHECK_CUDA(cuMemAddressFree(reinterpret_cast<CUdeviceptr>(v_tensors[i].data_ptr()), v_bytes));
     }
 
     for(int i = 0; i < cuda_pages.size(); i++)

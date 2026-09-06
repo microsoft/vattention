@@ -225,7 +225,14 @@ class DataSeries:
                 step=0,
             )
 
-        fig.write_image(f"{path}/{plot_name}.png")
+        try:
+            fig.write_image(f"{path}/{plot_name}.png")
+        except Exception as exc:
+            logger.warning(
+                "Failed to write plot image %s (%s); skipping PNG export",
+                f"{path}/{plot_name}.png",
+                exc,
+            )
         self._save_df(df, path, plot_name)
 
     def plot_cdf(self, path: str, plot_name: str, y_axis_label: str = None) -> None:
@@ -266,7 +273,14 @@ class DataSeries:
                 step=0,
             )
 
-        fig.write_image(f"{path}/{plot_name}.png")
+        try:
+            fig.write_image(f"{path}/{plot_name}.png")
+        except Exception as exc:
+            logger.warning(
+                "Failed to write plot image %s (%s); skipping PNG export",
+                f"{path}/{plot_name}.png",
+                exc,
+            )
         self._save_df(df, path, plot_name)
 
     def plot_histogram(self, path: str, plot_name: str) -> None:
@@ -305,4 +319,11 @@ class DataSeries:
                 step=0,
             )
 
-        fig.write_image(f"{path}/{plot_name}.png")
+        try:
+            fig.write_image(f"{path}/{plot_name}.png")
+        except Exception as exc:
+            logger.warning(
+                "Failed to write plot image %s (%s); skipping PNG export",
+                f"{path}/{plot_name}.png",
+                exc,
+            )
